@@ -1,0 +1,7 @@
+.pio/
+.venv/
+.vscode/
+*.pyc
+*~
+.*.un~
+.*.swp
