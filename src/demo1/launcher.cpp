@@ -7,11 +7,14 @@ TFT_eSPI tft = TFT_eSPI();
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 static Preferences prefs;
 
-// Registered demos in the launcher menu
+// Registered demos in the launcher menu (2x3 grid + Settings button)
 static const DemoApp *const DEMOS[] = {
   &DEMO_WHACK,
   &DEMO_LIFE,
   &DEMO_RAINBOW,
+  &DEMO_TAZ,
+  &DEMO_THUMB,
+  &DEMO_WEATHER,
 };
 static const int NUM_DEMOS = sizeof(DEMOS) / sizeof(DEMOS[0]);
 
@@ -133,10 +136,12 @@ enum ShellMode {
 static ShellMode shellMode = MODE_MENU;
 static const DemoApp *activeDemo = nullptr;
 static int calStep = 0;
+static bool calReturnToMenu = true;
 static int calRawX[3] = {0, 0, 0};
 static int calRawY[3] = {0, 0, 0};
 static bool touchWasDown = false;
 static uint32_t lastReleaseMs = 0;
+static uint32_t lastMenuFooterMs = 0;
 
 // ---------------------------------------------------------------------------
 // 3-Tap Calibration UI
@@ -177,10 +182,11 @@ static void drawCalibrationScreen() {
   }
 }
 
-void startCalibration(bool /*returnToMenuAfter*/) {
+void startCalibration(bool returnToMenuAfter) {
   shellMode = MODE_CALIBRATE;
   activeDemo = nullptr;
   calStep = 0;
+  calReturnToMenu = returnToMenuAfter;
   drawCalibrationScreen();
 }
 
@@ -215,58 +221,75 @@ static void handleCalibrationTap(const TouchSample &t) {
     }
 
     saveCalibrationToNvs();
-    returnToMenu();
+    if (calReturnToMenu) {
+      returnToMenu();
+    } else {
+      launchDemo(&DEMO_SETTINGS);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Home Menu / Demo Selector UI
+// Home Menu / Demo Selector UI (2-column x 3-row Grid + [SETTINGS] Button)
 // ---------------------------------------------------------------------------
+static void drawMenuFooter() {
+  tft.fillRect(0, 218, SCREEN_W, 22, 0x0841);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x0841);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "Airport: %s (%s) | Bright: %d%%%s | LDR: %d",
+           getHomeAirportIata(), getHomeTzAbbrev(),
+           getBrightnessPercent(), isAutoBrightness() ? " Auto" : "",
+           getSmoothedLdr());
+  tft.drawString(buf, SCREEN_W / 2, 229, 1);
+}
+
 static void drawMenuScreen() {
   tft.fillScreen(0x0841); // Deep slate
 
   // Top Header
-  tft.fillRect(0, 0, SCREEN_W, 30, TFT_NAVY);
-  tft.drawFastHLine(0, 30, SCREEN_W, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
+  tft.fillRect(0, 0, SCREEN_W, 25, TFT_NAVY);
+  tft.drawFastHLine(0, 25, SCREEN_W, TFT_CYAN);
+  tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-  tft.drawString("CYD-ONE : SELECT A DEMO", SCREEN_W / 2, 15, 4);
+  tft.drawString("CYD-ONE : SELECT AN APP", 8, 13, 2);
 
-  // Demo Cards
-  for (int i = 0; i < NUM_DEMOS; i++) {
-    int cardY = 34 + i * 50;
-    int cardH = 45;
-    uint16_t accent = DEMOS[i]->accentColor;
-
-    tft.fillRoundRect(16, cardY, SCREEN_W - 32, cardH, 7, 0x18E3);
-    tft.drawRoundRect(16, cardY, SCREEN_W - 32, cardH, 7, accent);
-    tft.fillRoundRect(22, cardY + 5, 7, cardH - 10, 3, accent);
-
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(TFT_WHITE, 0x18E3);
-    tft.drawString(DEMOS[i]->title, 38, cardY + 14, 2);
-
-    tft.setTextColor(TFT_LIGHTGREY, 0x18E3);
-    tft.drawString(DEMOS[i]->subtitle, 38, cardY + 32, 1);
-
-    // Play chevron badge on right
-    tft.fillRoundRect(SCREEN_W - 58, cardY + 9, 34, 27, 5, accent);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_BLACK, accent);
-    tft.drawString("GO", SCREEN_W - 41, cardY + 22, 2);
-  }
-
-  // Bottom Toolbar: [ CALIBRATE TOUCH ] button
-  tft.fillRoundRect(60, 190, 200, 32, 6, 0x2945);
-  tft.drawRoundRect(60, 190, 200, 32, 6, TFT_CYAN);
+  // [SETTINGS] button in top-right header
+  tft.fillRoundRect(232, 3, 84, 19, 4, 0x2945);
+  tft.drawRoundRect(232, 3, 84, 19, 4, TFT_CYAN);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString("CALIBRATE TOUCHSCREEN", SCREEN_W / 2, 206, 2);
+  tft.drawString("SETTINGS", 274, 12, 1);
 
-  // Footer info
-  int ldr = analogRead(LDR_PIN);
-  tft.setTextColor(TFT_DARKGREY, 0x0841);
-  tft.drawString("ELEGOO 2.8\" ESP32 (ILI9341) | LDR: " + String(ldr), SCREEN_W / 2, 231, 1);
+  // 2x3 Grid of App Cards (colW = 148, cardH = 56, rowStep = 62)
+  for (int i = 0; i < NUM_DEMOS; i++) {
+    int col = i % 2;
+    int row = i / 2;
+    int cardX = (col == 0) ? 8 : 164;
+    int cardY = 31 + row * 62;
+    int cardW = 148;
+    int cardH = 56;
+    uint16_t accent = DEMOS[i]->accentColor;
+
+    tft.fillRoundRect(cardX, cardY, cardW, cardH, 6, 0x18E3);
+    tft.drawRoundRect(cardX, cardY, cardW, cardH, 6, accent);
+    tft.fillRoundRect(cardX + 4, cardY + 5, 5, cardH - 10, 2, accent);
+
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, 0x18E3);
+    tft.drawString(DEMOS[i]->title, cardX + 14, cardY + 7, 2);
+
+    tft.setTextColor(TFT_LIGHTGREY, 0x18E3);
+    tft.drawString(DEMOS[i]->subtitle, cardX + 14, cardY + 28, 1);
+
+    // Subtle accent corner badge
+    tft.fillRoundRect(cardX + cardW - 26, cardY + cardH - 18, 22, 14, 3, accent);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_BLACK, accent);
+    tft.drawString("GO", cardX + cardW - 15, cardY + cardH - 11, 1);
+  }
+
+  drawMenuFooter();
 }
 
 void returnToMenu() {
@@ -277,7 +300,7 @@ void returnToMenu() {
   drawMenuScreen();
 }
 
-static void launchDemo(const DemoApp *demo) {
+void launchDemo(const DemoApp *demo) {
   activeDemo = demo;
   shellMode = MODE_DEMO;
   touchWasDown = true; // Require fresh tap inside demo
@@ -289,20 +312,24 @@ static void launchDemo(const DemoApp *demo) {
 }
 
 static void handleMenuTap(const TouchSample &t) {
-  // Check Demo Cards
+  // Check [SETTINGS] button in top-right header (x: 228..319, y: 0..27) or bottom status bar (y >= 216)
+  if ((t.x >= 228 && t.y <= 27) || t.y >= 216) {
+    launchDemo(&DEMO_SETTINGS);
+    return;
+  }
+
+  // Check 2x3 App Cards
   for (int i = 0; i < NUM_DEMOS; i++) {
-    int cardY = 34 + i * 50;
-    int cardH = 45;
-    if (t.x >= 16 && t.x <= SCREEN_W - 16 && t.y >= cardY && t.y <= cardY + cardH) {
+    int col = i % 2;
+    int row = i / 2;
+    int cardX = (col == 0) ? 8 : 164;
+    int cardY = 31 + row * 62;
+    int cardW = 148;
+    int cardH = 56;
+    if (t.x >= cardX && t.x <= cardX + cardW && t.y >= cardY && t.y <= cardY + cardH) {
       launchDemo(DEMOS[i]);
       return;
     }
-  }
-
-  // Check [ CALIBRATE TOUCHSCREEN ] button (x: 60..260, y: 190..222)
-  if (t.x >= 56 && t.x <= 264 && t.y >= 186 && t.y <= 226) {
-    startCalibration(true);
-    return;
   }
 }
 
@@ -328,6 +355,9 @@ void setup() {
   tft.init();
   tft.setRotation(1); // Landscape 320x240
 
+  // Load saved brightness (Auto ON by default) & Home Airport/Timezone from NVS
+  initSettings();
+
   // Initialize XPT2046 Touchscreen on VSPI pins
   ts.begin();
   SPI.end();
@@ -344,9 +374,15 @@ void setup() {
 
 void loop() {
   updateRgbLed();
+  updateBrightnessLoop();
 
   TouchSample t = readTouch();
   uint32_t now = millis();
+
+  if (shellMode == MODE_MENU && (now - lastMenuFooterMs >= 600)) {
+    lastMenuFooterMs = now;
+    drawMenuFooter();
+  }
 
   if (t.touched) {
     if (!touchWasDown && (now - lastReleaseMs > 70)) {

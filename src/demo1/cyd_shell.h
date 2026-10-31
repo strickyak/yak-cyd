@@ -17,6 +17,7 @@
 #define LED_G_PIN    16
 #define LED_B_PIN    17
 #define LDR_PIN      34
+#define TFT_BL_PIN   21
 
 static const int SCREEN_W = 320;
 static const int SCREEN_H = 240;
@@ -49,8 +50,37 @@ void setRgbLed(bool r, bool g, bool b, uint32_t durationMs = 0);
 TouchSample readTouch();
 void returnToMenu();
 void startCalibration(bool returnToMenuAfter = true);
+void launchDemo(const DemoApp *demo);
+
+// Settings & System State (provided by demo_settings.cpp)
+void initSettings();
+void updateBrightnessLoop();
+bool isAutoBrightness();
+void setAutoBrightness(bool enabled, bool save = true);
+int  getBrightnessPercent();
+void setManualBrightnessPercent(int pct, bool save = true);
+int  getSmoothedLdr();
+
+// Home Airport & Timezone (provided by demo_settings.cpp)
+const char *getHomeAirportIata(); // e.g. "ATL", "SFO"
+const char *getHomeAirportIcao(); // e.g. "KATL", "KSFO"
+const char *getHomeAirportName(); // e.g. "Atlanta, GA"
+const char *getHomeTzAbbrev();    // e.g. "ET", "PT"
+String formatUtcToHomeTz(int utcHour, int utcMin);
+String getCurrentLocalTimeString();
+void syncNtpTimezone();
+void openWifiConfigFromSettings(bool returnToSettings);
+
+// Shared Wi-Fi helpers (provided by demo_wifi.cpp)
+bool ensureWifiOrPrompt();
+bool handleWifiPromptTap(const TouchSample &t);
 
 // Demo registrations
 extern const DemoApp DEMO_WHACK;
 extern const DemoApp DEMO_LIFE;
 extern const DemoApp DEMO_RAINBOW;
+extern const DemoApp DEMO_TAZ;
+extern const DemoApp DEMO_THUMB;
+extern const DemoApp DEMO_WEATHER;
+extern const DemoApp DEMO_WIFI;
+extern const DemoApp DEMO_SETTINGS;
