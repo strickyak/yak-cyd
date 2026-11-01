@@ -11,7 +11,7 @@ This guide explains how to write, compile, emulate, debug, and publish games and
   - **Touchscreen**: XPT2046 resistive touch controller (`os_read_touch()` returns calibrated screen coordinates).
   - **Peripherals**: Active-low RGB LED (`os_set_rgb_led`), Light Dependent Resistor (`os_read_ldr`), internal temperature sensor (`os_read_cpu_temp`), and 3 unified VFS trees (`/flash` LittleFS, `/sd` MicroSD card, `/net` Wi-Fi HTTP Superhighway).
 - **Zero Flash Wear Execution**:
-  - `.lapp` binaries compiled with `bin/lcode` have `LAKATOS_APP_FLAG_LCODE = 1` in their 128-byte SHA-256 `LakatosAppHeader` and contain a compact `LCOD` bytecode module (typically `1 KB – 16 KB`).
+  - `.lapp` binaries compiled with `bin/lakat` have `LAKATOS_APP_FLAG_LCODE = 1` in their 128-byte SHA-256 `LakatosAppHeader` and contain a compact `LCOD` bytecode module (typically `1 KB – 16 KB`).
   - When selected in Lakatos OS (from `/flash`, `/sd`, or `/net`), the `.lapp` streams directly into ESP32 RAM and runs inside the resident C++ LCode VM (`lakatosRunLCodeApp`) with **zero Flash erases**.
 - **Flat 32-Bit Memory Arena (Up to 128 KB)**:
   - `0x00000 .. 0x000FF`: Null guard page (`256 B`, traps null pointer dereferences).
@@ -23,36 +23,36 @@ This guide explains how to write, compile, emulate, debug, and publish games and
 
 ---
 
-## 2. Toolchain CLI (`./bin/lcode`)
+## 2. Toolchain CLI (`./bin/lakat`)
 
 Build the toolchain binary (if not already built):
 
 ```bash
-make lcode-tool
+make lakat-tool
 # or directly:
-cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
+cd tools/lcode && GOWORK=off go build -o ../../bin/lakat ./cmd/lakat
 ```
 
 ### Subcommands
 
 1. **Compile `.lgolf` to `.lapp`**:
    ```bash
-   ./bin/lcode compile -title "My Game" -o build/apps/mygame.lapp apps/mygame/mygame.lgolf
+   ./bin/lakat compile -title "My Game" -o build/apps/mygame.lapp apps/mygame/mygame.lgolf
    ```
    - Use `-S` to inspect generated `.lasm` assembly.
 2. **Run & Test in Headless 320×240 Emulator**:
    ```bash
-   ./bin/lcode run --steps 300000 --ascii --dump-ppm /tmp/screen.ppm build/apps/mygame.lapp
+   ./bin/lakat run --steps 300000 --ascii --dump-ppm /tmp/screen.ppm build/apps/mygame.lapp
    ```
    - Inject touch events with `--tap x,y` (can be repeated, e.g., `--tap 160,120 --tap 30,12`).
    - Always test that your game renders properly with `--ascii` (or `--dump-ppm`) and exits cleanly (`exit=0`) when its top-left `HOME` button (`x <= 64, y < 25`) is tapped!
 3. **Disassemble `.lapp`**:
    ```bash
-   ./bin/lcode dis build/apps/mygame.lapp
+   ./bin/lakat dis build/apps/mygame.lapp
    ```
 4. **Upload `.lapp` to the Superhighway (`/net`)**:
    ```bash
-   ./bin/lcode upload -url http://pizga.net:1908/ build/apps/mygame.lapp mygame.lapp
+   ./bin/lakat upload -url http://pizga.net:1908/ build/apps/mygame.lapp mygame.lapp
    ```
    - Optional Basic Auth can be passed via `-u user:pass` or environment variables `CYD_SH_USER` / `CYD_SH_PASS`.
 
@@ -234,22 +234,22 @@ func main() {
 
 Developers and AI agents have two complementary tools for inspecting the display, injecting inputs, and remotely controlling the CYD:
 
-### 6.1 Reading the Display & Testing Touch (`./bin/lcode run`)
+### 6.1 Reading the Display & Testing Touch (`./bin/lakat run`)
 
 Rather than reading pixels back over the physical SPI bus, the host emulator in `tools/lcode/pkg/lcode/vm.go` executes the exact same `.lapp` bytecode against a virtual `320×240` `uint16` `RGB565` framebuffer (`VM.Screen[240][320]`):
 
 - **ASCII Screen Snapshot (`80×30`)**:
   ```bash
-  ./bin/lcode run --steps 400000 --ascii build/apps/life.lapp
+  ./bin/lakat run --steps 400000 --ascii build/apps/life.lapp
   ```
 - **Exact `320×240` Pixel Image Dump (`.ppm`)**:
   ```bash
-  ./bin/lcode run --steps 400000 --dump-ppm /tmp/screen.ppm build/apps/life.lapp
+  ./bin/lakat run --steps 400000 --dump-ppm /tmp/screen.ppm build/apps/life.lapp
   ```
 - **Deterministic Touch Injection (`--tap x,y`)**:
   Queue one or more synthetic stylus taps into `os_read_touch()` to verify button hitboxes (such as the top-left `HOME` button at `30,12`):
   ```bash
-  ./bin/lcode run --steps 400000 --tap 180,12 --tap 30,12 build/apps/life.lapp
+  ./bin/lakat run --steps 400000 --tap 180,12 --tap 30,12 build/apps/life.lapp
   ```
 - **Virtual VFS Root (`-vfs <dir>`)**:
   Mount a local host directory as `/` so `/flash/...`, `/sd/...`, and `/net/...` file reads/writes and `tft_draw_png_file` / `tft_draw_jpg_file` calls can be tested offline.
@@ -268,19 +268,19 @@ When the physical CYD is connected via USB (`/dev/ttyUSB0` at `115200` baud), `h
 | `dev [on\|off]` | Queries or toggles `DEVELOPER` mode (shows the Core 0 white/yellow touch indicator dot and logs `[DEV]` events for button clicks, VFS file opens/reads/writes, image decoding, and app launches). |
 | `config` | Opens the interactive `CONFIG` screen on the device. |
 
-### 6.3 Using `./bin/lcode tether` for Live Logs & Serial Commands
+### 6.3 Using `./bin/lakat tether` for Live Logs & Serial Commands
 
-`./bin/lcode tether` connects directly to the CYD over USB serial (default `--wire=/dev/ttyUSB0`, or `--wire=/dev/ttyACM0`), streams log output to `stdout`, and sends lines read from `stdin` (or positional arguments) to the CYD:
+`./bin/lakat tether` connects directly to the CYD over USB serial (default `--wire=/dev/ttyUSB0`, or `--wire=/dev/ttyACM0`), streams log output to `stdout`, and sends lines read from `stdin` (or positional arguments) to the CYD:
 
 ```bash
 # Interactive cooked-stdin session (type commands + Enter, Ctrl-D or Ctrl-C to exit):
-./bin/lcode tether --wire=/dev/ttyUSB0
+./bin/lakat tether --wire=/dev/ttyUSB0
 
 # One-shot scripted commands with a 1.5s response drain:
-./bin/lcode tether --wire=/dev/ttyUSB0 -drain 1500ms info "dev on" "ls /flash"
+./bin/lakat tether --wire=/dev/ttyUSB0 -drain 1500ms info "dev on" "ls /flash"
 
 # Pipe commands from stdin:
-printf "info\nls /net\n" | ./bin/lcode tether -drain 2s
+printf "info\nls /net\n" | ./bin/lakat tether -drain 2s
 ```
 
 When `DEVELOPER` mode is enabled (either via the `[x] DEVELOPER` checkbox on the `CONFIG` screen or by sending `dev on` over `tether`), the CYD renders the Core 0 white/yellow touch indicator dot and logs `[DEV]` telemetry to serial whenever buttons are pressed, VFS files or directories are opened/read/written, images are decoded, or apps are launched/exited.

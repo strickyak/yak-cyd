@@ -96,7 +96,7 @@ func cmdTether(args []string) {
 		port, err := OpenSerial(options)
 		if err != nil {
 			if !*reconnect {
-				fmt.Fprintf(os.Stderr, "lcode tether: cannot open %s: %v\n", options.PortName, err)
+				fmt.Fprintf(os.Stderr, "lakat tether: cannot open %s: %v\n", options.PortName, err)
 				os.Exit(1)
 			}
 			time.Sleep(300 * time.Millisecond)

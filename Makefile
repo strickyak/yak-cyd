@@ -1,8 +1,8 @@
 PIO ?= .venv/bin/python -m platformio
 PYTHON ?= python3
-LCODE ?= ./bin/lcode
+LAKAT ?= ./bin/lakat
 
-.PHONY: all lakatos os build-lakatos lcode-tool apps demo1 demo2 build-demo1 build-demo2 monitor clean
+.PHONY: all lakatos os build-lakatos lakat-tool lcode-tool apps demo1 demo2 build-demo1 build-demo2 monitor clean
 
 all:
 	@echo "================================================================"
@@ -11,7 +11,7 @@ all:
 	@echo "  make lakatos        Build LCode .lapp apps, compile & upload Lakatos OS"
 	@echo "  make os             Alias for 'make lakatos'"
 	@echo "  make build-lakatos  Build LCode .lapp apps & compile Lakatos OS"
-	@echo "  make lcode-tool     Build ./bin/lcode Go compiler/asm/dis/emulator/uploader"
+	@echo "  make lakat-tool     Build ./bin/lakat Go compiler/asm/dis/emulator/uploader/tether"
 	@echo "  make apps           Compile LCode .lgolf apps into build/apps/*.lapp"
 	@echo "  make demo1          Compile and upload demo1 (src/demo1/) to CYD"
 	@echo "  make demo2          Compile and upload demo2 (src/demo2/) to CYD"
@@ -21,14 +21,16 @@ all:
 	@echo "  make clean          Clean PlatformIO and .lapp build artifacts"
 	@echo "================================================================"
 
-lcode-tool:
+lakat-tool:
 	mkdir -p bin
-	cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
+	cd tools/lcode && GOWORK=off go build -o ../../bin/lakat ./cmd/lakat
 
-apps: lcode-tool
+lcode-tool: lakat-tool
+
+apps: lakat-tool
 	mkdir -p build/apps
-	$(LCODE) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
-	$(LCODE) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
+	$(LAKAT) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
+	$(LAKAT) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload
