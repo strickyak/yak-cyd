@@ -19,7 +19,7 @@ const (
 	NullGuardSize   = 256
 	StringPoolBase  = 0x0100
 	OsScratchSize   = 512
-	MaxFrameBytes   = 32768
+	MaxFrameBytes   = 4096
 	HeapBlockHdrLen = 8
 )
 
@@ -87,9 +87,12 @@ type VM struct {
 	ShUrl        string
 	TouchQueue   []TouchEvent
 	CurrentTouch TouchEvent
-	SerialIn     []byte
-	Stdout       io.Writer
-	VfsRoot      string
+	SerialIn       []byte
+	Stdout         io.Writer
+	VfsRoot        string
+	PrefetchStatus int
+	PrefetchBytes  uint32
+	PrefetchBuf    []byte
 }
 
 func NewVM(lappOrLcod []byte) (*VM, error) {
@@ -1732,9 +1735,17 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		if ln == 0 || vm.checkAddr(bufAddr, int(ln)) != nil {
+		var src []byte
+		if bufAddr == 0 {
+			if ln > 0 && int(ln) <= len(vm.PrefetchBuf) {
+				src = vm.PrefetchBuf[:ln]
+			}
+		} else if ln > 0 && vm.checkAddr(bufAddr, int(ln)) == nil {
+			src = vm.Memory[bufAddr : bufAddr+ln]
+		}
+		if len(src) == 0 {
 			vm.push(0)
-		} else if vm.drawPngBytes(vm.Memory[bufAddr:bufAddr+ln], int(int32(x)), int(int32(y))) {
+		} else if vm.drawPngBytes(src, int(int32(x)), int(int32(y))) {
 			vm.push(1)
 		} else {
 			vm.push(0)
@@ -1785,9 +1796,17 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		if ln == 0 || vm.checkAddr(bufAddr, int(ln)) != nil {
+		var src []byte
+		if bufAddr == 0 {
+			if ln > 0 && int(ln) <= len(vm.PrefetchBuf) {
+				src = vm.PrefetchBuf[:ln]
+			}
+		} else if ln > 0 && vm.checkAddr(bufAddr, int(ln)) == nil {
+			src = vm.Memory[bufAddr : bufAddr+ln]
+		}
+		if len(src) == 0 {
 			vm.push(0)
-		} else if vm.drawJpgBytes(vm.Memory[bufAddr:bufAddr+ln], int(int32(x)), int(int32(y)), int(int32(scale))) {
+		} else if vm.drawJpgBytes(src, int(int32(x)), int(int32(y)), int(int32(scale))) {
 			vm.push(1)
 		} else {
 			vm.push(0)
@@ -1815,6 +1834,50 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.push(uint32(cfg.Width))
 			vm.push(uint32(cfg.Height))
 		}
+	case SysPrefetchStart:
+		maxLen, _ := vm.pop()
+		bufAddr, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if maxLen == 0 || (bufAddr != 0 && vm.checkAddr(bufAddr, int(maxLen)) != nil) {
+			vm.PrefetchStatus = -1
+			vm.PrefetchBytes = 0
+			vm.push(0)
+			return nil
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		data, err := os.ReadFile(hostPath)
+		if err != nil || len(data) == 0 {
+			vm.PrefetchStatus = -1
+			vm.PrefetchBytes = 0
+			vm.push(0)
+			return nil
+		}
+		n := len(data)
+		if n > int(maxLen) {
+			n = int(maxLen)
+		}
+		if bufAddr == 0 {
+			if cap(vm.PrefetchBuf) < int(maxLen) {
+				vm.PrefetchBuf = make([]byte, maxLen)
+			} else {
+				vm.PrefetchBuf = vm.PrefetchBuf[:maxLen]
+			}
+			copy(vm.PrefetchBuf[:n], data[:n])
+		} else {
+			copy(vm.Memory[bufAddr:int(bufAddr)+n], data[:n])
+		}
+		vm.PrefetchBytes = uint32(n)
+		vm.PrefetchStatus = 2 // READY
+		vm.push(1)
+	case SysPrefetchStatus:
+		vm.push(uint32(int32(vm.PrefetchStatus)))
+		vm.push(vm.PrefetchBytes)
+	case SysPrefetchCancel:
+		vm.PrefetchStatus = 0
+		vm.PrefetchBytes = 0
 
 	// Touch, Keyboard, LED & Sensors
 	case SysReadTouch:
@@ -1867,6 +1930,92 @@ func (vm *VM) execSyscall(sysId byte) error {
 		vm.push(425) // 42.5 C
 
 	// VFS & Serial
+	case SysFsLs:
+		maxEnt, _ := vm.pop()
+		entAddr, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		const entryStride = 88 // sizeof(LakatosFsEntry) on Xtensa ESP32
+		if maxEnt > 0 {
+			if err := vm.checkAddr(entAddr, int(maxEnt)*entryStride); err != nil {
+				return err
+			}
+		}
+		if vm.VfsRoot == "" {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		entries, err := os.ReadDir(hostPath)
+		if err != nil {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		count := 0
+		for _, de := range entries {
+			if count >= int(maxEnt) {
+				break
+			}
+			base := int(entAddr) + count*entryStride
+			for i := 0; i < entryStride; i++ {
+				vm.Memory[base+i] = 0
+			}
+			nm := []byte(de.Name())
+			if len(nm) > 63 {
+				nm = nm[:63]
+			}
+			copy(vm.Memory[base:base+63], nm)
+			var sz int64
+			var mt int64
+			if info, err := de.Info(); err == nil {
+				sz = info.Size()
+				mt = info.ModTime().Unix()
+			}
+			binary.LittleEndian.PutUint64(vm.Memory[base+64:base+72], uint64(sz))
+			binary.LittleEndian.PutUint64(vm.Memory[base+72:base+80], uint64(mt))
+			if de.IsDir() {
+				vm.Memory[base+80] = 1
+			}
+			count++
+		}
+		vm.push(uint32(count))
+	case SysFsStat:
+		entAddr, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		const entryStride = 88
+		if err := vm.checkAddr(entAddr, entryStride); err != nil {
+			return err
+		}
+		if vm.VfsRoot == "" {
+			vm.push(0)
+			return nil
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		info, err := os.Stat(hostPath)
+		if err != nil {
+			vm.push(0)
+			return nil
+		}
+		base := int(entAddr)
+		for i := 0; i < entryStride; i++ {
+			vm.Memory[base+i] = 0
+		}
+		nm := []byte(info.Name())
+		if len(nm) > 63 {
+			nm = nm[:63]
+		}
+		copy(vm.Memory[base:base+63], nm)
+		binary.LittleEndian.PutUint64(vm.Memory[base+64:base+72], uint64(info.Size()))
+		binary.LittleEndian.PutUint64(vm.Memory[base+72:base+80], uint64(info.ModTime().Unix()))
+		if info.IsDir() {
+			vm.Memory[base+80] = 1
+		}
+		vm.push(1)
 	case SysFsRead:
 		ln, _ := vm.pop()
 		bufAddr, _ := vm.pop()
@@ -2135,16 +2284,42 @@ func (vm *VM) drawPngBytes(data []byte, dstX, dstY int) bool {
 		return false
 	}
 	b := img.Bounds()
-	for py := b.Min.Y; py < b.Max.Y; py++ {
-		sy := dstY + (py - b.Min.Y)
+	w := b.Dx()
+	h := b.Dy()
+	step := 1
+	if dstX < 0 {
+		boxY := dstY
+		if boxY < 0 || boxY >= 240 {
+			boxY = 0
+		}
+		boxW := 320
+		boxH := 240 - boxY
+		for step < 8 && (w/step > boxW || h/step > boxH) {
+			step++
+		}
+		sw := w / step
+		sh := h / step
+		dstX = 0
+		if boxW > sw {
+			dstX = (boxW - sw) / 2
+		}
+		dstY = boxY
+		if boxH > sh {
+			dstY = boxY + (boxH-sh)/2
+		}
+	}
+	for oy := 0; oy*step < h; oy++ {
+		sy := dstY + oy
 		if sy < 0 || sy >= 240 {
 			continue
 		}
-		for px := b.Min.X; px < b.Max.X; px++ {
-			sx := dstX + (px - b.Min.X)
+		py := b.Min.Y + oy*step
+		for ox := 0; ox*step < w; ox++ {
+			sx := dstX + ox
 			if sx < 0 || sx >= 320 {
 				continue
 			}
+			px := b.Min.X + ox*step
 			r16, g16, b16, a16 := img.At(px, py).RGBA()
 			if a16 >= 0x8000 {
 				r8 := uint16((r16 * 255) / a16)
@@ -2169,6 +2344,28 @@ func (vm *VM) drawJpgBytes(data []byte, dstX, dstY, scale int) bool {
 		return false
 	}
 	b := img.Bounds()
+	if dstX < 0 {
+		boxY := dstY
+		if boxY < 0 || boxY >= 240 {
+			boxY = 0
+		}
+		boxW := 320
+		boxH := 240 - boxY
+		scale = 0
+		for scale < 3 && ((b.Dx()>>scale) > boxW || (b.Dy()>>scale) > boxH) {
+			scale++
+		}
+		sw := b.Dx() >> scale
+		sh := b.Dy() >> scale
+		dstX = 0
+		if boxW > sw {
+			dstX = (boxW - sw) / 2
+		}
+		dstY = boxY
+		if boxH > sh {
+			dstY = boxY + (boxH-sh)/2
+		}
+	}
 	w := b.Dx() >> scale
 	h := b.Dy() >> scale
 	step := 1 << scale

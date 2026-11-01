@@ -120,7 +120,9 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
 
   if (boxW > 0 && boxH > 0) {
     scale = 0;
-    while (scale < 3 && (((int)jdec.width >> scale) > boxW || ((int)jdec.height >> scale) > boxH)) {
+    int maxW = (boxW < LAKATOS_SCREEN_W) ? LAKATOS_SCREEN_W : boxW;
+    int maxH = (boxH < LAKATOS_SCREEN_H) ? LAKATOS_SCREEN_H : boxH;
+    while (scale < 3 && (((int)jdec.width >> scale) > maxW || ((int)jdec.height >> scale) > maxH)) {
       scale++;
     }
     int sw = (int)jdec.width >> scale;
@@ -142,8 +144,9 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
                 (unsigned long)(millis() - tStart));
 
   // Note: JDR_INTR means jpgOutCallback returned 0 because the rest of the image
-  // was below SCREEN_H, which is a valid clipped render.
-  return (res == JDR_OK || res == JDR_INTR);
+  // was below SCREEN_H, and JDR_INP after jd_prepare succeeds means a truncated
+  // buffer rendered all available upper MCUs.
+  return (res == JDR_OK || res == JDR_INTR || (res == JDR_INP && jdec.width > 0));
 }
 
 } // namespace
@@ -216,5 +219,9 @@ bool lakatosDrawJpgMem(const uint8_t* data, size_t len, int x, int y, int scale)
   JpgReaderContext ctx;
   ctx.memData = data;
   ctx.memLen  = len;
+  if (x < 0) {
+    int boxY = (y >= 0 && y < LAKATOS_SCREEN_H) ? y : 0;
+    return decodeAndRenderJpg(ctx, 0, boxY, 0, LAKATOS_SCREEN_W, LAKATOS_SCREEN_H - boxY);
+  }
   return decodeAndRenderJpg(ctx, x, y, scale, 0, 0);
 }

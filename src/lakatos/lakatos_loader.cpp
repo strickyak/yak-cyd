@@ -1,5 +1,7 @@
 #include "lakatos_state.h"
 
+#include <esp_heap_caps.h>
+#include <esp_heap_caps_init.h>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
 #include <setjmp.h>
@@ -18,10 +20,17 @@
 uint8_t gLakatosAppRamArena[LAKATOS_APP_DRAM_SIZE]
     __attribute__((section(".noinit"), aligned(0x8000), used));
 
+uint8_t* gLakatosPngScratch     = nullptr;
+size_t   gLakatosPngScratchSize = 0;
+
 static const esp_partition_t* gAppSlotPart = nullptr;
 static jmp_buf gAppExitJmp;
 static volatile bool gAppRunning = false;
 static volatile int gAppLastExitCode = 0;
+
+bool lakatosIsNativeAppRunning() {
+  return gAppRunning;
+}
 
 // ---------------------------------------------------------------------------
 // App Dynamic Heap Tracker (automatically freed when app exits)
@@ -292,8 +301,29 @@ static void IRAM_ATTR mapAppFlashMmu(uint32_t flashOffset, uint32_t mapBytes) {
   spi_flash_enable_interrupts_caches_and_other_cpu();
 }
 
+extern "C" {
+extern uint8_t _data_end[];
+extern uint8_t _noinit_start[];
+}
+
 bool initLakatosLoader() {
   memset(gTrackedAllocs, 0, sizeof(gTrackedAllocs));
+
+  // Reclaim the ~15.2 KB linker alignment gap between _data_end (~0x3FFC4360)
+  // and _noinit_start (0x3FFC8000, aligned to 32 KB for gLakatosAppRamArena).
+  // Keep 12,864 bytes as a dedicated static scratch buffer for tinfl_decompressor
+  // (10,992 B) + PngDecoderState (1,856 B) so Wi-Fi/TCP never fragments it, and
+  // add the remaining ~2.6 KB to the system 8-bit heap.
+  uintptr_t gapStart = ((uintptr_t)_data_end + 15u) & ~15u;
+  uintptr_t gapEnd   = (uintptr_t)_noinit_start & ~15u;
+  if (gapEnd > gapStart) {
+    gLakatosPngScratch     = (uint8_t*)gapStart;
+    gLakatosPngScratchSize = (size_t)(gapEnd - gapStart);
+    Serial.printf("[Lakatos] PNG scratch: %u B @ 0x%08lX\r\n",
+                  (unsigned)gLakatosPngScratchSize,
+                  (unsigned long)(uintptr_t)gLakatosPngScratch);
+  }
+
   gAppSlotPart = esp_partition_find_first(
       ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "app_slot");
   uintptr_t arenaAddr = (uintptr_t)gLakatosAppRamArena;
@@ -548,6 +578,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   }
 
   gAppRunning = false;
+  lakatosPrefetchFree();
   cleanupAppHeap();
   tft.setTextDatum(TL_DATUM);
 

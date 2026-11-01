@@ -37,13 +37,18 @@ All requests target `<base_url><escaped_remote_path>`.
   ```
   *(Aliases accepted by server: `LIST`, or `GET` when the target is a directory.)*
 - **Success Response**: `200 OK`, `Content-Type: text/plain; charset=utf-8`
-- **Response Body**: Zero or more `\n`-terminated lines sorted lexicographically by entry name:
+- **Response Body**:
+  1. An initial `\n`-terminated line with the non-negative decimal integer count of files and directories that will follow (`<N>`).
+  2. `<N>` `\n`-terminated entry lines sorted lexicographically by entry name.
+  3. A final `\n`-terminated line containing only a `;` character.
   ```text
+  2
   2026-10-31 21:05:09 16 Filename might have spaces and #@%$%? funny chars!
   2026-10-31 21:05:09 4096 docs/
+  ;
   ```
-  - If the target is an empty directory, the response body is empty (`0` bytes).
-  - If the target is a single regular file, a single line is returned for that file's base name.
+  - If the target is an empty directory, `0\n;\n` is returned (distinguishing an empty directory from a crash or empty/truncated HTTP response).
+  - If the target is a single regular file, `1\n` followed by the single entry line and `;\n` is returned.
 
 ### 3.2 `GET` — Read File Contents
 - **Request**:
@@ -128,21 +133,27 @@ All requests target `<base_url><escaped_remote_path>`.
 
 ## 4. Parsing Specifications
 
-### 4.1 Parsing `LS` Lines
-Each line (with trailing `\n` or `\r\n` stripped) has the grammar:
-```text
-<YYYY-mm-dd> <HH:MM:SS> <size> <name>[/]
-```
-1. **Split on the first 3 ASCII spaces (`' '`)**:
-   - Field 1 (`10` chars): Date in UTC (`YYYY-mm-dd`).
-   - Field 2 (`8` chars): Time in UTC (`HH:MM:SS`).
-   - Field 3 (`1+` digits): Decimal integer `<size>` in bytes (`int64`).
-   - Field 4 (remainder of line): Entry name, with `/` appended if and only if the entry is a directory.
-2. **Directory Detection**:
-   - Since POSIX filenames cannot contain `/`, a trailing `/` on Field 4 unambiguously indicates `IsDir = true`.
-   - Strip the trailing `/` to obtain the clean entry name.
-3. **Why splitting on the first 3 spaces is exact**:
-   - Even if a filename begins with a space, contains multiple consecutive spaces, or contains arbitrary punctuation (`#@%$%?`), everything after the space following `<size>` belongs verbatim to the filename.
+### 4.1 Parsing `LS` Responses
+1. **Framing & Completeness Validation**:
+   - Line 1 (initial line) must be a base-10 non-negative integer `<expected_count>`.
+   - Exactly `<expected_count>` entry lines must follow before the final `;` line.
+   - The final line must be `;` (containing only `;` after stripping `\r\n`).
+   - If the response is empty, missing the `;` terminator, or the number of parsed entry lines does not equal `<expected_count>`, the client must treat the response as a failed/partial listing rather than an empty directory.
+2. **Entry Line Grammar**:
+   Each entry line (with trailing `\n` or `\r\n` stripped) has the grammar:
+   ```text
+   <YYYY-mm-dd> <HH:MM:SS> <size> <name>[/]
+   ```
+   - **Split on the first 3 ASCII spaces (`' '`)**:
+     - Field 1 (`10` chars): Date in UTC (`YYYY-mm-dd`).
+     - Field 2 (`8` chars): Time in UTC (`HH:MM:SS`).
+     - Field 3 (`1+` digits): Decimal integer `<size>` in bytes (`int64`).
+     - Field 4 (remainder of line): Entry name, with `/` appended if and only if the entry is a directory.
+   - **Directory Detection**:
+     - Since POSIX filenames cannot contain `/`, a trailing `/` on Field 4 unambiguously indicates `IsDir = true`.
+     - Strip the trailing `/` to obtain the clean entry name.
+   - **Why splitting on the first 3 spaces is exact**:
+     - Even if a filename begins with a space, contains multiple consecutive spaces, or contains arbitrary punctuation (`#@%$%?`), everything after the space following `<size>` belongs verbatim to the filename.
 
 ### 4.2 Parsing `DU` Output
 - Trim leading/trailing whitespace from the response body and parse as a base-10 `int64`.

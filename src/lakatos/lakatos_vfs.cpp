@@ -1,5 +1,6 @@
 #include "lakatos_state.h"
 #include "seed_apps.h"
+#include "seed_gallery.h"
 
 #include <HTTPClient.h>
 #include <LittleFS.h>
@@ -78,38 +79,43 @@ bool lakatosSdIsMounted() {
   return ensureSdMounted();
 }
 
+static bool ensurePrefetchWorkerStarted();
+
+static void seedLoAppFile(const char* loSubPath, const uint8_t* data, size_t len) {
+  bool needSeed = true;
+  if (LittleFS.exists(loSubPath)) {
+    File f = LittleFS.open(loSubPath, "r");
+    if (f && f.size() == len) {
+      uint8_t hdrA[128];
+      if (f.read(hdrA, 128) == 128 && memcmp(hdrA, data, 128) == 0) {
+        needSeed = false;
+      }
+    }
+    if (f) f.close();
+  }
+  if (needSeed) {
+    File f = LittleFS.open(loSubPath, "w");
+    if (f) {
+      f.write(data, len);
+      f.close();
+      Serial.printf("[Lakatos VFS] Seeded /lo%s (%u bytes)\n",
+                    loSubPath, (unsigned)len);
+    }
+  }
+}
+
 void initLakatosVfs() {
   if (LittleFS.begin(true, "/lo", 8, "spiffs")) {
     gLoMounted = true;
     Serial.println("[Lakatos VFS] Mounted /lo (LittleFS on spiffs partition).");
-
-    // Seed /lo/life.lapp if not present or if outdated
-    bool needSeed = true;
-    if (LittleFS.exists("/life.lapp")) {
-      File f = LittleFS.open("/life.lapp", "r");
-      if (f && f.size() == sizeof(kSeedApp_life)) {
-        uint8_t hdrA[128];
-        if (f.read(hdrA, 128) == 128 &&
-            memcmp(hdrA, kSeedApp_life, 128) == 0) {
-          needSeed = false;
-        }
-      }
-      if (f) f.close();
-    }
-    if (needSeed) {
-      File f = LittleFS.open("/life.lapp", "w");
-      if (f) {
-        f.write(kSeedApp_life, sizeof(kSeedApp_life));
-        f.close();
-        Serial.printf("[Lakatos VFS] Seeded /lo/life.lapp (%u bytes)\n",
-                      (unsigned)sizeof(kSeedApp_life));
-      }
-    }
+    seedLoAppFile("/life.lapp", kSeedApp_life, sizeof(kSeedApp_life));
+    seedLoAppFile("/gallery.lapp", kSeedApp_gallery, sizeof(kSeedApp_gallery));
   } else {
     Serial.println("[Lakatos VFS] ERROR: Failed to mount /lo LittleFS!");
   }
 
   ensureSdMounted();
+  ensurePrefetchWorkerStarted();
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +204,82 @@ static bool parseShLsLine(const String& rawLine, LakatosFsEntry* out) {
   return out->name[0] != '\0';
 }
 
+// Parses a complete Superhighway LS response body:
+//   Line 1: <expected_count> (decimal integer >= 0)
+//   Next <expected_count> lines: "<YYYY-mm-dd> <HH:MM:SS> <size> <name>[/]"
+//   Final line: ";"
+// Returns the number of entries stored into outEntries (0..maxEntries),
+// or -1 if the body is empty, truncated, malformed, or the entry count
+// does not match <expected_count> followed by ";".
+static int parseShLsBody(const String& body, LakatosFsEntry* outEntries,
+                         int maxEntries, int* outTotalCount = nullptr) {
+  if (outTotalCount) *outTotalCount = 0;
+  int len = body.length();
+  if (len <= 0) return -1;
+
+  int nl = body.indexOf('\n', 0);
+  if (nl < 0) return -1;
+  String countLine = body.substring(0, nl);
+  while (countLine.endsWith("\r")) {
+    countLine.remove(countLine.length() - 1);
+  }
+  countLine.trim();
+  if (countLine.length() == 0) return -1;
+  for (size_t i = 0; i < countLine.length(); i++) {
+    char c = countLine.charAt(i);
+    if (c < '0' || c > '9') return -1;
+  }
+  int expectedCount = atoi(countLine.c_str());
+  if (expectedCount < 0) return -1;
+
+  int start = nl + 1;
+  int seenCount = 0;
+  int storedCount = 0;
+  bool sawTerminator = false;
+
+  while (start <= len) {
+    if (start == len) break;
+    nl = body.indexOf('\n', start);
+    if (nl < 0) nl = len;
+    String line = body.substring(start, nl);
+    start = nl + 1;
+
+    while (line.endsWith("\r")) {
+      line.remove(line.length() - 1);
+    }
+
+    if (line == ";") {
+      sawTerminator = true;
+      while (start < len) {
+        char c = body.charAt(start++);
+        if (c != '\r' && c != '\n' && c != ' ' && c != '\t') {
+          return -1;
+        }
+      }
+      break;
+    }
+
+    if (seenCount >= expectedCount) {
+      return -1;
+    }
+
+    LakatosFsEntry tmp;
+    if (!parseShLsLine(line, &tmp)) {
+      return -1;
+    }
+    if (outEntries && storedCount < maxEntries) {
+      outEntries[storedCount++] = tmp;
+    }
+    seenCount++;
+  }
+
+  if (!sawTerminator || seenCount != expectedCount) {
+    return -1;
+  }
+  if (outTotalCount) *outTotalCount = expectedCount;
+  return storedCount;
+}
+
 // ---------------------------------------------------------------------------
 // Unified VFS Implementation
 // ---------------------------------------------------------------------------
@@ -240,29 +322,31 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
     return lsFsImpl(SD, subPath, outEntries, maxEntries);
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
-    gShClient.setNoDelay(true);
-    gShHttp.setReuse(true);
+    WiFiClient cli;
+    HTTPClient http;
+    cli.setNoDelay(true);
     String url = buildShTargetUrl(subPath);
-    if (!gShHttp.begin(gShClient, url)) return -1;
-    addShBasicAuthHeader(gShHttp);
-    int code = gShHttp.sendRequest("LS");
-    if (code < 200 || code >= 300) {
-      gShHttp.end();
+    if (!http.begin(cli, url)) {
       return -1;
     }
-    String body = gShHttp.getString();
-    gShHttp.end();
+    addShBasicAuthHeader(http);
+    int code = http.sendRequest("LS");
+    if (code < 200 || code >= 300) {
+      http.end();
+      return -1;
+    }
+    String body = http.getString();
+    http.end();
 
-    int count = 0;
-    int start = 0;
-    while (start < (int)body.length() && count < maxEntries) {
-      int nl = body.indexOf('\n', start);
-      if (nl < 0) nl = body.length();
-      String line = body.substring(start, nl);
-      if (parseShLsLine(line, &outEntries[count])) {
-        count++;
-      }
-      start = nl + 1;
+    int count = parseShLsBody(body, outEntries, maxEntries);
+    if (count < 0) {
+      int nl = body.indexOf('\n');
+      String firstLine = (nl >= 0) ? body.substring(0, nl) : body;
+      String tail = (body.length() > 20) ? body.substring(body.length() - 20) : body;
+      tail.replace("\n", "\\n");
+      tail.replace("\r", "\\r");
+      Serial.printf("[Lakatos VFS] LS %s failed framing/count check (len=%u, first='%s', tail='%s')\r\n",
+                    subPath.c_str(), (unsigned)body.length(), firstLine.c_str(), tail.c_str());
     }
     return count;
   }
@@ -303,7 +387,14 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
     }
     String body = http.getString();
     http.end();
-    return parseShLsLine(body, outEntry);
+    int totalCount = 0;
+    if (parseShLsBody(body, outEntry, 1, &totalCount) == 1 && totalCount == 1) {
+      return true;
+    }
+    if (body.endsWith("\n") && body.indexOf('\n') == (int)body.length() - 1) {
+      return parseShLsLine(body, outEntry);
+    }
+    return false;
   }
   return false;
 }
@@ -604,8 +695,7 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
     if (WiFi.status() != WL_CONNECTED) { delete s; return nullptr; }
     String url = buildShTargetUrl(subPath);
     WiFiClient* cli = nullptr;
-    if (!gShStreamBusy) {
-      gShStreamBusy = true;
+    if (__sync_bool_compare_and_swap(&gShStreamBusy, false, true)) {
       s->usesShared = true;
       s->httpPtr    = &gShHttp;
       cli           = &gShClient;
@@ -615,7 +705,9 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
       cli           = &s->ownClient;
     }
     cli->setNoDelay(true);
+    cli->setTimeout(2000);
     s->httpPtr->setReuse(true);
+    s->httpPtr->setTimeout(2500);
     if (!s->httpPtr->begin(*cli, url)) {
       if (s->usesShared) gShStreamBusy = false;
       delete s;
@@ -624,6 +716,19 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
     addShBasicAuthHeader(*s->httpPtr);
     uint32_t t0 = millis();
     int code = s->httpPtr->GET();
+    if (code < 0 && s->usesShared) {
+      // Stale keep-alive socket: close and retry once on a fresh TCP connection
+      s->httpPtr->setReuse(false);
+      s->httpPtr->end();
+      cli->stop();
+      cli->setNoDelay(true);
+      s->httpPtr->setReuse(true);
+      if (s->httpPtr->begin(*cli, url)) {
+        addShBasicAuthHeader(*s->httpPtr);
+        t0 = millis();
+        code = s->httpPtr->GET();
+      }
+    }
     Serial.printf("[TIMING] VFS-SH GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)\r\n",
                   path, code, s->httpPtr->getSize(), (unsigned long)(millis() - t0),
                   s->usesShared ? 1 : 0);
@@ -642,6 +747,8 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
   return nullptr;
 }
 
+static volatile bool gPrefetchCancelReq = false;
+
 int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
   if (!s || !buf || len == 0) return 0;
   if (s->backend == VFS_LO || s->backend == VFS_SD) {
@@ -657,9 +764,12 @@ int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
     }
     size_t total = 0;
     uint32_t startMs = millis();
+    uint32_t lastYieldMs = startMs;
+    bool onCore0 = (xPortGetCoreID() == 0);
     while (total < len &&
+           !(onCore0 && gPrefetchCancelReq) &&
            (s->httpPtr->connected() || s->stream->available() > 0) &&
-           (millis() - startMs < 8000)) {
+           (millis() - startMs < 5000)) {
       size_t avail = s->stream->available();
       if (avail > 0) {
         size_t chunk = (avail > (len - total)) ? (len - total) : avail;
@@ -670,7 +780,13 @@ int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
           startMs = millis();
         }
       } else {
-        delayMicroseconds(100);
+        uint32_t now = millis();
+        if (now - lastYieldMs >= 40) {
+          vTaskDelay(1);
+          lastYieldMs = millis();
+        } else {
+          delayMicroseconds(100);
+        }
       }
     }
     return (int32_t)total;
@@ -706,9 +822,14 @@ void lakatosFsClose(LakatosVfsStream* s) {
   } else if (s->backend == VFS_SH && s->httpPtr) {
     // If only a few trailing bytes remain (e.g. 16-byte PNG IEND), drain them
     // so HTTP Keep-Alive can reuse the open TCP socket cleanly.
-    if (s->contentLen > 0 && s->bytesRead < (uint32_t)s->contentLen &&
-        ((uint32_t)s->contentLen - s->bytesRead) <= 512) {
-      lakatosFsStreamSkip(s, (size_t)((uint32_t)s->contentLen - s->bytesRead));
+    // If more than 512 bytes remain (e.g. truncated at 100 KB or canceled),
+    // disable reuse so HTTPClient::end() closes the socket cleanly.
+    if (s->contentLen > 0 && s->bytesRead < (uint32_t)s->contentLen) {
+      if (((uint32_t)s->contentLen - s->bytesRead) <= 512) {
+        lakatosFsStreamSkip(s, (size_t)((uint32_t)s->contentLen - s->bytesRead));
+      } else {
+        s->httpPtr->setReuse(false);
+      }
     }
     Serial.printf("[TIMING] VFS-SH CLOSE read=%lu B, streamTotal=%lu ms\r\n",
                   (unsigned long)s->bytesRead,
@@ -717,4 +838,181 @@ void lakatosFsClose(LakatosVfsStream* s) {
     if (s->usesShared) gShStreamBusy = false;
   }
   delete s;
+}
+
+// ---------------------------------------------------------------------------
+// Core 0 Background File Prefetcher
+// ---------------------------------------------------------------------------
+static TaskHandle_t      gPrefetchTaskHandle   = nullptr;
+static SemaphoreHandle_t gPrefetchWakeSem      = nullptr;
+static volatile int      gPrefetchStatus       = 0; // 0=IDLE, 1=BUSY, 2=READY, -1=ERR
+static volatile uint32_t gPrefetchBytesGot     = 0;
+static volatile bool     gPrefetchWorkerActive = false;
+static char              gPrefetchPath[128];
+static uint8_t*          gPrefetchDstBuf       = nullptr;
+static size_t            gPrefetchMaxLen       = 0;
+static uint8_t*          gPrefetchOwnedBuf     = nullptr;
+static size_t            gPrefetchOwnedCap     = 0;
+
+static void prefetchWorkerTaskCore0(void* arg) {
+  (void)arg;
+  for (;;) {
+    xSemaphoreTake(gPrefetchWakeSem, portMAX_DELAY);
+    if (gPrefetchCancelReq || gPrefetchStatus != 1) {
+      gPrefetchWorkerActive = false;
+      continue;
+    }
+    gPrefetchWorkerActive = true;
+    uint32_t t0 = millis();
+    LakatosVfsStream* s = lakatosFsOpenRead(gPrefetchPath);
+    if (!s) {
+      if (!gPrefetchCancelReq) {
+        gPrefetchStatus = -1;
+      }
+      gPrefetchWorkerActive = false;
+      continue;
+    }
+
+    size_t total = 0;
+    bool err = false;
+    uint32_t lastYieldMs = millis();
+    while (total < gPrefetchMaxLen && !gPrefetchCancelReq) {
+      size_t toRead = gPrefetchMaxLen - total;
+      if (toRead > 2048) toRead = 2048;
+      int32_t got = lakatosFsStreamRead(s, gPrefetchDstBuf + total, toRead);
+      if (got < 0) {
+        err = true;
+        break;
+      }
+      if (got == 0) {
+        break; // EOF
+      }
+      total += (size_t)got;
+      gPrefetchBytesGot = (uint32_t)total;
+      if (millis() - lastYieldMs >= 40) {
+        vTaskDelay(1);
+        lastYieldMs = millis();
+      }
+    }
+
+    if (gPrefetchCancelReq) {
+      if (s->backend == VFS_SH && s->httpPtr) {
+        s->httpPtr->setReuse(false);
+      }
+      lakatosFsClose(s);
+      gPrefetchWorkerActive = false;
+      continue;
+    }
+
+    lakatosFsClose(s);
+    uint32_t elapsed = millis() - t0;
+    if (err || total == 0) {
+      gPrefetchStatus = -1;
+      Serial.printf("[TIMING] CORE0-PREFETCH ERROR %s (%lu ms)\r\n",
+                    gPrefetchPath, (unsigned long)elapsed);
+    } else {
+      gPrefetchBytesGot = (uint32_t)total;
+      gPrefetchStatus   = 2;
+      Serial.printf("[TIMING] CORE0-PREFETCH READY %s -> %lu B in %lu ms (core=%d)\r\n",
+                    gPrefetchPath, (unsigned long)total, (unsigned long)elapsed,
+                    (int)xPortGetCoreID());
+    }
+    gPrefetchWorkerActive = false;
+  }
+}
+
+static bool ensurePrefetchWorkerStarted() {
+  if (gPrefetchTaskHandle != nullptr) return true;
+  if (!gPrefetchWakeSem) {
+    gPrefetchWakeSem = xSemaphoreCreateBinary();
+    if (!gPrefetchWakeSem) return false;
+  }
+  BaseType_t ok = xTaskCreatePinnedToCore(
+      prefetchWorkerTaskCore0,
+      "lak_prefetch",
+      3072,
+      nullptr,
+      2,
+      &gPrefetchTaskHandle,
+      0 // Pin to Core 0 (PRO_CPU)
+  );
+  return (ok == pdPASS && gPrefetchTaskHandle != nullptr);
+}
+
+bool lakatosPrefetchReserve(size_t cap) {
+  if (cap == 0) return false;
+  if (!gPrefetchOwnedBuf || gPrefetchOwnedCap < cap) {
+    if (gPrefetchOwnedBuf) {
+      free(gPrefetchOwnedBuf);
+      gPrefetchOwnedBuf = nullptr;
+      gPrefetchOwnedCap = 0;
+    }
+    // Allocate the 100 KB contiguous buffer FIRST from DRAM1 before starting
+    // the worker task or allocating LCodeVM/arena structures.
+    gPrefetchOwnedBuf = (uint8_t*)malloc(cap);
+    if (!gPrefetchOwnedBuf) {
+      Serial.printf("[Lakatos Prefetch] reserve(%u) failed (maxContig=%u, freeHeap=%u)\r\n",
+                    (unsigned)cap,
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                    (unsigned)ESP.getFreeHeap());
+      return false;
+    }
+    gPrefetchOwnedCap = cap;
+  }
+  return ensurePrefetchWorkerStarted();
+}
+
+void lakatosPrefetchCancel() {
+  gPrefetchCancelReq = true;
+  uint32_t t0 = millis();
+  while (gPrefetchWorkerActive && (millis() - t0 < 3000)) {
+    delay(1);
+  }
+  gPrefetchStatus    = 0;
+  gPrefetchCancelReq = false;
+}
+
+void lakatosPrefetchFree() {
+  lakatosPrefetchCancel();
+  if (gPrefetchOwnedBuf) {
+    free(gPrefetchOwnedBuf);
+    gPrefetchOwnedBuf = nullptr;
+    gPrefetchOwnedCap = 0;
+  }
+  gPrefetchDstBuf   = nullptr;
+  gPrefetchBytesGot = 0;
+}
+
+bool lakatosPrefetchStart(const char* vfsPath, uint8_t* dstBuf, size_t maxLen) {
+  if (!vfsPath || !vfsPath[0] || maxLen == 0) return false;
+
+  lakatosPrefetchCancel();
+
+  if (!dstBuf) {
+    if (!lakatosPrefetchReserve(maxLen)) return false;
+    dstBuf = gPrefetchOwnedBuf;
+  } else {
+    if (!ensurePrefetchWorkerStarted()) return false;
+  }
+
+  strncpy(gPrefetchPath, vfsPath, sizeof(gPrefetchPath) - 1);
+  gPrefetchPath[sizeof(gPrefetchPath) - 1] = '\0';
+  gPrefetchDstBuf       = dstBuf;
+  gPrefetchMaxLen       = maxLen;
+  gPrefetchBytesGot     = 0;
+  gPrefetchCancelReq    = false;
+  gPrefetchStatus       = 1;
+  gPrefetchWorkerActive = true;
+  xSemaphoreGive(gPrefetchWakeSem);
+  return true;
+}
+
+int lakatosPrefetchStatus(uint32_t* outBytesGot) {
+  if (outBytesGot) *outBytesGot = gPrefetchBytesGot;
+  return gPrefetchStatus;
+}
+
+const uint8_t* lakatosPrefetchBuffer(uint32_t* outBytesGot) {
+  if (outBytesGot) *outBytesGot = gPrefetchBytesGot;
+  return gPrefetchDstBuf;
 }

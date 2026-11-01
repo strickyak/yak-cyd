@@ -1,6 +1,7 @@
 #pragma GCC optimize("O3")
 #include "lakatos_state.h"
 
+#include <esp_heap_caps.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,6 +68,27 @@ struct PngReader {
       return true;
     }
     return false;
+  }
+
+  size_t readUpTo(void* dst, size_t maxN) {
+    if (maxN == 0) return 0;
+    if (memData) {
+      if (offset >= memLen) return 0;
+      size_t avail = memLen - offset;
+      size_t take = (maxN < avail) ? maxN : avail;
+      memcpy(dst, memData + offset, take);
+      offset += (uint32_t)take;
+      return take;
+    }
+    if (stream) {
+      uint32_t t0 = micros();
+      int32_t got = lakatosFsStreamRead(stream, dst, maxN);
+      readUs += (micros() - t0);
+      if (got <= 0) return 0;
+      offset += (uint32_t)got;
+      return (size_t)got;
+    }
+    return 0;
   }
 
   bool skip(size_t n) {
@@ -320,25 +342,39 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
   uint32_t tStart = millis();
   uint8_t sig[8];
   if (!reader.readExact(sig, 8) || memcmp(sig, kPngSig, 8) != 0) {
+    Serial.println("[Lakatos PNG] Invalid PNG signature");
     return false;
   }
 
   PngDecoderState* st = (PngDecoderState*)calloc(1, sizeof(PngDecoderState));
-  if (!st) return false;
+  if (!st) {
+    Serial.println("[Lakatos PNG] Out of memory for PngDecoderState");
+    return false;
+  }
   st->dstX = dstX;
   st->dstY = dstY;
   st->step = 1;
   memset(st->paletteA, 255, sizeof(st->paletteA));
 
-  tinfl_decompressor* decomp = (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
-  uint8_t* dict = (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
-  constexpr size_t kInChunkSize = 4096;
-  uint8_t* inBuf = (uint8_t*)malloc(kInChunkSize);
+  bool useScratch = (gLakatosPngScratch != nullptr) &&
+                    (gLakatosPngScratchSize >= sizeof(tinfl_decompressor));
+  tinfl_decompressor* decomp = useScratch
+                                   ? (tinfl_decompressor*)gLakatosPngScratch
+                                   : (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
 
-  if (!decomp || !dict || !inBuf) {
+  bool dictFromArena = !lakatosIsNativeAppRunning() && (LAKATOS_APP_DRAM_SIZE >= TINFL_LZ_DICT_SIZE);
+  uint8_t* dict = dictFromArena ? gLakatosAppRamArena : (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
+  constexpr size_t kInChunkSize = 4096;
+  uint8_t* inBuf = (reader.memData != nullptr) ? nullptr : (uint8_t*)malloc(kInChunkSize);
+
+  if (!decomp || !dict || (reader.memData == nullptr && !inBuf)) {
+    Serial.printf("[Lakatos PNG] Out of memory: decomp=%p (need %u), dict=%p, maxContig=%u, free8Bit=%u\r\n",
+                  decomp, (unsigned)sizeof(tinfl_decompressor), dict,
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
     if (inBuf) free(inBuf);
-    if (dict) free(dict);
-    if (decomp) free(decomp);
+    if (!dictFromArena && dict) free(dict);
+    if (!useScratch && decomp) free(decomp);
     free(st);
     return false;
   }
@@ -411,7 +447,9 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
       }
       if (boxW > 0 && boxH > 0) {
         int step = 1;
-        while (step < 8 && ((int)st->width / step > boxW || (int)st->height / step > boxH)) {
+        int maxW = (boxW < LAKATOS_SCREEN_W) ? LAKATOS_SCREEN_W : boxW;
+        int maxH = (boxH < LAKATOS_SCREEN_H) ? LAKATOS_SCREEN_H : boxH;
+        while (step < 8 && ((int)st->width / step > maxW || (int)st->height / step > maxH)) {
           step++;
         }
         st->step = step;
@@ -481,10 +519,23 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
       }
       uint32_t rem = chLen;
       while (rem > 0 && ok) {
-        size_t toRead = (rem > kInChunkSize) ? kInChunkSize : rem;
-        if (!reader.readExact(inBuf, toRead)) {
-          ok = false;
-          break;
+        size_t req = (rem > kInChunkSize) ? kInChunkSize : rem;
+        const uint8_t* chunkPtr = nullptr;
+        size_t toRead = 0;
+        if (reader.memData != nullptr) {
+          if (reader.offset >= reader.memLen) {
+            break; // Truncated buffer reached EOF cleanly
+          }
+          size_t avail = reader.memLen - reader.offset;
+          toRead = (req < avail) ? req : avail;
+          chunkPtr = reader.memData + reader.offset;
+          reader.offset += (uint32_t)toRead;
+        } else {
+          toRead = reader.readUpTo(inBuf, req);
+          if (toRead == 0) {
+            break;
+          }
+          chunkPtr = inBuf;
         }
         rem -= (uint32_t)toRead;
 
@@ -496,7 +547,7 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
           uint32_t flags = TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_HAS_MORE_INPUT;
           uint32_t t0 = micros();
           status = tinfl_decompress(
-              decomp, inBuf + inPos, &inBytes,
+              decomp, chunkPtr + inPos, &inBytes,
               dict, dict + dictOfs, &outBytes, flags);
           st->tinflUs += (micros() - t0);
           inPos += inBytes;
@@ -516,8 +567,10 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
           }
         }
         if (st->curY >= st->height) break;
+        if (reader.memData != nullptr && reader.offset >= reader.memLen) break;
       }
       if (st->curY >= st->height) break;
+      if (reader.memData != nullptr && reader.offset >= reader.memLen) break;
     } else if (memcmp(chType, "IEND", 4) == 0) {
       break;
     } else {
@@ -544,10 +597,10 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
 
   if (st->curRow) free(st->curRow);
   if (st->prevRow) free(st->prevRow);
-  free(inBuf);
-  free(dict);
-  free(decomp);
-  bool success = ok && gotIhdr && (st->curY > 0);
+  if (inBuf) free(inBuf);
+  if (!dictFromArena && dict) free(dict);
+  if (!useScratch) free(decomp);
+  bool success = gotIhdr && (st->curY > 0);
   free(st);
   return success;
 }
@@ -593,5 +646,9 @@ bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y) {
   PngReader reader;
   reader.memData = data;
   reader.memLen  = len;
+  if (x < 0) {
+    int boxY = (y >= 0 && y < LAKATOS_SCREEN_H) ? y : 0;
+    return decodeAndRenderPng(reader, 0, boxY, LAKATOS_SCREEN_W, LAKATOS_SCREEN_H - boxY);
+  }
   return decodeAndRenderPng(reader, x, y);
 }

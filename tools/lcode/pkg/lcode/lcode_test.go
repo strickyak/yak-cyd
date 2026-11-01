@@ -387,3 +387,63 @@ func main() {
 			vm.Screen[60][50], vm.Screen[67][57], vm.Screen[68][58])
 	}
 }
+
+func TestPrefetchAndCenteredDraw(t *testing.T) {
+	tmpDir := t.TempDir()
+	loDir := filepath.Join(tmpDir, "lo")
+	if err := os.MkdirAll(loDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	img := image.NewNRGBA(image.Rect(0, 0, 10, 10))
+	for y := 0; y < 10; y++ {
+		for x := 0; x < 10; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(loDir, "box.png"), pngBuf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	src := `
+package main
+
+var imgBuf [102400]byte
+
+func main() {
+	tft_fill_screen(0x0000)
+	started := os_prefetch_start("/lo/box.png", &imgBuf, 102400)
+	st, got := os_prefetch_status()
+	drawn := tft_draw_png(&imgBuf, got, -1, 20)
+	os_prefetch_cancel()
+	stAfter, _ := os_prefetch_status()
+	println(started, st, got > 0, drawn, stAfter)
+}
+`
+	lapp, _, err := CompileToLapp("PrefetchTest", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v", err)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 100000
+	var out bytes.Buffer
+	vm.Stdout = &out
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "1 2 1 1 0" {
+		t.Fatalf("expected '1 2 1 1 0', got %q", out.String())
+	}
+	// Centered 10x10 inside (0, 20, 320, 220) -> dstX = (320-10)/2 = 155, dstY = 20 + (220-10)/2 = 125
+	if vm.Screen[125][155] != 0xF800 {
+		t.Fatalf("expected centered pixel (155,125) to be red 0xF800, got 0x%04X", vm.Screen[125][155])
+	}
+}

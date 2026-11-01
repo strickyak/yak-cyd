@@ -228,6 +228,7 @@ func cmdRun(args []string) {
 	steps := fs.Int("steps", 500000, "Maximum VM instructions to execute")
 	ascii := fs.Bool("ascii", false, "Print an ASCII art preview of the 320x240 TFT screen")
 	dumpPPM := fs.String("dump-ppm", "", "Write 320x240 RGB565 framebuffer to a .ppm image file")
+	vfsRoot := fs.String("vfs", ".", "Host root directory mapped to VFS /lo, /sd, /sh")
 	var taps tapFlag
 	fs.Var(&taps, "tap", "Inject a touchscreen tap x,y (may be repeated)")
 	fs.Parse(args)
@@ -247,6 +248,7 @@ func cmdRun(args []string) {
 		os.Exit(1)
 	}
 	vm.MaxInstructions = *steps
+	vm.VfsRoot = *vfsRoot
 	var stdoutBuf bytes.Buffer
 	vm.Stdout = &stdoutBuf
 

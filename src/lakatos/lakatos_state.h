@@ -94,9 +94,23 @@ int32_t           lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len
 bool              lakatosFsStreamSkip(LakatosVfsStream* s, size_t len);
 void              lakatosFsClose(LakatosVfsStream* s);
 
+// Core 0 Background File Prefetcher (implemented in lakatos_vfs.cpp)
+// Status codes: 0 = IDLE, 1 = BUSY, 2 = READY, -1 = ERROR
+// If dstBuf == nullptr, allocates/reuses a dedicated heap buffer of maxLen bytes.
+bool           lakatosPrefetchReserve(size_t cap);
+bool           lakatosPrefetchStart(const char* vfsPath, uint8_t* dstBuf, size_t maxLen);
+int            lakatosPrefetchStatus(uint32_t* outBytesGot = nullptr);
+const uint8_t* lakatosPrefetchBuffer(uint32_t* outBytesGot = nullptr);
+void           lakatosPrefetchCancel();
+void           lakatosPrefetchFree();
+
 // ---------------------------------------------------------------------------
 // Fixed-Address & LCode App Loader (lakatos_loader.cpp & lakatos_lcode_vm.cpp)
 // ---------------------------------------------------------------------------
+extern uint8_t  gLakatosAppRamArena[LAKATOS_APP_DRAM_SIZE];
+extern uint8_t* gLakatosPngScratch;
+extern size_t   gLakatosPngScratchSize;
+bool lakatosIsNativeAppRunning();
 bool initLakatosLoader();
 // Stages and executes a .lapp binary from /lo/..., /sd/..., or /sh/...
 // Returns to caller when the app calls os->exit(code) or returns from app_main.

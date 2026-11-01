@@ -208,7 +208,7 @@ float lakatosReadCpuTempC() {
 static constexpr int kMaxDirEntries = 48;
 static constexpr int kRowsPerPage = 6;
 
-static LakatosFsEntry gDirEntries[kMaxDirEntries];
+static LakatosFsEntry* const gDirEntries = (LakatosFsEntry*)gLakatosAppRamArena;
 static int gDirCount = 0;
 static int gPageIdx = 0;
 static char gCurPath[128] = "/lo";
@@ -290,10 +290,13 @@ static bool copyFileToLo(const char* srcPath, const char* baseName) {
   return ok;
 }
 
+static bool gDirListError = false;
+
 static void refreshDirectory() {
   gDirCount = lakatosFsLs(gCurPath, gDirEntries, kMaxDirEntries);
   if (gDirCount < 0) {
     gDirCount = 0;
+    gDirListError = true;
     if (strncmp(gCurPath, "/sd", 3) == 0 && !lakatosSdIsMounted()) {
       snprintf(gStatusMsg, sizeof(gStatusMsg), "No MicroSD card detected");
     } else if (strncmp(gCurPath, "/sh", 3) == 0 && !lakatosWifiIsConnected()) {
@@ -304,6 +307,7 @@ static void refreshDirectory() {
       snprintf(gStatusMsg, sizeof(gStatusMsg), "Cannot list %s", gCurPath);
     }
   } else {
+    gDirListError = false;
     // Sort directories first, then alphabetically
     for (int i = 0; i < gDirCount - 1; i++) {
       for (int j = i + 1; j < gDirCount; j++) {
@@ -416,8 +420,13 @@ static void drawShellScreen() {
 
   if (gDirCount == 0) {
     tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("(Directory empty or unavailable)", 160, 140, 2);
+    if (gDirListError) {
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.drawString("(Error listing directory)", 160, 140, 2);
+    } else {
+      tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      tft.drawString("(Directory is empty)", 160, 140, 2);
+    }
   } else {
     for (int row = 0; row < kRowsPerPage; row++) {
       int idx = startIdx + row;
@@ -629,6 +638,7 @@ static void launchAppAndRestoreShell(const char* appPath) {
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
     lakatosSetRgbLed(false, true, false, 200);
   } else {
+    Serial.printf("[Lakatos] App '%s' launch failed: %s\r\n", appPath, errMsg.c_str());
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Err: %s", errMsg.c_str());
     lakatosSetRgbLed(true, false, false, 400);
   }

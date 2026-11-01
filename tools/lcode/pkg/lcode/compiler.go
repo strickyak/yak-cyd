@@ -2338,6 +2338,12 @@ func (c *Compiler) compileMultiReturnExpr() ([]TypeDesc, error) {
 	if err != nil {
 		return nil, err
 	}
+	if t.StructName == "__multi_2" {
+		return []TypeDesc{
+			{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4},
+			{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4},
+		}, nil
+	}
 	if t.StructName == "__multi_3" {
 		return []TypeDesc{
 			{Kind: "scalar", ScalarType: "bool", ByteSize: 4, ElemSize: 4},
@@ -3287,6 +3293,27 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		}
 		c.emitOp("SYSCALL", "SYS_JPG_INFO")
 		return TypeDesc{Kind: "scalar", StructName: "__multi_3", ByteSize: 4}, nil
+	case "os_prefetch_start", "prefetch_start":
+		c.emitOp("SYSCALL", "SYS_PREFETCH_START")
+		return ScalarInt, nil
+	case "os_prefetch_status", "prefetch_status":
+		if len(argTypes) == 1 {
+			// 1-arg pointer form: os_prefetch_status(&bytesGot) -> status
+			pGotTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(pGotTmp)
+			c.emitOp("SYSCALL", "SYS_PREFETCH_STATUS")
+			gotTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(gotTmp)
+			c.emitLoadVar(pGotTmp)
+			c.emitLoadVar(gotTmp)
+			c.emitOp("POKE4")
+			return ScalarInt, nil
+		}
+		c.emitOp("SYSCALL", "SYS_PREFETCH_STATUS")
+		return TypeDesc{Kind: "scalar", StructName: "__multi_2", ByteSize: 4}, nil
+	case "os_prefetch_cancel", "prefetch_cancel":
+		c.emitOp("SYSCALL", "SYS_PREFETCH_CANCEL")
+		return VoidType, nil
 
 	// Touch, Keyboard, LED & Sensors
 	case "os_read_touch", "read_touch", "os_poll_touch", "poll_touch":

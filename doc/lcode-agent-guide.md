@@ -159,7 +159,16 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
 | | `os_get_device_name() string` | Configured device name |
 | | `os_get_serial_number() string` | Configured device serial number |
 | | `os_get_unix_time() int` | Current UTC epoch timestamp |
-| **VFS** | `fs_read(path string, off, bufAddr, len int) int` | Reads bytes from `/lo/...`, `/sd/...`, or `/sh/...` |
+| | `os_wifi_connected() int` | Returns `1` if Wi-Fi is connected, `0` otherwise |
+| | `os_serial_available() int` | Number of bytes waiting on hardware Serial |
+| | `os_serial_read() int` | Reads one byte from hardware Serial (`-1` if none) |
+| | `os_prompt_keyboard(title string, bufAddr, maxLen int, allowSlash bool) int` | Opens the on-screen touch keyboard modal into `bufAddr` |
+| **Core 0 Prefetch** | `os_prefetch_start(path string, bufAddr, maxLen int) int` | Starts asynchronous file prefetch on Core 0 (`PRO_CPU`) into `bufAddr` (`maxLen` cap) |
+| | `os_prefetch_status() (state int, bytesRead int)` | Polls Core 0 prefetcher (`0`=IDLE, `1`=BUSY, `2`=READY, `<0`=ERROR) and bytes read |
+| | `os_prefetch_cancel()` | Cancels any in-flight Core 0 prefetch and waits for idle |
+| **VFS** | `fs_ls(path string, entriesBufAddr, maxEntries int) int` | Lists up to `maxEntries` `LakatosFsEntry` (`88 B` each) records (`<0` on error) |
+| | `fs_stat(path string, entryBufAddr int) int` | Stats a single path into an `88 B` `LakatosFsEntry` struct (`1` if ok, `0` on error) |
+| | `fs_read(path string, off, bufAddr, len int) int` | Reads bytes from `/lo/...`, `/sd/...`, or `/sh/...` |
 | | `fs_write(path string, bufAddr, len int) int` | Writes file to `/lo/...`, `/sd/...`, or `/sh/...` |
 | | `println(args...)` | Prints values to Serial / emulator stdout |
 

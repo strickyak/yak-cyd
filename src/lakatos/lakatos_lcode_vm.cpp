@@ -216,16 +216,21 @@ enum LCodeSyscall : uint8_t {
   SysTftDrawJpgFile = 0x40,
   SysTftDrawJpgMem  = 0x41,
   SysJpgInfo        = 0x42,
+
+  SysPrefetchStart  = 0x43,
+  SysPrefetchStatus = 0x44,
+  SysPrefetchCancel = 0x45,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
 static constexpr uint32_t kStringPoolBase  = 0x0100;
 static constexpr uint32_t kOsScratchSize   = 512;
 static constexpr uint32_t kHeapBlockHdrLen = 8;
-static constexpr int      kMaxEvalStack    = 512;
-static constexpr int      kMaxCallDepth    = 96;
-static constexpr int      kMaxFuncs        = 128;
-static constexpr int      kMaxGlobals      = 256;
+static constexpr int      kMaxEvalStack    = 64;
+static constexpr int      kMaxCallDepth    = 24;
+static constexpr int      kMaxFuncs        = 32;
+static constexpr int      kMaxGlobals      = 48;
+static constexpr int      kMaxVarPool      = 96;
 
 static inline __attribute__((always_inline)) uint16_t readU16LE(const uint8_t* p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -277,7 +282,7 @@ struct LCodeFuncMeta {
   uint32_t frameSize;
   uint32_t codeOffset;
   uint32_t codeSize;
-  uint16_t varSizeStart; // Index into gVarSizesPool
+  uint16_t varSizeStart; // Index into varSizesPool
 };
 
 struct LCodeCallFrame {
@@ -289,26 +294,27 @@ struct LCodeCallFrame {
 struct LCodeVM {
   uint8_t*       mem = nullptr;
   uint32_t       memSize = 0;
+  uint8_t*       codeBuf = nullptr;
   const uint8_t* code = nullptr;
   uint32_t       codeSize = 0;
 
   uint32_t       stack[kMaxEvalStack];
-  int            sp = 0;
+  int32_t        sp = 0;
 
   LCodeCallFrame callStack[kMaxCallDepth];
-  int            callDepth = 0;
+  int32_t        callDepth = 0;
 
   LCodeFuncMeta  funcs[kMaxFuncs];
-  int            funcCount = 0;
-  int            entryFuncIdx = 0;
+  int32_t        funcCount = 0;
+  int32_t        entryFuncIdx = 0;
 
-  uint16_t       varSizesPool[1024];
-  uint16_t       localOffsetsPool[1024];
-  int            varPoolUsed = 0;
+  uint16_t       varSizesPool[kMaxVarPool];
+  uint16_t       localOffsetsPool[kMaxVarPool];
+  int32_t        varPoolUsed = 0;
 
   uint32_t       globalSizes[kMaxGlobals];
   uint32_t       globalOffsets[kMaxGlobals];
-  int            globalCount = 0;
+  int32_t        globalCount = 0;
 
   uint32_t       stringPoolEnd = 0;
   uint32_t       osScratchBase = 0;
@@ -319,13 +325,15 @@ struct LCodeVM {
   uint32_t       heapBase      = 0;
 
   int32_t        pc = 0;
-  bool           running = false;
-  int            exitCode = 0;
-  char           errMsg[96];
+  uint32_t       running = 0;
+  int32_t        exitCode = 0;
+  const char*    errReason = nullptr;
+  int32_t        errPC = 0;
 
   void setErr(const char* msg) {
-    snprintf(errMsg, sizeof(errMsg), "%s (PC=%ld)", msg, (long)pc);
-    running = false;
+    errReason = msg;
+    errPC = pc;
+    running = 0;
   }
 
   inline __attribute__((always_inline)) bool push(uint32_t v) {
@@ -348,9 +356,7 @@ struct LCodeVM {
 
   inline __attribute__((always_inline)) bool checkAddr(uint32_t addr, uint32_t sz) {
     if (__builtin_expect(addr < kNullGuardSize || addr + sz > memSize || addr + sz < addr, 0)) {
-      snprintf(errMsg, sizeof(errMsg), "Bad mem access 0x%05lX (PC=%ld)",
-               (unsigned long)addr, (long)pc);
-      running = false;
+      setErr("Bad mem access");
       return false;
     }
     return true;
@@ -465,16 +471,16 @@ struct LCodeVM {
     return true;
   }
 
-  inline __attribute__((always_inline)) bool loadLocalSlot(uint16_t slot) {
+  inline __attribute__((always_inline)) bool loadLocalSlot(uint32_t slot) {
     const LCodeCallFrame& cf = callStack[callDepth - 1];
     const LCodeFuncMeta& fn  = funcs[cf.funcIdx];
     if (__builtin_expect(slot >= fn.localCount, 0)) {
       setErr("Local slot out of range");
       return false;
     }
-    uint16_t poolIdx = fn.varSizeStart + slot;
+    uint32_t poolIdx = fn.varSizeStart + slot;
     uint32_t addr    = cf.frameAddr + localOffsetsPool[poolIdx];
-    uint16_t sz      = varSizesPool[poolIdx];
+    uint32_t sz      = varSizesPool[poolIdx];
     if (__builtin_expect(sz == 12, 0)) {
       return push(readAlignedU32(mem + addr)) &&
              push(readAlignedU32(mem + addr + 4)) &&
@@ -483,16 +489,16 @@ struct LCodeVM {
     return push(readAlignedU32(mem + addr));
   }
 
-  inline __attribute__((always_inline)) bool storeLocalSlot(uint16_t slot) {
+  inline __attribute__((always_inline)) bool storeLocalSlot(uint32_t slot) {
     const LCodeCallFrame& cf = callStack[callDepth - 1];
     const LCodeFuncMeta& fn  = funcs[cf.funcIdx];
     if (__builtin_expect(slot >= fn.localCount, 0)) {
       setErr("Local slot out of range");
       return false;
     }
-    uint16_t poolIdx = fn.varSizeStart + slot;
+    uint32_t poolIdx = fn.varSizeStart + slot;
     uint32_t addr    = cf.frameAddr + localOffsetsPool[poolIdx];
-    uint16_t sz      = varSizesPool[poolIdx];
+    uint32_t sz      = varSizesPool[poolIdx];
     if (__builtin_expect(sz == 12, 0)) {
       uint32_t ln = 0, cp = 0, bs = 0;
       if (!pop(ln) || !pop(cp) || !pop(bs)) return false;
@@ -753,8 +759,17 @@ struct LCodeVM {
       case SysTftDrawPngMem: {
         uint32_t y = 0, x = 0, len = 0, bufAddr = 0;
         if (!pop(y) || !pop(x) || !pop(len) || !pop(bufAddr)) return false;
-        if (len == 0 || !checkAddr(bufAddr, len)) return push(0);
-        bool ok = lakatosDrawPngMem(mem + bufAddr, len, (int)(int32_t)x, (int)(int32_t)y);
+        if (len == 0) return push(0);
+        const uint8_t* srcPtr = nullptr;
+        if (bufAddr == 0) {
+          uint32_t avail = 0;
+          srcPtr = lakatosPrefetchBuffer(&avail);
+          if (!srcPtr || len > avail) return push(0);
+        } else {
+          if (!checkAddr(bufAddr, len)) return push(0);
+          srcPtr = mem + bufAddr;
+        }
+        bool ok = lakatosDrawPngMem(srcPtr, len, (int)(int32_t)x, (int)(int32_t)y);
         return push(ok ? 1 : 0);
       }
       case SysPngInfo: {
@@ -778,8 +793,17 @@ struct LCodeVM {
       case SysTftDrawJpgMem: {
         uint32_t scale = 0, y = 0, x = 0, len = 0, bufAddr = 0;
         if (!pop(scale) || !pop(y) || !pop(x) || !pop(len) || !pop(bufAddr)) return false;
-        if (len == 0 || !checkAddr(bufAddr, len)) return push(0);
-        bool ok = lakatosDrawJpgMem(mem + bufAddr, len, (int)(int32_t)x,
+        if (len == 0) return push(0);
+        const uint8_t* srcPtr = nullptr;
+        if (bufAddr == 0) {
+          uint32_t avail = 0;
+          srcPtr = lakatosPrefetchBuffer(&avail);
+          if (!srcPtr || len > avail) return push(0);
+        } else {
+          if (!checkAddr(bufAddr, len)) return push(0);
+          srcPtr = mem + bufAddr;
+        }
+        bool ok = lakatosDrawJpgMem(srcPtr, len, (int)(int32_t)x,
                                     (int)(int32_t)y, (int)(int32_t)scale);
         return push(ok ? 1 : 0);
       }
@@ -791,6 +815,32 @@ struct LCodeVM {
         return push(ok ? 1 : 0) &&
                push((uint32_t)(int32_t)w) &&
                push((uint32_t)(int32_t)h);
+      }
+
+      // Core 0 Background File Prefetcher
+      case SysPrefetchStart: {
+        uint32_t maxLen = 0, bufAddr = 0;
+        if (!pop(maxLen) || !pop(bufAddr)) return false;
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        if (maxLen == 0) return push(0);
+        uint8_t* dstPtr = nullptr;
+        if (bufAddr != 0) {
+          if (!checkAddr(bufAddr, maxLen)) return push(0);
+          dstPtr = mem + bufAddr;
+        }
+        bool ok = lakatosPrefetchStart(pathBuf, dstPtr, maxLen);
+        return push(ok ? 1 : 0);
+      }
+      case SysPrefetchStatus: {
+        uint32_t bytesGot = 0;
+        int st = lakatosPrefetchStatus(&bytesGot);
+        return push((uint32_t)(int32_t)st) &&
+               push(bytesGot);
+      }
+      case SysPrefetchCancel: {
+        lakatosPrefetchCancel();
+        return true;
       }
 
       // Touch, Keyboard, LED & Sensors
@@ -939,43 +989,9 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     return false;
   }
 
-  LCodeVM* vm = (LCodeVM*)calloc(1, sizeof(LCodeVM));
-  if (!vm) {
-    if (outErrMsg) *outErrMsg = "Out of heap for LCodeVM struct";
-    return false;
-  }
-
-  // Allocate the largest contiguous RAM arena up to 96 KB while preserving
-  // at least 64 KB of system heap for Wi-Fi / HTTP / SD / PNG inflate syscalls.
-  size_t maxContig = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  size_t freeTotal = ESP.getFreeHeap();
-  size_t targetArena = 98304; // 96 KB ideal
-  if (targetArena > maxContig) {
-    targetArena = maxContig & ~4095u;
-  }
-  if (freeTotal > 98304 && targetArena > freeTotal - 65536) {
-    targetArena = (freeTotal - 65536) & ~4095u;
-  }
-  if (targetArena < 32768) {
-    free(vm);
-    if (outErrMsg) *outErrMsg = "Insufficient contiguous RAM for LCode arena";
-    return false;
-  }
-
-  vm->mem = (uint8_t*)malloc(targetArena);
-  while (!vm->mem && targetArena >= 40960) {
-    targetArena -= 8192;
-    vm->mem = (uint8_t*)malloc(targetArena);
-  }
-  if (!vm->mem) {
-    free(vm);
-    if (outErrMsg) *outErrMsg = "malloc failed for LCode arena";
-    return false;
-  }
-  memset(vm->mem, 0, targetArena);
-  vm->memSize = (uint32_t)targetArena;
-
-  // Parse 24-byte LCOD header
+  // Parse 24-byte LCOD header first (before any heap allocation) so we can allocate
+  // vm->mem FIRST from DRAM1 (~109 KB contiguous), leaving DRAM0 (~43 KB) free for
+  // LCodeVM (~5 KB), bytecode (~3 KB), Core 0 prefetch worker (~3 KB), and miniz (~11 KB).
   uint32_t strPoolSize  = readU32LE(payload + 8);
   uint16_t globalsCount = readU16LE(payload + 12);
   uint16_t funcCount    = readU16LE(payload + 14);
@@ -983,67 +999,102 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   uint32_t codeSize     = readU32LE(payload + 20);
 
   if (globalsCount > kMaxGlobals || funcCount > kMaxFuncs) {
-    free(vm->mem);
-    free(vm);
     if (outErrMsg) *outErrMsg = "LCOD table limits exceeded";
     return false;
   }
 
-  vm->globalCount  = globalsCount;
-  vm->funcCount    = funcCount;
-  vm->entryFuncIdx = entryFunc;
-
   uint32_t offset = 24;
-  for (uint16_t i = 0; i < globalsCount; i++) {
-    if (offset + 4 > payloadLen) {
-      free(vm->mem);
-      free(vm);
-      if (outErrMsg) *outErrMsg = "Truncated LCOD globals";
-      return false;
-    }
-    vm->globalSizes[i] = readU32LE(payload + offset);
-    offset += 4;
-  }
-
-  if (offset + strPoolSize > payloadLen ||
-      kStringPoolBase + strPoolSize >= vm->memSize) {
-    free(vm->mem);
-    free(vm);
-    if (outErrMsg) *outErrMsg = "Invalid LCOD string pool";
+  if (offset + (uint32_t)globalsCount * 4u + strPoolSize > payloadLen) {
+    if (outErrMsg) *outErrMsg = "Truncated LCOD globals or string pool";
     return false;
   }
+
+  uint32_t stringPoolEnd = align4(kStringPoolBase + strPoolSize);
+  uint32_t osScratchBase = stringPoolEnd;
+  uint32_t globalsBase   = align4(osScratchBase + kOsScratchSize);
+  uint32_t gCursor       = globalsBase;
+  for (uint16_t i = 0; i < globalsCount; i++) {
+    uint32_t gSz = readU32LE(payload + offset + (uint32_t)i * 4u);
+    gCursor += align4(gSz);
+  }
+  uint32_t frameBase    = align8(gCursor);
+  uint32_t frameReserve = (gCursor > 65536u) ? 512u : 4096u;
+  uint32_t heapBase     = align8(frameBase + frameReserve);
+  uint32_t minArena     = heapBase + ((gCursor > 65536u) ? 384u : 512u);
+
+  size_t maxContig = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  size_t targetArena = (gCursor <= 16384u) ? 24576u : ((minArena + 255u) & ~255u);
+  if (targetArena > maxContig) {
+    targetArena = maxContig & ~255u;
+  }
+  if (targetArena < minArena) {
+    Serial.printf("[Lakatos LCode] Arena too small: need=%lu, target=%u, maxContig=%u, freeHeap=%u\r\n",
+                  (unsigned long)minArena, (unsigned)targetArena,
+                  (unsigned)maxContig, (unsigned)ESP.getFreeHeap());
+    if (outErrMsg) *outErrMsg = "Insufficient contiguous RAM for LCode arena";
+    return false;
+  }
+
+  // Allocate arenaMem FIRST so it claims the large DRAM1 block
+  uint8_t* arenaMem = (uint8_t*)malloc(targetArena);
+  if (!arenaMem) {
+    if (outErrMsg) *outErrMsg = "malloc failed for LCode arena";
+    return false;
+  }
+
+  // Place LCodeVM (~1.5 KB) + bytecode (~2.9 KB) in the upper ~4.5 KB of
+  // gLakatosPngScratch (above the 11,008-byte tinfl_decompressor region) when available
+  constexpr size_t kTinflReserved = 11008;
+  size_t vmAligned = (sizeof(LCodeVM) + 7u) & ~7u;
+  bool vmFromScratch = (gLakatosPngScratch != nullptr) &&
+                       (gLakatosPngScratchSize >= kTinflReserved + vmAligned);
+  LCodeVM* vm = nullptr;
+  if (vmFromScratch) {
+    vm = (LCodeVM*)(gLakatosPngScratch + kTinflReserved);
+    memset(vm, 0, sizeof(LCodeVM));
+  } else {
+    vm = (LCodeVM*)calloc(1, sizeof(LCodeVM));
+  }
+  if (!vm) {
+    free(arenaMem);
+    if (outErrMsg) *outErrMsg = "Out of heap for LCodeVM struct";
+    return false;
+  }
+
+  vm->mem = arenaMem;
+  memset(vm->mem, 0, targetArena);
+  vm->memSize = (uint32_t)targetArena;
+
+  vm->globalCount   = globalsCount;
+  vm->funcCount     = funcCount;
+  vm->entryFuncIdx  = entryFunc;
+  vm->stringPoolEnd = stringPoolEnd;
+  vm->osScratchBase = osScratchBase;
+  vm->osScratchPtr  = 0;
+  vm->globalsBase   = globalsBase;
+
+  gCursor = vm->globalsBase;
+  for (uint16_t i = 0; i < globalsCount; i++) {
+    vm->globalSizes[i]   = readU32LE(payload + offset);
+    vm->globalOffsets[i] = gCursor;
+    gCursor += align4(vm->globalSizes[i]);
+    offset += 4;
+  }
+  vm->frameBase = frameBase;
+  vm->frameSP   = frameBase;
+  vm->heapBase  = heapBase;
+
   memcpy(vm->mem + kStringPoolBase, payload + offset, strPoolSize);
   offset += strPoolSize;
 
-  vm->stringPoolEnd = align4(kStringPoolBase + strPoolSize);
-  vm->osScratchBase = vm->stringPoolEnd;
-  vm->osScratchPtr  = 0;
-  vm->globalsBase   = align4(vm->osScratchBase + kOsScratchSize);
-
-  uint32_t gCursor = vm->globalsBase;
-  for (uint16_t i = 0; i < globalsCount; i++) {
-    vm->globalOffsets[i] = gCursor;
-    gCursor += align4(vm->globalSizes[i]);
-  }
-  vm->frameBase = align8(gCursor);
-  vm->frameSP   = vm->frameBase;
-
-  // Reserve 16 KB for call frames on compact arenas, or 32 KB on full 128 KB arenas
-  uint32_t frameReserve = (vm->memSize >= 98304) ? 32768u : 16384u;
-  vm->heapBase = align8(vm->frameBase + frameReserve);
-  if (vm->heapBase + 1024 > vm->memSize) {
-    free(vm->mem);
-    free(vm);
-    if (outErrMsg) *outErrMsg = "Globals exceed LCode arena";
-    return false;
-  }
   vm->initHeap();
 
   uint32_t maxMetaEnd = offset + (uint32_t)funcCount * 20u;
   for (uint16_t i = 0; i < funcCount; i++) {
     if (offset + 20 > payloadLen) {
       free(vm->mem);
-      free(vm);
+      if (!vmFromScratch) free(vm);
+      lakatosPrefetchFree();
       if (outErrMsg) *outErrMsg = "Truncated LCOD function table";
       return false;
     }
@@ -1057,9 +1108,10 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     uint32_t fnCodeSz   = readU32LE(ent + 12);
     uint32_t metaOff    = readU32LE(ent + 16);
 
-    if (vm->varPoolUsed + localCount > 1024) {
+    if (vm->varPoolUsed + localCount > kMaxVarPool) {
       free(vm->mem);
-      free(vm);
+      if (!vmFromScratch) free(vm);
+      lakatosPrefetchFree();
       if (outErrMsg) *outErrMsg = "Too many local variables in LCOD";
       return false;
     }
@@ -1070,13 +1122,14 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     for (uint16_t v = 0; v < localCount; v++) {
       if (mPos + 4 > payloadLen) {
         free(vm->mem);
-        free(vm);
+        if (!vmFromScratch) free(vm);
+        lakatosPrefetchFree();
         if (outErrMsg) *outErrMsg = "Truncated LCOD local metadata";
         return false;
       }
       uint32_t sz = readU32LE(payload + mPos);
-      vm->varSizesPool[vm->varPoolUsed]     = (uint16_t)sz;
-      vm->localOffsetsPool[vm->varPoolUsed] = (uint16_t)lOff;
+      vm->varSizesPool[vm->varPoolUsed]     = sz;
+      vm->localOffsetsPool[vm->varPoolUsed] = lOff;
       vm->varPoolUsed++;
       lOff += align4(sz);
       mPos += 4;
@@ -1096,19 +1149,39 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     vm->funcs[i].varSizeStart = poolStart;
   }
 
-  if (maxMetaEnd + codeSize > payloadLen) {
+  if (maxMetaEnd + codeSize > payloadLen || codeSize == 0) {
     free(vm->mem);
-    free(vm);
+    if (!vmFromScratch) free(vm);
+    lakatosPrefetchFree();
     if (outErrMsg) *outErrMsg = "Truncated LCOD bytecode section";
     return false;
   }
 
-  vm->code     = payload + maxMetaEnd;
+  bool codeFromScratch = false;
+  uint8_t* codeDst = nullptr;
+  if (vmFromScratch && (kTinflReserved + vmAligned + codeSize <= gLakatosPngScratchSize)) {
+    codeDst = gLakatosPngScratch + kTinflReserved + vmAligned;
+    codeFromScratch = true;
+  } else {
+    codeDst = (uint8_t*)malloc(codeSize);
+    vm->codeBuf = codeDst;
+  }
+  if (!codeDst) {
+    free(vm->mem);
+    if (!vmFromScratch) free(vm);
+    lakatosPrefetchFree();
+    if (outErrMsg) *outErrMsg = "Out of heap for LCode bytecode";
+    return false;
+  }
+  memcpy(codeDst, payload + maxMetaEnd, codeSize);
+  vm->code     = codeDst;
   vm->codeSize = codeSize;
 
   if (vm->entryFuncIdx < 0 || vm->entryFuncIdx >= vm->funcCount) {
+    if (!codeFromScratch && vm->codeBuf) free(vm->codeBuf);
     free(vm->mem);
-    free(vm);
+    if (!vmFromScratch) free(vm);
+    lakatosPrefetchFree();
     if (outErrMsg) *outErrMsg = "Invalid LCOD entry function";
     return false;
   }
@@ -1117,18 +1190,22 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   vm->frameSP = vm->frameBase + entryFn.frameSize;
   memset(vm->mem + vm->frameBase, 0, entryFn.frameSize);
 
-  vm->callStack[0] = {(uint16_t)vm->entryFuncIdx, -1, vm->frameBase};
+  vm->callStack[0].funcIdx   = (uint32_t)vm->entryFuncIdx;
+  vm->callStack[0].returnPC  = -1;
+  vm->callStack[0].frameAddr = vm->frameBase;
   vm->callDepth    = 1;
   vm->pc           = (int32_t)entryFn.codeOffset;
-  vm->running      = true;
+  vm->running      = 1;
   vm->exitCode     = 0;
-  vm->errMsg[0]    = '\0';
+  vm->errReason    = nullptr;
+  vm->errPC        = 0;
 
-  Serial.printf("[Lakatos LCode] Running '%s' in RAM (code=%lu B, arena=%lu B, heap=%lu B, freeSysHeap=%u B)\r\n",
+  Serial.printf("[Lakatos LCode] Running '%s' in RAM (code=%lu B, arena=%lu B, heap=%lu B, free8Bit=%u B, freeSys=%u B)\r\n",
                 hdr.name,
                 (unsigned long)vm->codeSize,
                 (unsigned long)vm->memSize,
                 (unsigned long)vm->heapBytesFree(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                 (unsigned)ESP.getFreeHeap());
 
   lakatosClearTouchLatch();
@@ -1691,7 +1768,7 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
         }
         memset(vm->mem + newFrame, 0, callee.frameSize);
         for (int a = (int)callee.argCount - 1; a >= 0; a--) {
-          uint16_t poolIdx = callee.varSizeStart + (uint16_t)a;
+          uint32_t poolIdx = callee.varSizeStart + (uint32_t)a;
           uint32_t pAddr   = newFrame + vm->localOffsetsPool[poolIdx];
           if (vm->varSizesPool[poolIdx] == 12) {
             uint32_t ln = 0, cp = 0, bs = 0;
@@ -1706,7 +1783,12 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
           }
         }
         vm->frameSP = newFrame + callee.frameSize;
-        vm->callStack[vm->callDepth++] = {fIdx, vm->pc, newFrame};
+        {
+          int32_t cd = vm->callDepth++;
+          vm->callStack[cd].funcIdx   = fIdx;
+          vm->callStack[cd].returnPC  = vm->pc;
+          vm->callStack[cd].frameAddr = newFrame;
+        }
         vm->pc = (int32_t)callee.codeOffset;
         break;
       }
@@ -1731,7 +1813,8 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
       case OpPANIC: {
         char msg[80];
         vm->popSliceAsCStr(msg, sizeof(msg));
-        vm->setErr(msg[0] ? msg : "PANIC");
+        if (msg[0]) Serial.printf("[Lakatos LCode] PANIC: %s\r\n", msg);
+        vm->setErr("PANIC");
         break;
       }
 
@@ -1863,19 +1946,23 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     }
   }
 
-  bool hadErr = (vm->errMsg[0] != '\0');
+  bool hadErr = (vm->errReason != nullptr);
   if (hadErr) {
-    Serial.printf("[Lakatos LCode] Runtime Error in '%s': %s\r\n", hdr.name, vm->errMsg);
-    if (outErrMsg) *outErrMsg = vm->errMsg;
+    char errBuf[96];
+    snprintf(errBuf, sizeof(errBuf), "%s (PC=%ld)", vm->errReason, (long)vm->errPC);
+    Serial.printf("[Lakatos LCode] Runtime Error in '%s': %s\r\n", hdr.name, errBuf);
+    if (outErrMsg) *outErrMsg = errBuf;
   } else {
-    Serial.printf("[Lakatos LCode] '%s' finished (exit=%d, steps=%lu)\r\n",
-                  hdr.name, vm->exitCode, (unsigned long)stepCounter);
+    Serial.printf("[Lakatos LCode] '%s' finished (exit=%ld, steps=%lu)\r\n",
+                  hdr.name, (long)vm->exitCode, (unsigned long)stepCounter);
   }
 
   if (outExitCode) *outExitCode = vm->exitCode;
   tft.setTextDatum(TL_DATUM);
 
+  lakatosPrefetchFree();
+  if (!codeFromScratch && vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);
-  free(vm);
+  if (!vmFromScratch) free(vm);
   return !hadErr;
 }

@@ -236,6 +236,11 @@ const (
 	SysTftDrawJpgFile = byte(0x40) // (pathSlice x y scale -- ok)
 	SysTftDrawJpgMem  = byte(0x41) // (bufAddr len x y scale -- ok)
 	SysJpgInfo        = byte(0x42) // (pathSlice -- ok width height)
+
+	// Core 0 Background File Prefetcher (0x43 .. 0x45)
+	SysPrefetchStart  = byte(0x43) // (pathSlice bufAddr maxLen -- ok)
+	SysPrefetchStatus = byte(0x44) // ( -- status bytesGot)
+	SysPrefetchCancel = byte(0x45) // ( -- )
 )
 
 type ArgType string
@@ -433,6 +438,9 @@ var SyscallByName = map[string]byte{
 	"SYS_TFT_DRAW_JPG_FILE":   SysTftDrawJpgFile,
 	"SYS_TFT_DRAW_JPG_MEM":    SysTftDrawJpgMem,
 	"SYS_JPG_INFO":            SysJpgInfo,
+	"SYS_PREFETCH_START":      SysPrefetchStart,
+	"SYS_PREFETCH_STATUS":     SysPrefetchStatus,
+	"SYS_PREFETCH_CANCEL":     SysPrefetchCancel,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,
 	"SYS_PROMPT_KEYBOARD":    SysPromptKeyboard,

@@ -28,6 +28,7 @@ lcode-tool:
 apps: lcode-tool
 	mkdir -p build/apps
 	$(LCODE) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
+	$(LCODE) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload
