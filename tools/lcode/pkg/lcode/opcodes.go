@@ -204,6 +204,9 @@ const (
 	SysFmtIntToStr      = byte(0x22) // (val bufAddr maxLen -- strSlice)
 	SysFmtFloatToStr    = byte(0x23) // (f32 decimals -- strSlice)
 	SysTftDrawFloat     = byte(0x24) // (f32 decimals x y font -- width)
+	SysTftDrawPngFile   = byte(0x25) // (pathSlice x y -- ok)
+	SysTftDrawPngMem    = byte(0x26) // (bufAddr len x y -- ok)
+	SysPngInfo          = byte(0x27) // (pathSlice -- ok width height)
 
 	// Touch, Stylus Keyboard, LED & Sensors (0x28 .. 0x2F)
 	SysReadTouch      = byte(0x28) // ( -- touched x y)
@@ -228,6 +231,11 @@ const (
 	SysSerialAvail   = byte(0x3B) // ( -- count)
 	SysSerialRead    = byte(0x3C) // ( -- ch)
 	SysSerialWrite   = byte(0x3D) // (bufAddr len -- written)
+
+	// JPEG Image Decoder & Renderer (0x40 .. 0x42)
+	SysTftDrawJpgFile = byte(0x40) // (pathSlice x y scale -- ok)
+	SysTftDrawJpgMem  = byte(0x41) // (bufAddr len x y scale -- ok)
+	SysJpgInfo        = byte(0x42) // (pathSlice -- ok width height)
 )
 
 type ArgType string
@@ -419,6 +427,12 @@ var SyscallByName = map[string]byte{
 	"SYS_FMT_INT_TO_STR":      SysFmtIntToStr,
 	"SYS_FMT_FLOAT_TO_STR":    SysFmtFloatToStr,
 	"SYS_TFT_DRAW_FLOAT":      SysTftDrawFloat,
+	"SYS_TFT_DRAW_PNG_FILE":   SysTftDrawPngFile,
+	"SYS_TFT_DRAW_PNG_MEM":    SysTftDrawPngMem,
+	"SYS_PNG_INFO":            SysPngInfo,
+	"SYS_TFT_DRAW_JPG_FILE":   SysTftDrawJpgFile,
+	"SYS_TFT_DRAW_JPG_MEM":    SysTftDrawJpgMem,
+	"SYS_JPG_INFO":            SysJpgInfo,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,
 	"SYS_PROMPT_KEYBOARD":    SysPromptKeyboard,

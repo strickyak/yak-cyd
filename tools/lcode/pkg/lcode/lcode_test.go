@@ -2,6 +2,12 @@ package lcode
 
 import (
 	"bytes"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -236,5 +242,148 @@ func main() {
 	// floor(3.9) = 3, ceil(3.1) = 4, abs(-7.5)*2.0 = 15
 	if strings.TrimSpace(out) != "5 1000 59 9.81 3 4 15" {
 		t.Fatalf("expected '5 1000 59 9.81 3 4 15', got %q", out)
+	}
+}
+
+func TestPngDecodeAndDraw(t *testing.T) {
+	tmpDir := t.TempDir()
+	loDir := filepath.Join(tmpDir, "lo")
+	if err := os.MkdirAll(loDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Create a 4x3 NRGBA PNG image:
+	// - (0,0) opaque Red (255,0,0,255) -> RGB565 0xF800
+	// - (1,0) transparent (0,255,0,0) -> should NOT overwrite background
+	// - (2,1) opaque Blue (0,0,255,255) -> RGB565 0x001F
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 3))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 0, G: 255, B: 0, A: 0})
+	img.SetNRGBA(2, 1, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
+
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(loDir, "sprite.png"), pngBuf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	src := `
+package main
+
+var rawBuf [512]byte
+
+func main() {
+	tft_fill_screen(0x07E0) // Green background
+	ok, w, h := os_png_info("/lo/sprite.png")
+	drawn1 := tft_draw_png_file("/lo/sprite.png", 10, 20)
+
+	n := fs_read("/lo/sprite.png", 0, &rawBuf, 512)
+	drawn2 := tft_draw_png(&rawBuf, n, 50, 60)
+
+	println(ok, w, h, drawn1, drawn2)
+}
+`
+	lapp, _, err := CompileToLapp("PngTest", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v", err)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 100000
+	var out bytes.Buffer
+	vm.Stdout = &out
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "1 4 3 1 1" {
+		t.Fatalf("expected '1 4 3 1 1', got %q", out.String())
+	}
+	// Check tft_draw_png_file at (10, 20)
+	if vm.Screen[20][10] != 0xF800 {
+		t.Fatalf("expected pixel (10,20) to be red 0xF800, got 0x%04X", vm.Screen[20][10])
+	}
+	// Transparent pixel (11, 20) must preserve Green background 0x07E0
+	if vm.Screen[20][11] != 0x07E0 {
+		t.Fatalf("expected transparent pixel (11,20) to preserve green 0x07E0, got 0x%04X", vm.Screen[20][11])
+	}
+	if vm.Screen[21][12] != 0x001F {
+		t.Fatalf("expected pixel (12,21) to be blue 0x001F, got 0x%04X", vm.Screen[21][12])
+	}
+	// Check tft_draw_png (from memory buffer) at (50, 60)
+	if vm.Screen[60][50] != 0xF800 || vm.Screen[61][52] != 0x001F {
+		t.Fatalf("unexpected memory PNG pixels: (50,60)=0x%04X (52,61)=0x%04X", vm.Screen[60][50], vm.Screen[61][52])
+	}
+}
+
+func TestJpgDecodeAndDraw(t *testing.T) {
+	tmpDir := t.TempDir()
+	loDir := filepath.Join(tmpDir, "lo")
+	if err := os.MkdirAll(loDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Create a solid 16x16 white (255,255,255) JPEG image
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+		}
+	}
+
+	var jpgBuf bytes.Buffer
+	if err := jpeg.Encode(&jpgBuf, img, &jpeg.Options{Quality: 100}); err != nil {
+		t.Fatalf("jpeg.Encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(loDir, "tile.jpg"), jpgBuf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	src := `
+package main
+
+var rawBuf [2048]byte
+
+func main() {
+	tft_fill_screen(0x0000)
+	ok, w, h := os_jpg_info("/lo/tile.jpg")
+	drawn1 := tft_draw_jpg_file("/lo/tile.jpg", 10, 20, 0)
+
+	n := fs_read("/lo/tile.jpg", 0, &rawBuf, 2048)
+	drawn2 := tft_draw_jpg(&rawBuf, n, 50, 60, 1) // 1/2 scale (8x8)
+
+	println(ok, w, h, drawn1, drawn2)
+}
+`
+	lapp, _, err := CompileToLapp("JpgTest", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v", err)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 100000
+	var out bytes.Buffer
+	vm.Stdout = &out
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "1 16 16 1 1" {
+		t.Fatalf("expected '1 16 16 1 1', got %q", out.String())
+	}
+	// Check 1:1 draw at (10,20) .. (25,35)
+	if vm.Screen[20][10] != 0xFFFF || vm.Screen[35][25] != 0xFFFF {
+		t.Fatalf("expected white 0xFFFF at (10,20) and (25,35), got 0x%04X and 0x%04X", vm.Screen[20][10], vm.Screen[35][25])
+	}
+	// Check 1:2 scaled draw at (50,60) .. (57,67), and (58,68) should remain black (0x0000)
+	if vm.Screen[60][50] != 0xFFFF || vm.Screen[67][57] != 0xFFFF || vm.Screen[68][58] != 0x0000 {
+		t.Fatalf("unexpected 1/2 scale pixels: (50,60)=0x%04X (57,67)=0x%04X (58,68)=0x%04X",
+			vm.Screen[60][50], vm.Screen[67][57], vm.Screen[68][58])
 	}
 }

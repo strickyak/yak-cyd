@@ -101,3 +101,19 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode = nullptr,
 bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                         size_t payloadLen, int* outExitCode = nullptr,
                         String* outErrMsg = nullptr);
+
+// ---------------------------------------------------------------------------
+// PNG Image Decoder & Renderer (implemented in lakatos_png.cpp)
+// ---------------------------------------------------------------------------
+bool lakatosPngInfo(const char* vfsPath, int* outWidth, int* outHeight);
+bool lakatosDrawPngFile(const char* vfsPath, int x, int y);
+bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y);
+
+// ---------------------------------------------------------------------------
+// JPEG Image Decoder & Renderer via ROM tjpgd (implemented in lakatos_jpg.cpp)
+// ---------------------------------------------------------------------------
+bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight);
+bool lakatosDrawJpgFile(const char* vfsPath, int x, int y, int scale = 0);
+bool lakatosDrawJpgMem(const uint8_t* data, size_t len, int x, int y, int scale = 0);
+
+

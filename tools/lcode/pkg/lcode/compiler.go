@@ -3176,6 +3176,117 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "tft_push_rgb565", "os_tft_push_rgb565":
 		c.emitOp("SYSCALL", "SYS_TFT_PUSH_RGB565")
 		return VoidType, nil
+	case "tft_draw_png_file", "os_draw_png_file", "os_tft_draw_png_file":
+		c.emitOp("SYSCALL", "SYS_TFT_DRAW_PNG_FILE")
+		return ScalarInt, nil
+	case "tft_draw_png", "os_draw_png", "tft_draw_png_mem", "os_draw_png_mem", "os_tft_draw_png":
+		if len(argTypes) == 3 && argTypes[0].Kind == "slice" {
+			if argTypes[0].ScalarType == "string" {
+				c.emitOp("SYSCALL", "SYS_TFT_DRAW_PNG_FILE")
+				return ScalarInt, nil
+			}
+			// 3-arg slice form: tft_draw_png(pngBytesSlice, x, y)
+			yTmp := c.allocTemp(ScalarInt)
+			xTmp := c.allocTemp(ScalarInt)
+			sTmp := c.allocTemp(argTypes[0])
+			c.emitStoreVar(yTmp)
+			c.emitStoreVar(xTmp)
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+			c.emitLoadVar(xTmp)
+			c.emitLoadVar(yTmp)
+		}
+		c.emitOp("SYSCALL", "SYS_TFT_DRAW_PNG_MEM")
+		return ScalarInt, nil
+	case "os_png_info", "tft_png_info", "png_info":
+		if len(argTypes) == 3 {
+			// 3-arg pointer form: os_png_info(path, &w, &h) -> bool
+			phTmp := c.allocTemp(ScalarInt)
+			pwTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(phTmp)
+			c.emitStoreVar(pwTmp)
+			c.emitOp("SYSCALL", "SYS_PNG_INFO")
+			hTmp := c.allocTemp(ScalarInt)
+			wTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(hTmp)
+			c.emitStoreVar(wTmp)
+			c.emitLoadVar(pwTmp)
+			c.emitLoadVar(wTmp)
+			c.emitOp("POKE4")
+			c.emitLoadVar(phTmp)
+			c.emitLoadVar(hTmp)
+			c.emitOp("POKE4")
+			return ScalarInt, nil
+		}
+		c.emitOp("SYSCALL", "SYS_PNG_INFO")
+		return TypeDesc{Kind: "scalar", StructName: "__multi_3", ByteSize: 4}, nil
+	case "tft_draw_jpg_file", "os_draw_jpg_file", "os_tft_draw_jpg_file":
+		if len(argTypes) == 3 {
+			c.emitOp("PUSH_0") // default scale = 0 (1:1)
+		}
+		c.emitOp("SYSCALL", "SYS_TFT_DRAW_JPG_FILE")
+		return ScalarInt, nil
+	case "tft_draw_jpg", "os_draw_jpg", "tft_draw_jpg_mem", "os_draw_jpg_mem", "os_tft_draw_jpg":
+		if len(argTypes) >= 3 && argTypes[0].Kind == "slice" {
+			if argTypes[0].ScalarType == "string" {
+				if len(argTypes) == 3 {
+					c.emitOp("PUSH_0")
+				}
+				c.emitOp("SYSCALL", "SYS_TFT_DRAW_JPG_FILE")
+				return ScalarInt, nil
+			}
+			// Slice form: tft_draw_jpg(jpgBytesSlice, x, y[, scale])
+			scaleTmp := c.allocTemp(ScalarInt)
+			if len(argTypes) == 4 {
+				c.emitStoreVar(scaleTmp)
+			} else {
+				c.emitOp("PUSH_0")
+				c.emitStoreVar(scaleTmp)
+			}
+			yTmp := c.allocTemp(ScalarInt)
+			xTmp := c.allocTemp(ScalarInt)
+			sTmp := c.allocTemp(argTypes[0])
+			c.emitStoreVar(yTmp)
+			c.emitStoreVar(xTmp)
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+			c.emitLoadVar(xTmp)
+			c.emitLoadVar(yTmp)
+			c.emitLoadVar(scaleTmp)
+		} else if len(argTypes) == 4 {
+			// 4-arg raw buffer form: tft_draw_jpg(bufAddr, len, x, y) -> default scale = 0
+			c.emitOp("PUSH_0")
+		}
+		c.emitOp("SYSCALL", "SYS_TFT_DRAW_JPG_MEM")
+		return ScalarInt, nil
+	case "os_jpg_info", "tft_jpg_info", "jpg_info":
+		if len(argTypes) == 3 {
+			// 3-arg pointer form: os_jpg_info(path, &w, &h) -> bool
+			phTmp := c.allocTemp(ScalarInt)
+			pwTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(phTmp)
+			c.emitStoreVar(pwTmp)
+			c.emitOp("SYSCALL", "SYS_JPG_INFO")
+			hTmp := c.allocTemp(ScalarInt)
+			wTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(hTmp)
+			c.emitStoreVar(wTmp)
+			c.emitLoadVar(pwTmp)
+			c.emitLoadVar(wTmp)
+			c.emitOp("POKE4")
+			c.emitLoadVar(phTmp)
+			c.emitLoadVar(hTmp)
+			c.emitOp("POKE4")
+			return ScalarInt, nil
+		}
+		c.emitOp("SYSCALL", "SYS_JPG_INFO")
+		return TypeDesc{Kind: "scalar", StructName: "__multi_3", ByteSize: 4}, nil
 
 	// Touch, Keyboard, LED & Sensors
 	case "os_read_touch", "read_touch", "os_poll_touch", "poll_touch":

@@ -187,6 +187,9 @@ enum LCodeSyscall : uint8_t {
   SysFmtIntToStr      = 0x22,
   SysFmtFloatToStr    = 0x23,
   SysTftDrawFloat     = 0x24,
+  SysTftDrawPngFile   = 0x25,
+  SysTftDrawPngMem    = 0x26,
+  SysPngInfo          = 0x27,
 
   SysReadTouch      = 0x28,
   SysReadTouchRaw   = 0x29,
@@ -209,6 +212,10 @@ enum LCodeSyscall : uint8_t {
   SysSerialAvail   = 0x3B,
   SysSerialRead    = 0x3C,
   SysSerialWrite   = 0x3D,
+
+  SysTftDrawJpgFile = 0x40,
+  SysTftDrawJpgMem  = 0x41,
+  SysJpgInfo        = 0x42,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -735,6 +742,56 @@ struct LCodeVM {
                       (uint16_t*)(mem + pixAddr));
         return true;
       }
+      case SysTftDrawPngFile: {
+        uint32_t y = 0, x = 0;
+        if (!pop(y) || !pop(x)) return false;
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        bool ok = lakatosDrawPngFile(pathBuf, (int)(int32_t)x, (int)(int32_t)y);
+        return push(ok ? 1 : 0);
+      }
+      case SysTftDrawPngMem: {
+        uint32_t y = 0, x = 0, len = 0, bufAddr = 0;
+        if (!pop(y) || !pop(x) || !pop(len) || !pop(bufAddr)) return false;
+        if (len == 0 || !checkAddr(bufAddr, len)) return push(0);
+        bool ok = lakatosDrawPngMem(mem + bufAddr, len, (int)(int32_t)x, (int)(int32_t)y);
+        return push(ok ? 1 : 0);
+      }
+      case SysPngInfo: {
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        int w = 0, h = 0;
+        bool ok = lakatosPngInfo(pathBuf, &w, &h);
+        return push(ok ? 1 : 0) &&
+               push((uint32_t)(int32_t)w) &&
+               push((uint32_t)(int32_t)h);
+      }
+      case SysTftDrawJpgFile: {
+        uint32_t scale = 0, y = 0, x = 0;
+        if (!pop(scale) || !pop(y) || !pop(x)) return false;
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        bool ok = lakatosDrawJpgFile(pathBuf, (int)(int32_t)x, (int)(int32_t)y,
+                                     (int)(int32_t)scale);
+        return push(ok ? 1 : 0);
+      }
+      case SysTftDrawJpgMem: {
+        uint32_t scale = 0, y = 0, x = 0, len = 0, bufAddr = 0;
+        if (!pop(scale) || !pop(y) || !pop(x) || !pop(len) || !pop(bufAddr)) return false;
+        if (len == 0 || !checkAddr(bufAddr, len)) return push(0);
+        bool ok = lakatosDrawJpgMem(mem + bufAddr, len, (int)(int32_t)x,
+                                    (int)(int32_t)y, (int)(int32_t)scale);
+        return push(ok ? 1 : 0);
+      }
+      case SysJpgInfo: {
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        int w = 0, h = 0;
+        bool ok = lakatosJpgInfo(pathBuf, &w, &h);
+        return push(ok ? 1 : 0) &&
+               push((uint32_t)(int32_t)w) &&
+               push((uint32_t)(int32_t)h);
+      }
 
       // Touch, Keyboard, LED & Sensors
       case SysReadTouch: {
@@ -888,16 +945,16 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     return false;
   }
 
-  // Allocate the largest contiguous RAM arena up to 128 KB while preserving
-  // at least 20 KB of system heap for Wi-Fi / HTTP / SD syscalls.
+  // Allocate the largest contiguous RAM arena up to 96 KB while preserving
+  // at least 64 KB of system heap for Wi-Fi / HTTP / SD / PNG inflate syscalls.
   size_t maxContig = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   size_t freeTotal = ESP.getFreeHeap();
-  size_t targetArena = 131072; // 128 KB ideal
+  size_t targetArena = 98304; // 96 KB ideal
   if (targetArena > maxContig) {
     targetArena = maxContig & ~4095u;
   }
-  if (freeTotal > 24576 && targetArena > freeTotal - 20480) {
-    targetArena = (freeTotal - 20480) & ~4095u;
+  if (freeTotal > 98304 && targetArena > freeTotal - 65536) {
+    targetArena = (freeTotal - 65536) & ~4095u;
   }
   if (targetArena < 32768) {
     free(vm);

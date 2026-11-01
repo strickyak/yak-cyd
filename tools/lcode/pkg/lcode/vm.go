@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"math"
 	"math/rand"
@@ -1706,6 +1708,113 @@ func (vm *VM) execSyscall(sysId byte) error {
 				}
 			}
 		}
+	case SysTftDrawPngFile:
+		y, _ := vm.pop()
+		x, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			vm.push(0)
+		} else if vm.drawPngBytes(data, int(int32(x)), int(int32(y))) {
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
+	case SysTftDrawPngMem:
+		y, _ := vm.pop()
+		x, _ := vm.pop()
+		ln, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if ln == 0 || vm.checkAddr(bufAddr, int(ln)) != nil {
+			vm.push(0)
+		} else if vm.drawPngBytes(vm.Memory[bufAddr:bufAddr+ln], int(int32(x)), int(int32(y))) {
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
+	case SysPngInfo:
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			vm.push(0)
+			vm.push(0)
+			vm.push(0)
+		} else if cfg, err := png.DecodeConfig(bytes.NewReader(data)); err != nil {
+			vm.push(0)
+			vm.push(0)
+			vm.push(0)
+		} else {
+			vm.push(1)
+			vm.push(uint32(cfg.Width))
+			vm.push(uint32(cfg.Height))
+		}
+	case SysTftDrawJpgFile:
+		scale, _ := vm.pop()
+		y, _ := vm.pop()
+		x, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			vm.push(0)
+		} else if vm.drawJpgBytes(data, int(int32(x)), int(int32(y)), int(int32(scale))) {
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
+	case SysTftDrawJpgMem:
+		scale, _ := vm.pop()
+		y, _ := vm.pop()
+		x, _ := vm.pop()
+		ln, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if ln == 0 || vm.checkAddr(bufAddr, int(ln)) != nil {
+			vm.push(0)
+		} else if vm.drawJpgBytes(vm.Memory[bufAddr:bufAddr+ln], int(int32(x)), int(int32(y)), int(int32(scale))) {
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
+	case SysJpgInfo:
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			vm.push(0)
+			vm.push(0)
+			vm.push(0)
+			return nil
+		}
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			vm.push(0)
+			vm.push(0)
+			vm.push(0)
+		} else {
+			vm.push(1)
+			vm.push(uint32(cfg.Width))
+			vm.push(uint32(cfg.Height))
+		}
 
 	// Touch, Keyboard, LED & Sensors
 	case SysReadTouch:
@@ -2018,4 +2127,70 @@ func (vm *VM) RenderASCII() string {
 	}
 	out.WriteString("+--------------------------------------------------------------------------------+\n")
 	return out.String()
+}
+
+func (vm *VM) drawPngBytes(data []byte, dstX, dstY int) bool {
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return false
+	}
+	b := img.Bounds()
+	for py := b.Min.Y; py < b.Max.Y; py++ {
+		sy := dstY + (py - b.Min.Y)
+		if sy < 0 || sy >= 240 {
+			continue
+		}
+		for px := b.Min.X; px < b.Max.X; px++ {
+			sx := dstX + (px - b.Min.X)
+			if sx < 0 || sx >= 320 {
+				continue
+			}
+			r16, g16, b16, a16 := img.At(px, py).RGBA()
+			if a16 >= 0x8000 {
+				r8 := uint16((r16 * 255) / a16)
+				g8 := uint16((g16 * 255) / a16)
+				b8 := uint16((b16 * 255) / a16)
+				c565 := ((r8 & 0xF8) << 8) | ((g8 & 0xFC) << 3) | (b8 >> 3)
+				vm.Screen[sy][sx] = c565
+			}
+		}
+	}
+	return true
+}
+
+func (vm *VM) drawJpgBytes(data []byte, dstX, dstY, scale int) bool {
+	if scale < 0 {
+		scale = 0
+	} else if scale > 3 {
+		scale = 3
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		return false
+	}
+	b := img.Bounds()
+	w := b.Dx() >> scale
+	h := b.Dy() >> scale
+	step := 1 << scale
+	for oy := 0; oy < h; oy++ {
+		sy := dstY + oy
+		if sy < 0 || sy >= 240 {
+			continue
+		}
+		py := b.Min.Y + oy*step
+		for ox := 0; ox < w; ox++ {
+			sx := dstX + ox
+			if sx < 0 || sx >= 320 {
+				continue
+			}
+			px := b.Min.X + ox*step
+			r16, g16, b16, _ := img.At(px, py).RGBA()
+			r8 := uint16(r16 >> 8)
+			g8 := uint16(g16 >> 8)
+			b8 := uint16(b16 >> 8)
+			c565 := ((r8 & 0xF8) << 8) | ((g8 & 0xFC) << 3) | (b8 >> 3)
+			vm.Screen[sy][sx] = c565
+		}
+	}
+	return true
 }

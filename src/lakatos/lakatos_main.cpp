@@ -504,37 +504,63 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry) {
   tft.setTextColor(TFT_YELLOW, 0x1082);
   tft.drawString(fullPath, 160, 34, 2);
 
-  char buf[257];
-  memset(buf, 0, sizeof(buf));
-  int32_t got = lakatosFsRead(fullPath, 0, buf, 256);
-
   tft.fillRect(20, 56, 280, 118, TFT_BLACK);
   tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
 
-  if (got > 0) {
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    int cx = 24, cy = 60;
-    for (int i = 0; i < got && cy < 164; i++) {
-      char c = buf[i];
-      if (c == '\r') continue;
-      if (c == '\n') {
-        cx = 24;
-        cy += 10;
-        continue;
-      }
-      if (c < 32 || c > 126) c = '.';
-      tft.drawChar(cx, cy, c, TFT_GREEN, TFT_BLACK, 1);
-      cx += 6;
-      if (cx > 290) {
-        cx = 24;
-        cy += 10;
-      }
+  int pngW = 0, pngH = 0;
+  int jpgW = 0, jpgH = 0;
+  bool isPng = lakatosPngInfo(fullPath, &pngW, &pngH);
+  bool isJpg = !isPng && lakatosJpgInfo(fullPath, &jpgW, &jpgH);
+  if (isPng) {
+    int px = 21 + ((278 - pngW) > 0 ? (278 - pngW) / 2 : 0);
+    int py = 57 + ((116 - pngH) > 0 ? (116 - pngH) / 2 : 0);
+    lakatosDrawPngFile(fullPath, px, py);
+    // Redraw modal frame around bottom if PNG was taller than preview box
+    tft.fillRect(12, 174, 296, 42, 0x1082);
+    tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
+    tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
+  } else if (isJpg) {
+    int scale = 0;
+    while (scale < 3 && ((jpgW >> scale) > 278 || (jpgH >> scale) > 116)) {
+      scale++;
     }
+    int sw = jpgW >> scale;
+    int sh = jpgH >> scale;
+    int px = 21 + ((278 - sw) > 0 ? (278 - sw) / 2 : 0);
+    int py = 57 + ((116 - sh) > 0 ? (116 - sh) / 2 : 0);
+    lakatosDrawJpgFile(fullPath, px, py, scale);
+    tft.fillRect(12, 174, 296, 42, 0x1082);
+    tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
+    tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
   } else {
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString("(Empty or unreadable file)", 160, 115, 2);
+    char buf[257];
+    memset(buf, 0, sizeof(buf));
+    int32_t got = lakatosFsRead(fullPath, 0, buf, 256);
+    if (got > 0) {
+      tft.setTextDatum(TL_DATUM);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      int cx = 24, cy = 60;
+      for (int i = 0; i < got && cy < 164; i++) {
+        char c = buf[i];
+        if (c == '\r') continue;
+        if (c == '\n') {
+          cx = 24;
+          cy += 10;
+          continue;
+        }
+        if (c < 32 || c > 126) c = '.';
+        tft.drawChar(cx, cy, c, TFT_GREEN, TFT_BLACK, 1);
+        cx += 6;
+        if (cx > 290) {
+          cx = 24;
+          cy += 10;
+        }
+      }
+    } else {
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      tft.drawString("(Empty or unreadable file)", 160, 115, 2);
+    }
   }
 
   bool canCopyLo = (strncmp(fullPath, "/lo/", 4) != 0);

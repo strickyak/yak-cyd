@@ -143,6 +143,12 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
 | | `tft_draw_float(val float32, decimals, x, y, font int) int` | Draws `float32` with `decimals` places at `(x,y)` |
 | | `ftoa(val float32, decimals int) string` | Formats `float32` as a `string` slice |
 | | `tft_push_rgb565(x, y, w, h, pixAddr int)` | Pushes raw `uint16` RGB565 sprite buffer at `pixAddr` |
+| | `tft_draw_png_file(path string, x, y int) bool` | Streams and draws a `.png` file from `/lo`, `/sd`, or `/sh` at `(x,y)` (transparent pixels skipped) |
+| | `tft_draw_png(bufAddr, len, x, y int) bool` | Decodes and draws a PNG image from RAM buffer (or 3-arg `(sliceOrPath, x, y)`) |
+| | `ok, w, h := os_png_info(path string)` | Reads the `IHDR` header of a `.png` file and returns `(ok, width, height)` |
+| | `tft_draw_jpg_file(path string, x, y[, scale] int) bool` | Streams and draws a `.jpg` file via ROM TJpgDec (`scale`: `0`=1/1, `1`=1/2, `2`=1/4, `3`=1/8) |
+| | `tft_draw_jpg(bufAddr, len, x, y[, scale] int) bool` | Decodes and draws a JPEG image from RAM buffer (or slice `(sliceOrPath, x, y[, scale])`) |
+| | `ok, w, h := os_jpg_info(path string)` | Reads the JPEG header via ROM `jd_prepare` and returns `(ok, width, height)` |
 | **Input & IO** | `touched, tx, ty := os_read_touch()` | Polls calibrated touch coordinates (`tx` in `0..319`, `ty` in `0..239`) |
 | | `os_poll_touch(&tx, &ty) bool` | Pointer-based touch polling helper |
 | | `os_prompt_keyboard(title string, bufAddr, maxLen, allowCtrlC int) int` | Opens Lakatos modal stylus keyboard (`1`=Enter, `0`=Cancel, `-1`=`^C`) |
