@@ -1,6 +1,6 @@
-# LCode & LGolf Game Authoring Guide for AI Agents
+# Writing Lakatos OS Apps & Games (LCode & LGolf Guide)
 
-This guide teaches AI Coding Agents how to write, compile, emulate, debug, and publish games and applications for **Lakatos OS** on the **ESP32-2432S028R (Cheap Yellow Display / CYD)** using the **LCode** 32-bit bytecode engine and the **LGolf** (`.lgolf`) language.
+This guide explains how to write, compile, emulate, debug, and publish games and applications for **Lakatos OS** on the **ESP32-2432S028R (Cheap Yellow Display / CYD)** using the **LCode** 32-bit bytecode engine and the **LGolf** (`.lgolf`) language.
 
 ---
 
@@ -149,8 +149,10 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
 | | `tft_draw_jpg_file(path string, x, y[, scale] int) bool` | Streams and draws a `.jpg` file via ROM TJpgDec (`scale`: `0`=1/1, `1`=1/2, `2`=1/4, `3`=1/8) |
 | | `tft_draw_jpg(bufAddr, len, x, y[, scale] int) bool` | Decodes and draws a JPEG image from RAM buffer (or slice `(sliceOrPath, x, y[, scale])`) |
 | | `ok, w, h := os_jpg_info(path string)` | Reads the JPEG header via ROM `jd_prepare` and returns `(ok, width, height)` |
-| **Input & IO** | `touched, tx, ty := os_read_touch()` | Polls calibrated touch coordinates (`tx` in `0..319`, `ty` in `0..239`) |
-| | `os_poll_touch(&tx, &ty) bool` | Pointer-based touch polling helper |
+| **Input & IO** | `touched, tx, ty := os_read_touch()` | Continuous canvas/game touch stream (`tx` in `0..319`, `ty` in `0..239`); stays `true` while held/dragged |
+| | `clicked, tx, ty := os_read_click()` | Discrete button/link tap; fires at most once per physical press and requires a 35 ms release before firing again |
+| | `os_poll_touch(&tx, &ty) bool` | Pointer-based continuous touch polling helper |
+| | `os_poll_click(&tx, &ty) bool` | Pointer-based discrete click polling helper |
 | | `os_prompt_keyboard(title string, bufAddr, maxLen, allowCtrlC int) int` | Opens Lakatos modal stylus keyboard (`1`=Enter, `0`=Cancel, `-1`=`^C`) |
 | | `os_set_rgb_led(r, g, b, durationMs int)` | Controls on-board RGB LED |
 | | `os_read_ldr() int` | Reads ambient light sensor (`0..4095`) |

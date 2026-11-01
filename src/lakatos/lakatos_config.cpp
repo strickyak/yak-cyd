@@ -131,6 +131,7 @@ static char   gDeviceName[32]  = "test";
 static char   gSerialNo[32]    = "ing";
 static char   gShUrl[96]       = "http://pizga.net:1908/";
 static char   gShPass[64]      = "";  // Never stored in source code; loaded from NVS
+static bool   gTouchSpotEnabled = false;
 
 static void applyAirportCode(const char* code) {
   char up[4] = {'S', 'F', 'O', '\0'};
@@ -188,6 +189,7 @@ static void saveConfigToNvs() {
   prefs.putString("serialNo", gSerialNo);
   prefs.putString("shUrl", gShUrl);
   prefs.putString("shPass", gShPass);
+  prefs.putBool("tDot", gTouchSpotEnabled);
   prefs.end();
 }
 
@@ -203,6 +205,7 @@ void initLakatosConfig() {
   String savedSer  = prefs.getString("serialNo", "ing");
   String savedUrl  = prefs.getString("shUrl", "http://pizga.net:1908/");
   String savedPass = prefs.getString("shPass", "");
+  gTouchSpotEnabled = prefs.getBool("tDot", false);
   prefs.end();
 
   strncpy(gDeviceName, savedDev.c_str(), sizeof(gDeviceName) - 1);
@@ -275,6 +278,15 @@ void lakatosSetSuperhighwayPassword(const char* pass) {
   saveConfigToNvs();
 }
 
+bool lakatosGetTouchSpotEnabled() {
+  return gTouchSpotEnabled;
+}
+
+void lakatosSetTouchSpotEnabled(bool en) {
+  gTouchSpotEnabled = en;
+  saveConfigToNvs();
+}
+
 bool lakatosWifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
 
 int64_t lakatosGetUnixTime() {
@@ -304,6 +316,7 @@ static const char* const KB_ROWS[3][4] = {
 };
 
 static void drawKbInputBox(const String& text, bool maskPassword) {
+  LakatosTftGuard tftLock;
   tft.fillRoundRect(4, 28, 246, 30, 4, TFT_BLACK);
   tft.drawRoundRect(4, 28, 246, 30, 4, TFT_CYAN);
 
@@ -324,6 +337,7 @@ static void drawKbInputBox(const String& text, bool maskPassword) {
 }
 
 static void drawKbGrid(int page) {
+  LakatosTftGuard tftLock;
   tft.fillRect(0, 62, LAKATOS_SCREEN_W, LAKATOS_SCREEN_H - 62, 0x0841);
 
   for (int r = 0; r < 4; r++) {
@@ -371,40 +385,43 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
   String text = String(buf);
   int page = 0;
 
-  tft.fillScreen(0x0841);
-  tft.fillRect(0, 0, LAKATOS_SCREEN_W, 25, TFT_NAVY);
+  {
+    LakatosTftGuard tftLock;
+    tft.fillScreen(0x0841);
+    tft.fillRect(0, 0, LAKATOS_SCREEN_W, 25, TFT_NAVY);
 
-  tft.fillRoundRect(2, 2, 56, 20, 4, 0x2945);
-  tft.drawRoundRect(2, 2, 56, 20, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString("CANCEL", 30, 12, 1);
+    tft.fillRoundRect(2, 2, 56, 20, 4, 0x2945);
+    tft.drawRoundRect(2, 2, 56, 20, 4, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x2945);
+    tft.drawString("CANCEL", 30, 12, 1);
 
-  if (allowCtrlC) {
-    tft.fillRoundRect(62, 2, 48, 20, 4, 0xA800);
-    tft.drawRoundRect(62, 2, 48, 20, 4, TFT_RED);
-    tft.setTextColor(TFT_WHITE, 0xA800);
-    tft.drawString("^C", 86, 12, 2);
+    if (allowCtrlC) {
+      tft.fillRoundRect(62, 2, 48, 20, 4, 0xA800);
+      tft.drawRoundRect(62, 2, 48, 20, 4, TFT_RED);
+      tft.setTextColor(TFT_WHITE, 0xA800);
+      tft.drawString("^C", 86, 12, 2);
+    }
+
+    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
+    tft.drawString(title ? title : "INPUT", allowCtrlC ? 172 : 148, 12, 2);
+
+    tft.fillRoundRect(236, 2, 81, 20, 4, TFT_DARKGREEN);
+    tft.drawRoundRect(236, 2, 81, 20, 4, TFT_GREEN);
+    tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+    tft.drawString("SAVE/OK", 276, 12, 1);
+
+    tft.fillRoundRect(254, 28, 63, 30, 4, 0x4800);
+    tft.drawRoundRect(254, 28, 63, 30, 4, TFT_RED);
+    tft.setTextColor(TFT_WHITE, 0x4800);
+    tft.drawString("DEL", 285, 43, 2);
+
+    drawKbInputBox(text, maskPassword);
+    drawKbGrid(page);
   }
 
-  tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-  tft.drawString(title ? title : "INPUT", allowCtrlC ? 172 : 148, 12, 2);
-
-  tft.fillRoundRect(236, 2, 81, 20, 4, TFT_DARKGREEN);
-  tft.drawRoundRect(236, 2, 81, 20, 4, TFT_GREEN);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  tft.drawString("SAVE/OK", 276, 12, 1);
-
-  tft.fillRoundRect(254, 28, 63, 30, 4, 0x4800);
-  tft.drawRoundRect(254, 28, 63, 30, 4, TFT_RED);
-  tft.setTextColor(TFT_WHITE, 0x4800);
-  tft.drawString("DEL", 285, 43, 2);
-
-  drawKbInputBox(text, maskPassword);
-  drawKbGrid(page);
-
   // Wait for touch release before accepting new taps
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   bool wasDown = false;
   uint32_t lastRel = millis();
@@ -473,6 +490,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
 // 3-Point Touchscreen Calibration Modal
 // ---------------------------------------------------------------------------
 static void drawCrosshair(int x, int y, uint16_t color, const char* label) {
+  LakatosTftGuard tftLock;
   tft.drawCircle(x, y, 16, color);
   tft.drawCircle(x, y, 8, color);
   tft.fillCircle(x, y, 3, TFT_WHITE);
@@ -492,12 +510,15 @@ static void runTouchCalibrationModal() {
   const uint16_t cols[3] = {TFT_CYAN, TFT_YELLOW, TFT_GREEN};
 
   for (int step = 0; step < 3; step++) {
-    tft.fillScreen(TFT_BLACK);
-    tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
-    tft.setTextColor(TFT_WHITE, TFT_NAVY);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("LAKATOS TOUCH CALIBRATION", 160, 12, 2);
-    drawCrosshair(tx[step], ty[step], cols[step], labels[step]);
+    {
+      LakatosTftGuard tftLock;
+      tft.fillScreen(TFT_BLACK);
+      tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+      tft.setTextColor(TFT_WHITE, TFT_NAVY);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("LAKATOS TOUCH CALIBRATION", 160, 12, 2);
+      drawCrosshair(tx[step], ty[step], cols[step], labels[step]);
+    }
 
     while (lakatosReadTouch().touched) delay(20);
     while (true) {
@@ -532,11 +553,14 @@ static bool runWifiConfigModal() {
   int count = 0;
 
   auto scanNow = [&]() {
-    tft.fillScreen(0x0841);
-    tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_NAVY);
-    tft.drawString("SCANNING WI-FI...", 160, 12, 2);
+    {
+      LakatosTftGuard tftLock;
+      tft.fillScreen(0x0841);
+      tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_WHITE, TFT_NAVY);
+      tft.drawString("SCANNING WI-FI...", 160, 12, 2);
+    }
     WiFi.mode(WIFI_STA);
     int n = WiFi.scanNetworks(false, false);
     count = 0;
@@ -557,6 +581,7 @@ static bool runWifiConfigModal() {
   };
 
   auto drawWifiList = [&]() {
+    LakatosTftGuard tftLock;
     tft.fillScreen(0x0841);
     tft.fillRect(0, 0, LAKATOS_SCREEN_W, 25, TFT_NAVY);
     tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
@@ -597,7 +622,7 @@ static bool runWifiConfigModal() {
 
   scanNow();
   drawWifiList();
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   bool wasDown = false;
   uint32_t lastRel = millis();
@@ -623,10 +648,13 @@ static bool runWifiConfigModal() {
               prefs.putString("ssid", ssids[idx]);
               prefs.putString("pass", passBuf);
               prefs.end();
-              tft.fillScreen(0x0841);
-              tft.setTextDatum(MC_DATUM);
-              tft.setTextColor(TFT_YELLOW, 0x0841);
-              tft.drawString("Connecting to " + ssids[idx] + "...", 160, 120, 2);
+              {
+                LakatosTftGuard tftLock;
+                tft.fillScreen(0x0841);
+                tft.setTextDatum(MC_DATUM);
+                tft.setTextColor(TFT_YELLOW, 0x0841);
+                tft.drawString("Connecting to " + ssids[idx] + "...", 160, 120, 2);
+              }
               WiFi.disconnect();
               WiFi.setSleep(false);
               WiFi.begin(ssids[idx].c_str(), passBuf);
@@ -655,6 +683,7 @@ static bool runWifiConfigModal() {
 // ---------------------------------------------------------------------------
 static bool runAirportSelectorModal() {
   auto drawAirportModal = [&]() {
+    LakatosTftGuard tftLock;
     tft.fillScreen(0x0841);
     tft.fillRect(0, 0, LAKATOS_SCREEN_W, 25, TFT_NAVY);
 
@@ -689,7 +718,7 @@ static bool runAirportSelectorModal() {
   };
 
   drawAirportModal();
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   bool wasDown = false;
   uint32_t lastRel = millis();
@@ -736,56 +765,59 @@ static bool runAirportSelectorModal() {
 // ABOUT Lakatos Operating System Modal
 // ---------------------------------------------------------------------------
 static bool runAboutModal() {
-  tft.fillScreen(0x0841);
-  tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+  {
+    LakatosTftGuard tftLock;
+    tft.fillScreen(0x0841);
+    tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
 
-  // [ HOME ] (top-left -> goes back to index page)
-  tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
-  tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString("HOME", 31, 12, 2);
+    // [ HOME ] (top-left -> goes back to index page)
+    tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
+    tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x2945);
+    tft.drawString("HOME", 31, 12, 2);
 
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.drawString("ABOUT", 160, 12, 2);
+    tft.setTextColor(TFT_WHITE, TFT_NAVY);
+    tft.drawString("ABOUT", 160, 12, 2);
 
-  // [ CONFIG ] (top-right -> returns to CONFIG page)
-  tft.fillRoundRect(256, 2, 62, 20, 4, TFT_MAROON);
-  tft.drawRoundRect(256, 2, 62, 20, 4, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_MAROON);
-  tft.drawString("CONFIG", 287, 12, 1);
+    // [ CONFIG ] (top-right -> returns to CONFIG page)
+    tft.fillRoundRect(256, 2, 62, 20, 4, TFT_MAROON);
+    tft.drawRoundRect(256, 2, 62, 20, 4, TFT_WHITE);
+    tft.setTextColor(TFT_WHITE, TFT_MAROON);
+    tft.drawString("CONFIG", 287, 12, 1);
 
-  // Main Card
-  tft.fillRoundRect(6, 30, 308, 204, 6, 0x1082);
-  tft.drawRoundRect(6, 30, 308, 204, 6, TFT_CYAN);
+    // Main Card
+    tft.fillRoundRect(6, 30, 308, 204, 6, 0x1082);
+    tft.drawRoundRect(6, 30, 308, 204, 6, TFT_CYAN);
 
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x1082);
-  tft.drawString("Lakatos Operating System", 160, 38, 2);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x1082);
+    tft.drawString("Lakatos Operating System", 160, 38, 2);
 
-  tft.setTextColor(TFT_YELLOW, 0x1082);
-  tft.drawString("YAK-CYD  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
+    tft.setTextColor(TFT_YELLOW, 0x1082);
+    tft.drawString("YAK-CYD  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
 
-  tft.drawFastHLine(16, 72, 288, 0x39E7);
+    tft.drawFastHLine(16, 72, 288, 0x39E7);
 
-  tft.setTextDatum(TL_DATUM);
-  int y = 80;
-  auto drawRow = [&](const char* label, const String& val, uint16_t valCol) {
-    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
-    tft.drawString(label, 16, y, 2);
-    tft.setTextColor(valCol, 0x1082);
-    tft.drawString(val, 108, y, 2);
-    y += 22;
-  };
+    tft.setTextDatum(TL_DATUM);
+    int y = 80;
+    auto drawRow = [&](const char* label, const String& val, uint16_t valCol) {
+      tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+      tft.drawString(label, 16, y, 2);
+      tft.setTextColor(valCol, 0x1082);
+      tft.drawString(val, 108, y, 2);
+      y += 22;
+    };
 
-  drawRow("OS / API:", "Lakatos OS v" + String(LAKATOS_API_VERSION), TFT_WHITE);
-  drawRow("Runtime:", "LCode 32-Bit VM + FPU", TFT_GREEN);
-  drawRow("Device ID:", String(gDeviceName) + String(gSerialNo), TFT_YELLOW);
-  drawRow("Airport:", String(gAirportCode) + " (" + String(gAirportCity) + ")", TFT_CYAN);
-  drawRow("Free RAM:", String(ESP.getFreeHeap() / 1024) + " KB SRAM", TFT_WHITE);
-  drawRow("/sh URL:", String(gShUrl).substring(0, 24), TFT_MAGENTA);
+    drawRow("OS / API:", "Lakatos OS v" + String(LAKATOS_API_VERSION), TFT_WHITE);
+    drawRow("Runtime:", "LCode 32-Bit VM + FPU", TFT_GREEN);
+    drawRow("Device ID:", String(gDeviceName) + String(gSerialNo), TFT_YELLOW);
+    drawRow("Airport:", String(gAirportCode) + " (" + String(gAirportCity) + ")", TFT_CYAN);
+    drawRow("Free RAM:", String(ESP.getFreeHeap() / 1024) + " KB SRAM", TFT_WHITE);
+    drawRow("/sh URL:", String(gShUrl).substring(0, 24), TFT_MAGENTA);
+  }
 
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   bool wasDown = false;
   uint32_t lastRel = millis();
@@ -815,6 +847,7 @@ static bool runAboutModal() {
 // Main CONFIG Screen
 // ---------------------------------------------------------------------------
 static void drawConfigScreen() {
+  LakatosTftGuard tftLock;
   tft.fillScreen(0x0841);
   tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
 
@@ -905,12 +938,30 @@ static void drawConfigScreen() {
   tft.setTextColor(TFT_WHITE, 0x18E3);
   tft.drawString((WiFi.status() == WL_CONNECTED) ? "ONLINE" : "CONFIGURE", 159, 212, 2);
 
-  tft.fillRoundRect(215, 172, 101, 62, 6, 0x18E3);
-  tft.drawRoundRect(215, 172, 101, 62, 6, TFT_ORANGE);
+  // Right column (x: 215..316): [x] TOUCH DOT checkbox (y: 172..201) + [CALIBRATE] (y: 205..234)
+  uint16_t spotBg = gTouchSpotEnabled ? 0x1A26 : 0x18E3;
+  uint16_t spotBorder = gTouchSpotEnabled ? TFT_GREEN : TFT_LIGHTGREY;
+  tft.fillRoundRect(215, 172, 101, 29, 5, spotBg);
+  tft.drawRoundRect(215, 172, 101, 29, 5, spotBorder);
+  // Checkbox square at (221, 179, 14, 14)
+  tft.fillRect(221, 179, 14, 14, gTouchSpotEnabled ? TFT_DARKGREEN : TFT_BLACK);
+  tft.drawRect(221, 179, 14, 14, TFT_WHITE);
+  if (gTouchSpotEnabled) {
+    // Draw checkmark
+    tft.drawLine(223, 186, 226, 190, TFT_YELLOW);
+    tft.drawLine(226, 190, 232, 181, TFT_YELLOW);
+    tft.drawLine(223, 187, 226, 191, TFT_YELLOW);
+    tft.drawLine(226, 191, 232, 182, TFT_YELLOW);
+  }
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(gTouchSpotEnabled ? TFT_YELLOW : TFT_LIGHTGREY, spotBg);
+  tft.drawString("TOUCH DOT", 240, 186, 1);
+
+  tft.fillRoundRect(215, 205, 101, 29, 5, 0x18E3);
+  tft.drawRoundRect(215, 205, 101, 29, 5, TFT_ORANGE);
+  tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_ORANGE, 0x18E3);
-  tft.drawString("TOUCHSCREEN", 265, 190, 1);
-  tft.setTextColor(TFT_WHITE, 0x18E3);
-  tft.drawString("CALIBRATE", 265, 212, 2);
+  tft.drawString("CALIBRATE", 265, 219, 2);
 }
 
 void runLakatosConfigScreen(bool startInCalibration) {
@@ -918,7 +969,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
     runTouchCalibrationModal();
   }
   drawConfigScreen();
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   bool wasDown = false;
   uint32_t lastRel = millis();
@@ -980,6 +1031,8 @@ void runLakatosConfigScreen(bool startInCalibration) {
             if (runAirportSelectorModal()) return;
           } else if (t.x <= 212) {
             if (runWifiConfigModal()) return;
+          } else if (t.y < 203) {
+            lakatosSetTouchSpotEnabled(!lakatosGetTouchSpotEnabled());
           } else {
             runTouchCalibrationModal();
           }

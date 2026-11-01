@@ -15,7 +15,8 @@ make lakatos
 - [`src/lakatos/lakatos_lcode_vm.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_lcode_vm.cpp) — Resident 32-bit **LCode** bytecode virtual machine with coalescing `malloc`/`free` heap and `OpSYSCALL` bridge, executing `.lapp` binaries directly in RAM with zero Flash wear.
 - [`tools/lcode/`](file:///home/strick/github.com/strickyak/yak-cyd/tools/lcode/cmd/lcode/main.go) — Go toolchain (`./bin/lcode`) providing the **LGolf** (`.lgolf`) compiler, `.lasm` assembler, disassembler, headless `320×240` `RGB565` emulator, and Superhighway uploader.
 - [`apps/life/life.lgolf`](file:///home/strick/github.com/strickyak/yak-cyd/apps/life/life.lgolf) — Conway's Game of Life in LGolf (`2,196` bytes compiled `.lapp`).
-- [`doc/lcode-agent-guide.md`](file:///home/strick/github.com/strickyak/yak-cyd/doc/lcode-agent-guide.md) — Guide for AI Agents authoring `.lgolf` games for Lakatos OS.
+- [`apps/gallery/gallery.lgolf`](file:///home/strick/github.com/strickyak/yak-cyd/apps/gallery/gallery.lgolf) — Full-screen PNG/JPEG Gallery Viewer in LGolf with Core 0 background prefetching.
+- [`doc/writing-lakatos-apps.md`](file:///home/strick/github.com/strickyak/yak-cyd/doc/writing-lakatos-apps.md) — Guide to writing, compiling, emulating, and publishing `.lgolf` apps and games for Lakatos OS.
 
 ### 2. `demo1` (`src/demo1/`) — Multi-App Launcher Suite
 Build & flash with:

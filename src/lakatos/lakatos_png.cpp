@@ -301,6 +301,7 @@ struct PngDecoderState {
         line565[spanStartScreenX + spanLen] = rgb888To565(r, g, b);
         spanLen++;
       } else if (spanStartScreenX >= 0) {
+        LakatosTftGuard tftLock;
         tft.pushImage(spanStartScreenX, sy, spanLen, 1, line565 + spanStartScreenX);
         spanStartScreenX = -1;
         spanLen = 0;
@@ -308,6 +309,7 @@ struct PngDecoderState {
     }
 
     if (spanStartScreenX >= 0 && spanLen > 0) {
+      LakatosTftGuard tftLock;
       tft.pushImage(spanStartScreenX, sy, spanLen, 1, line565 + spanStartScreenX);
     }
   }

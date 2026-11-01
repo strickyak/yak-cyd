@@ -215,6 +215,7 @@ const (
 	SysSetRgbLed      = byte(0x2B) // (r g b durationMs -- )
 	SysReadLdr        = byte(0x2C) // ( -- rawLdr)
 	SysReadCpuTemp    = byte(0x2D) // ( -- deciCelsius)
+	SysReadClick      = byte(0x2E) // ( -- clicked x y)
 
 	// Unified VFS (/lo, /sd, /sh), Network & Serial (0x30 .. 0x3F)
 	SysFsLs          = byte(0x30) // (pathSlice entriesAddr maxEntries -- count)
@@ -442,6 +443,7 @@ var SyscallByName = map[string]byte{
 	"SYS_PREFETCH_STATUS":     SysPrefetchStatus,
 	"SYS_PREFETCH_CANCEL":     SysPrefetchCancel,
 	"SYS_READ_TOUCH":         SysReadTouch,
+	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,
 	"SYS_PROMPT_KEYBOARD":    SysPromptKeyboard,
 	"SYS_SET_RGB_LED":        SysSetRgbLed,

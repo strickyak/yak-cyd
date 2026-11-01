@@ -32,13 +32,24 @@ extern TFT_eSPI tft;
 extern Preferences prefs;
 
 // ---------------------------------------------------------------------------
-// Touch & LED Helpers (implemented in lakatos_main.cpp)
+// Touch, TFT Mutex & LED Helpers (implemented in lakatos_main.cpp)
 // ---------------------------------------------------------------------------
+void lakatosTftLock();
+bool lakatosTftTryLock(uint32_t waitMs = 1);
+void lakatosTftUnlock();
+
+struct LakatosTftGuard {
+  LakatosTftGuard()  { lakatosTftLock(); }
+  ~LakatosTftGuard() { lakatosTftUnlock(); }
+};
+
 void initTouchPins();
 LakatosTouchSample lakatosReadTouch();
 void lakatosPollTouchLatch();
 void lakatosClearTouchLatch();
+void lakatosWaitTouchRelease();
 LakatosTouchSample lakatosReadTouchLatched();
+LakatosTouchSample lakatosReadClick();
 void lakatosSetRgbLed(bool r, bool g, bool b, uint32_t durationMs = 0);
 void lakatosUpdateRgbLed();
 int  lakatosReadLdrRaw();
@@ -60,6 +71,8 @@ const char* lakatosGetSerialNumber();
 const char* lakatosGetSuperhighwayUrl();
 const char* lakatosGetSuperhighwayPassword();
 void        lakatosSetSuperhighwayPassword(const char* pass);
+bool        lakatosGetTouchSpotEnabled();
+void        lakatosSetTouchSpotEnabled(bool en);
 bool        lakatosFormatLocalTime(char* buf, size_t len, const char* fmt);
 int64_t     lakatosGetUnixTime();
 bool        lakatosWifiIsConnected();

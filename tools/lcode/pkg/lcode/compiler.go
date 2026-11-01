@@ -3338,6 +3338,28 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		}
 		c.emitOp("SYSCALL", "SYS_READ_TOUCH")
 		return TypeDesc{Kind: "scalar", StructName: "__multi_3", ByteSize: 4}, nil
+	case "os_read_click", "read_click", "os_poll_click", "poll_click":
+		if len(argTypes) == 2 {
+			// 2-arg pointer form: os_poll_click(&tx, &ty) -> bool
+			pyTmp := c.allocTemp(ScalarInt)
+			pxTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(pyTmp)
+			c.emitStoreVar(pxTmp)
+			c.emitOp("SYSCALL", "SYS_READ_CLICK")
+			tyTmp := c.allocTemp(ScalarInt)
+			txTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(tyTmp)
+			c.emitStoreVar(txTmp)
+			c.emitLoadVar(pxTmp)
+			c.emitLoadVar(txTmp)
+			c.emitOp("POKE4")
+			c.emitLoadVar(pyTmp)
+			c.emitLoadVar(tyTmp)
+			c.emitOp("POKE4")
+			return ScalarInt, nil
+		}
+		c.emitOp("SYSCALL", "SYS_READ_CLICK")
+		return TypeDesc{Kind: "scalar", StructName: "__multi_3", ByteSize: 4}, nil
 	case "os_read_touch_raw", "read_touch_raw":
 		c.emitOp("SYSCALL", "SYS_READ_TOUCH_RAW")
 		return TypeDesc{Kind: "scalar", StructName: "__multi_4", ByteSize: 4}, nil

@@ -1880,7 +1880,7 @@ func (vm *VM) execSyscall(sysId byte) error {
 		vm.PrefetchBytes = 0
 
 	// Touch, Keyboard, LED & Sensors
-	case SysReadTouch:
+	case SysReadTouch, SysReadClick:
 		if len(vm.TouchQueue) > 0 {
 			ev := vm.TouchQueue[0]
 			vm.TouchQueue = vm.TouchQueue[1:]
@@ -1890,6 +1890,9 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.push(1)
 			vm.push(uint32(vm.CurrentTouch.X))
 			vm.push(uint32(vm.CurrentTouch.Y))
+			if sysId == SysReadClick {
+				vm.CurrentTouch.Touched = false
+			}
 		} else {
 			vm.push(0)
 			vm.push(0)

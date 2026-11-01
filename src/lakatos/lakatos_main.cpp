@@ -61,9 +61,80 @@ void initTouchPins() {
 }
 
 static SemaphoreHandle_t gTouchMutex = nullptr;
-static volatile bool gHasLatchedTouch = false;
+static SemaphoreHandle_t gTftMutex   = nullptr;
+static volatile bool gHasLatchedTouch    = false;
+static volatile bool gTouchPenDown       = false;
+static volatile bool gTouchPressConsumed = false;
+static volatile bool gTouchClickConsumed = false;
 static uint32_t gLatchedTouchMs = 0;
 static LakatosTouchSample gLatchedTouch = {false, 0, 0, 0, 0, 0};
+
+void lakatosTftLock() {
+  if (gTftMutex) {
+    xSemaphoreTakeRecursive(gTftMutex, portMAX_DELAY);
+  }
+}
+
+bool lakatosTftTryLock(uint32_t waitMs) {
+  if (!gTftMutex) return true;
+  return xSemaphoreTakeRecursive(gTftMutex, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+}
+
+void lakatosTftUnlock() {
+  if (gTftMutex) {
+    xSemaphoreGiveRecursive(gTftMutex);
+  }
+}
+
+enum TouchSpotState {
+  SPOT_NONE = 0,
+  SPOT_WHITE = 1,
+  SPOT_YELLOW = 2,
+  SPOT_BLANKED = 3
+};
+static volatile int gSpotState = SPOT_NONE;
+static volatile int gSpotX = 0;
+static volatile int gSpotY = 0;
+static volatile bool gSpotPendingWhite = false;
+static volatile bool gSpotPendingBlankOld = false;
+static volatile int  gSpotOldX = 0;
+static volatile int  gSpotOldY = 0;
+static volatile uint32_t gSpotDeadlineMs = 0;
+static volatile uint32_t gLastTouchDownMs = 0;
+static constexpr int kSpotRadius = 3;
+
+static void onTouchDeliveredToAppOrUi(int x, int y) {
+  if (!lakatosGetTouchSpotEnabled()) return;
+  bool doDraw = false;
+  bool blankOld = false;
+  int oldX = 0, oldY = 0;
+  if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+  bool moved = (abs(x - gSpotX) + abs(y - gSpotY) >= 8);
+  if (gSpotState == SPOT_WHITE || gSpotState == SPOT_NONE || moved) {
+    if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
+        (gSpotX != x || gSpotY != y)) {
+      blankOld = true;
+      oldX = gSpotX;
+      oldY = gSpotY;
+    }
+    gSpotX = x;
+    gSpotY = y;
+    gSpotState = SPOT_YELLOW;
+    gSpotPendingWhite = false;
+    gSpotPendingBlankOld = false;
+    gSpotDeadlineMs = millis() + 50;
+    doDraw = true;
+  }
+  if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+
+  if (doDraw) {
+    LakatosTftGuard tftGuard;
+    if (blankOld) {
+      tft.fillCircle(oldX, oldY, kSpotRadius, TFT_BLACK);
+    }
+    tft.fillCircle(x, y, kSpotRadius, TFT_YELLOW);
+  }
+}
 
 static LakatosTouchSample readTouchHardwareUnlocked() {
   LakatosTouchSample out = {false, 0, 0, 0, 0, 0};
@@ -115,50 +186,235 @@ LakatosTouchSample lakatosReadTouch() {
   }
   if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
   LakatosTouchSample out = readTouchHardwareUnlocked();
+  if (out.touched) {
+    gTouchPenDown = true;
+    gTouchPressConsumed = true;
+    gHasLatchedTouch = false;
+    gLastTouchDownMs = millis();
+  }
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+  if (out.touched) {
+    onTouchDeliveredToAppOrUi(out.x, out.y);
+  }
   return out;
 }
 
 void lakatosPollTouchLatch() {
-  // Fast non-blocking check of active-low PENIRQ GPIO 36 (~150 ns when untouched)
+  uint32_t now = millis();
+
+  // 1. Check if an active white/yellow spot has reached its blank deadline
+  if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
+      (int32_t)(now - gSpotDeadlineMs) >= 0) {
+    int bx = 0, by = 0;
+    bool shouldBlank = false;
+    if (gTouchMutex && xSemaphoreTake(gTouchMutex, 0) == pdTRUE) {
+      if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
+          (int32_t)(millis() - gSpotDeadlineMs) >= 0) {
+        bx = gSpotX;
+        by = gSpotY;
+        shouldBlank = true;
+      }
+      xSemaphoreGive(gTouchMutex);
+    }
+    if (shouldBlank && lakatosTftTryLock(1)) {
+      tft.fillCircle(bx, by, kSpotRadius, TFT_BLACK);
+      lakatosTftUnlock();
+      if (gTouchMutex && xSemaphoreTake(gTouchMutex, 0) == pdTRUE) {
+        if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
+            (int32_t)(millis() - gSpotDeadlineMs) >= 0) {
+          gSpotState = (digitalRead(XPT2046_IRQ) == LOW) ? SPOT_BLANKED : SPOT_NONE;
+          gSpotPendingWhite = false;
+          gSpotPendingBlankOld = false;
+        }
+        xSemaphoreGive(gTouchMutex);
+      }
+    }
+  }
+
+  // 2. Fast non-blocking check of active-low PENIRQ GPIO 36 (~150 ns when untouched)
   if (digitalRead(XPT2046_IRQ) == HIGH) {
+    if ((uint32_t)(now - gLastTouchDownMs) >= 35) {
+      if (gSpotState == SPOT_BLANKED) {
+        gSpotState = SPOT_NONE;
+      }
+      if ((gTouchPenDown || gTouchClickConsumed) &&
+          gTouchMutex && xSemaphoreTake(gTouchMutex, 0) == pdTRUE) {
+        if (digitalRead(XPT2046_IRQ) == HIGH && (uint32_t)(millis() - gLastTouchDownMs) >= 35) {
+          gTouchPenDown = false;
+          gTouchPressConsumed = false;
+          gTouchClickConsumed = false;
+        }
+        xSemaphoreGive(gTouchMutex);
+      }
+    }
+    // Flush any deferred white spot draw if TFT was busy on the previous tick
+    if (gSpotPendingWhite && gSpotState == SPOT_WHITE && lakatosTftTryLock(1)) {
+      int wx = gSpotX, wy = gSpotY;
+      bool bOld = gSpotPendingBlankOld;
+      int ox = gSpotOldX, oy = gSpotOldY;
+      gSpotPendingWhite = false;
+      gSpotPendingBlankOld = false;
+      if (bOld) tft.fillCircle(ox, oy, kSpotRadius, TFT_BLACK);
+      tft.fillCircle(wx, wy, kSpotRadius, TFT_WHITE);
+      lakatosTftUnlock();
+    }
     return;
   }
+
   if (gTouchMutex) {
     if (xSemaphoreTake(gTouchMutex, 0) != pdTRUE) return;
   }
   LakatosTouchSample s = readTouchHardwareUnlocked();
   if (s.touched) {
-    gLatchedTouch = s;
-    gLatchedTouchMs = millis();
-    gHasLatchedTouch = true;
+    uint32_t tNow = millis();
+    gLastTouchDownMs = tNow;
+    if (!gTouchPenDown) {
+      // New physical press started: latch it in case Core 1 misses the live window
+      gTouchPenDown = true;
+      gTouchPressConsumed = false;
+      gTouchClickConsumed = false;
+      gLatchedTouch = s;
+      gLatchedTouchMs = tNow;
+      gHasLatchedTouch = true;
+    } else if (!gTouchPressConsumed) {
+      // Still in the same unconsumed press: keep coordinates fresh
+      gLatchedTouch = s;
+      gLatchedTouchMs = tNow;
+    }
+    if (lakatosGetTouchSpotEnabled()) {
+      bool moved = (abs(s.x - gSpotX) + abs(s.y - gSpotY) >= 8);
+      if (gSpotState == SPOT_NONE || moved) {
+        if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
+            !gSpotPendingWhite) {
+          gSpotPendingBlankOld = true;
+          gSpotOldX = gSpotX;
+          gSpotOldY = gSpotY;
+        }
+        gSpotX = s.x;
+        gSpotY = s.y;
+        gSpotState = SPOT_WHITE;
+        gSpotPendingWhite = true;
+        gSpotDeadlineMs = tNow + 250;
+      } else if (gSpotState == SPOT_WHITE) {
+        gSpotDeadlineMs = tNow + 250;
+      }
+    }
   }
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+
+  // 3. Draw white spot on Core 0 outside gTouchMutex while holding gTftMutex
+  if (gSpotPendingWhite && gSpotState == SPOT_WHITE && lakatosTftTryLock(1)) {
+    int wx = gSpotX, wy = gSpotY;
+    bool bOld = gSpotPendingBlankOld;
+    int ox = gSpotOldX, oy = gSpotOldY;
+    gSpotPendingWhite = false;
+    gSpotPendingBlankOld = false;
+    if (bOld) tft.fillCircle(ox, oy, kSpotRadius, TFT_BLACK);
+    tft.fillCircle(wx, wy, kSpotRadius, TFT_WHITE);
+    lakatosTftUnlock();
+  }
 }
 
 void lakatosClearTouchLatch() {
   if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
   gHasLatchedTouch = false;
+  gTouchPressConsumed = true;
+  gTouchClickConsumed = true;
+  if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+}
+
+void lakatosWaitTouchRelease() {
+  uint32_t quietSince = millis();
+  while (true) {
+    if (digitalRead(XPT2046_IRQ) == LOW || lakatosReadTouch().touched) {
+      quietSince = millis();
+    } else if ((uint32_t)(millis() - quietSince) >= 35) {
+      break;
+    }
+    delay(10);
+  }
+  if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+  gHasLatchedTouch = false;
+  gTouchPenDown = false;
+  gTouchPressConsumed = false;
+  gTouchClickConsumed = false;
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 }
 
 LakatosTouchSample lakatosReadTouchLatched() {
   LakatosTouchSample live = lakatosReadTouch();
   if (live.touched) {
-    gHasLatchedTouch = false;
     return live;
   }
   if (gHasLatchedTouch) {
     if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
-    bool valid = gHasLatchedTouch && ((uint32_t)(millis() - gLatchedTouchMs) <= 1000u);
+    bool valid = gHasLatchedTouch && !gTouchPressConsumed &&
+                 ((uint32_t)(millis() - gLatchedTouchMs) <= 250u);
     LakatosTouchSample latched = gLatchedTouch;
     gHasLatchedTouch = false;
+    gTouchPressConsumed = true;
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (valid) {
+      onTouchDeliveredToAppOrUi(latched.x, latched.y);
       return latched;
     }
   }
   return live;
+}
+
+LakatosTouchSample lakatosReadClick() {
+  uint32_t now = millis();
+  if (digitalRead(XPT2046_IRQ) == HIGH) {
+    if ((uint32_t)(now - gLastTouchDownMs) >= 35) {
+      if ((gTouchPenDown || gTouchClickConsumed) && gTouchMutex) {
+        xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+        if (digitalRead(XPT2046_IRQ) == HIGH && (uint32_t)(millis() - gLastTouchDownMs) >= 35) {
+          gTouchPenDown = false;
+          gTouchPressConsumed = false;
+          gTouchClickConsumed = false;
+        }
+        xSemaphoreGive(gTouchMutex);
+      }
+    }
+  } else if (gTouchClickConsumed) {
+    // Pen is still held down from an already-consumed click: keep release timer fresh
+    gLastTouchDownMs = now;
+    return {false, 0, 0, 0, 0, 0};
+  }
+
+  if (gTouchClickConsumed) {
+    return {false, 0, 0, 0, 0, 0};
+  }
+
+  LakatosTouchSample live = lakatosReadTouch();
+  if (live.touched) {
+    if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+    bool firstClick = !gTouchClickConsumed;
+    gTouchClickConsumed = true;
+    if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+    if (firstClick) {
+      return live;
+    }
+    return {false, 0, 0, 0, 0, 0};
+  }
+
+  if (gHasLatchedTouch) {
+    if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+    bool valid = gHasLatchedTouch && !gTouchPressConsumed && !gTouchClickConsumed &&
+                 ((uint32_t)(millis() - gLatchedTouchMs) <= 250u);
+    LakatosTouchSample latched = gLatchedTouch;
+    gHasLatchedTouch = false;
+    gTouchPressConsumed = true;
+    if (valid) {
+      gTouchClickConsumed = true;
+    }
+    if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+    if (valid) {
+      onTouchDeliveredToAppOrUi(latched.x, latched.y);
+      return latched;
+    }
+  }
+  return {false, 0, 0, 0, 0, 0};
 }
 
 static void touchScannerTaskCore0(void* /*param*/) {
@@ -331,6 +587,7 @@ static void refreshDirectory() {
 }
 
 static void drawHeaderBar() {
+  LakatosTftGuard tftGuard;
   tft.fillRect(0, 0, 320, 23, 0x10A2);
   tft.drawFastHLine(0, 23, 320, TFT_CYAN);
 
@@ -369,6 +626,7 @@ static void drawHeaderBar() {
 }
 
 static void drawShellScreen() {
+  LakatosTftGuard tftGuard;
   tft.fillScreen(TFT_BLACK);
   drawHeaderBar();
 
@@ -504,22 +762,25 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
   Serial.printf("[TIMING] showFileModal START %s (size=%lld)\r\n",
                 fullPath, (long long)entry.size);
 
-  // Draw top-left [HOME] button
-  tft.fillRoundRect(2, 2, 58, 19, 4, 0x2945);
-  tft.drawRoundRect(2, 2, 58, 19, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString("HOME", 31, 11, 2);
+  {
+    LakatosTftGuard tftGuard;
+    // Draw top-left [HOME] button
+    tft.fillRoundRect(2, 2, 58, 19, 4, 0x2945);
+    tft.drawRoundRect(2, 2, 58, 19, 4, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x2945);
+    tft.drawString("HOME", 31, 11, 2);
 
-  tft.fillRoundRect(12, 28, 296, 188, 6, 0x1082);
-  tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
+    tft.fillRoundRect(12, 28, 296, 188, 6, 0x1082);
+    tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
 
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_YELLOW, 0x1082);
-  tft.drawString(fullPath, 160, 32, 2);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_YELLOW, 0x1082);
+    tft.drawString(fullPath, 160, 32, 2);
 
-  tft.fillRect(20, 50, 280, 124, TFT_BLACK);
-  tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
+    tft.fillRect(20, 50, 280, 124, TFT_BLACK);
+    tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
+  }
 
   size_t plen = strlen(fullPath);
   bool isPngExt = (plen >= 4 && strcasecmp(fullPath + plen - 4, ".png") == 0);
@@ -533,67 +794,71 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     drawnImg = lakatosDrawJpgFileCentered(fullPath, 21, 51, 278, 122);
   }
 
-  if (drawnImg) {
-    tft.fillRect(12, 174, 296, 42, 0x1082);
-    tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
-    tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
-  } else {
-    char buf[257];
-    memset(buf, 0, sizeof(buf));
-    int32_t got = lakatosFsRead(fullPath, 0, buf, 256);
-    if (got > 0) {
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      int cx = 24, cy = 60;
-      for (int i = 0; i < got && cy < 164; i++) {
-        char c = buf[i];
-        if (c == '\r') continue;
-        if (c == '\n') {
-          cx = 24;
-          cy += 10;
-          continue;
-        }
-        if (c < 32 || c > 126) c = '.';
-        tft.drawChar(cx, cy, c, TFT_GREEN, TFT_BLACK, 1);
-        cx += 6;
-        if (cx > 290) {
-          cx = 24;
-          cy += 10;
-        }
-      }
-    } else {
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-      tft.drawString("(Empty or unreadable file)", 160, 115, 2);
-    }
-  }
-
   bool canCopyLo = (strncmp(fullPath, "/lo/", 4) != 0);
-  if (canCopyLo) {
-    tft.fillRoundRect(22, 182, 86, 26, 4, TFT_PURPLE);
-    tft.drawRoundRect(22, 182, 86, 26, 4, TFT_WHITE);
+
+  {
+    LakatosTftGuard tftGuard;
+    if (drawnImg) {
+      tft.fillRect(12, 174, 296, 42, 0x1082);
+      tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
+      tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
+    } else {
+      char buf[257];
+      memset(buf, 0, sizeof(buf));
+      int32_t got = lakatosFsRead(fullPath, 0, buf, 256);
+      if (got > 0) {
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        int cx = 24, cy = 60;
+        for (int i = 0; i < got && cy < 164; i++) {
+          char c = buf[i];
+          if (c == '\r') continue;
+          if (c == '\n') {
+            cx = 24;
+            cy += 10;
+            continue;
+          }
+          if (c < 32 || c > 126) c = '.';
+          tft.drawChar(cx, cy, c, TFT_GREEN, TFT_BLACK, 1);
+          cx += 6;
+          if (cx > 290) {
+            cx = 24;
+            cy += 10;
+          }
+        }
+      } else {
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        tft.drawString("(Empty or unreadable file)", 160, 115, 2);
+      }
+    }
+
+    if (canCopyLo) {
+      tft.fillRoundRect(22, 182, 86, 26, 4, TFT_PURPLE);
+      tft.drawRoundRect(22, 182, 86, 26, 4, TFT_WHITE);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_WHITE, TFT_PURPLE);
+      tft.drawString("COPY -> /lo", 65, 195, 1);
+    }
+
+    tft.fillRoundRect(118, 182, 84, 26, 4, TFT_MAROON);
+    tft.drawRoundRect(118, 182, 84, 26, 4, TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_PURPLE);
-    tft.drawString("COPY -> /lo", 65, 195, 1);
+    tft.setTextColor(TFT_WHITE, TFT_MAROON);
+    tft.drawString("DELETE", 160, 195, 2);
+
+    tft.fillRoundRect(212, 182, 86, 26, 4, TFT_DARKGREEN);
+    tft.drawRoundRect(212, 182, 86, 26, 4, TFT_WHITE);
+    tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+    tft.drawString("CLOSE", 255, 195, 2);
   }
-
-  tft.fillRoundRect(118, 182, 84, 26, 4, TFT_MAROON);
-  tft.drawRoundRect(118, 182, 84, 26, 4, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_MAROON);
-  tft.drawString("DELETE", 160, 195, 2);
-
-  tft.fillRoundRect(212, 182, 86, 26, 4, TFT_DARKGREEN);
-  tft.drawRoundRect(212, 182, 86, 26, 4, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  tft.drawString("CLOSE", 255, 195, 2);
 
   Serial.printf("[TIMING] showFileModal DONE %s total=%lu ms\r\n",
                 fullPath, (unsigned long)(millis() - tModalStart));
 
   if (!waitForTouch) return;
 
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   while (true) {
     updateLakatosConfigBackground();
@@ -603,11 +868,11 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     }
     LakatosTouchSample ts = lakatosReadTouch();
     if (ts.touched && ts.y <= 25 && ts.x <= 64) {
-      while (lakatosReadTouch().touched) delay(15);
+      lakatosWaitTouchRelease();
       return;
     }
     if (ts.touched && ts.y >= 178 && ts.y <= 212) {
-      while (lakatosReadTouch().touched) delay(15);
+      lakatosWaitTouchRelease();
       if (canCopyLo && ts.x >= 20 && ts.x <= 110) {
         copyFileToLo(fullPath, entry.name);
         return;
@@ -633,7 +898,7 @@ static void launchAppAndRestoreShell(const char* appPath) {
   int exitCode = 0;
   String errMsg;
   bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
   if (ok) {
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
     lakatosSetRgbLed(false, true, false, 200);
@@ -720,6 +985,15 @@ static void handleSerialCommand() {
     runLakatosConfigScreen(false);
     refreshDirectory();
     drawShellScreen();
+  } else if (line.startsWith("spot")) {
+    String arg = line.substring(4);
+    arg.trim();
+    if (arg == "on" || arg == "1") {
+      lakatosSetTouchSpotEnabled(true);
+    } else if (arg == "off" || arg == "0") {
+      lakatosSetTouchSpotEnabled(false);
+    }
+    Serial.printf("Touch Spot: %s\r\n", lakatosGetTouchSpotEnabled() ? "ON" : "OFF");
   }
 }
 
@@ -738,7 +1012,7 @@ void setup() {
 
   initTouchPins();
   gTouchMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(touchScannerTaskCore0, "lak_touch", 2048, nullptr, 1, nullptr, 0);
+  gTftMutex   = xSemaphoreCreateRecursiveMutex();
 
   tft.init();
   tft.setRotation(1);
@@ -747,6 +1021,9 @@ void setup() {
   initLakatosConfig();
   initLakatosVfs();
   initLakatosLoader();
+
+  loadTouchCalibrationFromNvs();
+  xTaskCreatePinnedToCore(touchScannerTaskCore0, "lak_touch", 2560, nullptr, 1, nullptr, 0);
 
   if (!loadTouchCalibrationFromNvs()) {
     runLakatosConfigScreen(true);
@@ -767,7 +1044,7 @@ void loop() {
     drawHeaderBar();
   }
 
-  LakatosTouchSample ts = lakatosReadTouch();
+  LakatosTouchSample ts = lakatosReadTouchLatched();
   if (!ts.touched) {
     delay(15);
     return;
@@ -775,7 +1052,7 @@ void loop() {
 
   int tx = ts.x;
   int ty = ts.y;
-  while (lakatosReadTouch().touched) delay(15);
+  lakatosWaitTouchRelease();
 
   // 1. Header [CONFIG] button
   if (ty < 24 && tx >= 250) {

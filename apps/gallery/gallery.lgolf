@@ -417,12 +417,12 @@ func handleInputs() {
 		}
 	}
 
-	touched, tx, ty := os_read_touch()
+	touched, tx, ty := os_read_click()
 	if !touched {
 		return
 	}
 	now := os_millis()
-	if lastTouchMs > 0 && now-lastTouchMs < 180 {
+	if lastTouchMs > 0 && now-lastTouchMs < 120 {
 		return
 	}
 	lastTouchMs = now
@@ -445,7 +445,6 @@ func handleInputs() {
 				drawTopBar()
 				showCurrentImage()
 			}
-			os_delay_ms(180)
 			return
 		}
 		// AUTO (x=176..224)
@@ -453,19 +452,16 @@ func handleInputs() {
 			autoPlay = !autoPlay
 			drawTopBar()
 			lastAdvanceMs = os_millis()
-			os_delay_ms(180)
 			return
 		}
 		// PREV (x=228..271)
 		if tx >= 226 && tx <= 272 {
 			advanceImage(-1)
-			os_delay_ms(180)
 			return
 		}
 		// NEXT (x=275..318)
 		if tx >= 273 {
 			advanceImage(1)
-			os_delay_ms(180)
 			return
 		}
 		return
@@ -477,7 +473,6 @@ func handleInputs() {
 	} else {
 		advanceImage(1)
 	}
-	os_delay_ms(180)
 }
 
 func main() {

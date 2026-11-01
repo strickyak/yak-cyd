@@ -197,6 +197,7 @@ enum LCodeSyscall : uint8_t {
   SysSetRgbLed      = 0x2B,
   SysReadLdr        = 0x2C,
   SysReadCpuTemp    = 0x2D,
+  SysReadClick      = 0x2E,
 
   SysFsLs          = 0x30,
   SysFsStat        = 0x31,
@@ -536,9 +537,7 @@ struct LCodeVM {
         uint32_t ms = 0;
         if (!pop(ms)) return false;
         uint32_t start = millis();
-        lakatosPollTouchLatch();
         while ((uint32_t)(millis() - start) < ms) {
-          lakatosPollTouchLatch();
           updateLakatosConfigBackground();
           lakatosUpdateRgbLed();
           uint32_t rem = ms - (uint32_t)(millis() - start);
@@ -590,60 +589,70 @@ struct LCodeVM {
       case SysTftFillScreen: {
         uint32_t c = 0;
         if (!pop(c)) return false;
+        LakatosTftGuard tftGuard;
         tft.fillScreen((uint16_t)c);
         return true;
       }
       case SysTftFillRect: {
         uint32_t c = 0, h = 0, w = 0, y = 0, x = 0;
         if (!pop(c) || !pop(h) || !pop(w) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.fillRect((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, (uint16_t)c);
         return true;
       }
       case SysTftDrawRect: {
         uint32_t c = 0, h = 0, w = 0, y = 0, x = 0;
         if (!pop(c) || !pop(h) || !pop(w) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawRect((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, (uint16_t)c);
         return true;
       }
       case SysTftFillRoundRect: {
         uint32_t c = 0, r = 0, h = 0, w = 0, y = 0, x = 0;
         if (!pop(c) || !pop(r) || !pop(h) || !pop(w) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.fillRoundRect((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, (int32_t)r, (uint16_t)c);
         return true;
       }
       case SysTftDrawRoundRect: {
         uint32_t c = 0, r = 0, h = 0, w = 0, y = 0, x = 0;
         if (!pop(c) || !pop(r) || !pop(h) || !pop(w) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawRoundRect((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, (int32_t)r, (uint16_t)c);
         return true;
       }
       case SysTftDrawLine: {
         uint32_t c = 0, y1 = 0, x1 = 0, y0 = 0, x0 = 0;
         if (!pop(c) || !pop(y1) || !pop(x1) || !pop(y0) || !pop(x0)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawLine((int32_t)x0, (int32_t)y0, (int32_t)x1, (int32_t)y1, (uint16_t)c);
         return true;
       }
       case SysTftDrawFastHLine: {
         uint32_t c = 0, w = 0, y = 0, x = 0;
         if (!pop(c) || !pop(w) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawFastHLine((int32_t)x, (int32_t)y, (int32_t)w, (uint16_t)c);
         return true;
       }
       case SysTftDrawFastVLine: {
         uint32_t c = 0, h = 0, y = 0, x = 0;
         if (!pop(c) || !pop(h) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawFastVLine((int32_t)x, (int32_t)y, (int32_t)h, (uint16_t)c);
         return true;
       }
       case SysTftFillCircle: {
         uint32_t c = 0, r = 0, y = 0, x = 0;
         if (!pop(c) || !pop(r) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.fillCircle((int32_t)x, (int32_t)y, (int32_t)r, (uint16_t)c);
         return true;
       }
       case SysTftDrawCircle: {
         uint32_t c = 0, r = 0, y = 0, x = 0;
         if (!pop(c) || !pop(r) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawCircle((int32_t)x, (int32_t)y, (int32_t)r, (uint16_t)c);
         return true;
       }
@@ -651,6 +660,7 @@ struct LCodeVM {
         uint32_t c = 0, y2 = 0, x2 = 0, y1 = 0, x1 = 0, y0 = 0, x0 = 0;
         if (!pop(c) || !pop(y2) || !pop(x2) || !pop(y1) || !pop(x1) || !pop(y0) || !pop(x0))
           return false;
+        LakatosTftGuard tftGuard;
         tft.fillTriangle((int32_t)x0, (int32_t)y0, (int32_t)x1, (int32_t)y1,
                          (int32_t)x2, (int32_t)y2, (uint16_t)c);
         return true;
@@ -658,18 +668,21 @@ struct LCodeVM {
       case SysTftDrawChar: {
         uint32_t sz = 0, bg = 0, fg = 0, ch = 0, y = 0, x = 0;
         if (!pop(sz) || !pop(bg) || !pop(fg) || !pop(ch) || !pop(y) || !pop(x)) return false;
+        LakatosTftGuard tftGuard;
         tft.drawChar((int32_t)x, (int32_t)y, (char)ch, (uint16_t)fg, (uint16_t)bg, (uint8_t)sz);
         return true;
       }
       case SysTftSetTextColor: {
         uint32_t bg = 0, fg = 0;
         if (!pop(bg) || !pop(fg)) return false;
+        LakatosTftGuard tftGuard;
         tft.setTextColor((uint16_t)fg, (uint16_t)bg);
         return true;
       }
       case SysTftSetTextDatum: {
         uint32_t d = 0;
         if (!pop(d)) return false;
+        LakatosTftGuard tftGuard;
         tft.setTextDatum((uint8_t)d);
         return true;
       }
@@ -678,14 +691,22 @@ struct LCodeVM {
         if (!pop(font) || !pop(y) || !pop(x)) return false;
         char strBuf[128];
         if (!popSliceAsCStr(strBuf, sizeof(strBuf))) return false;
-        int w = tft.drawString(strBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        int w;
+        {
+          LakatosTftGuard tftGuard;
+          w = tft.drawString(strBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        }
         return push((uint32_t)w);
       }
       case SysTftDrawCStr: {
         uint32_t font = 0, y = 0, x = 0, cstrAddr = 0;
         if (!pop(font) || !pop(y) || !pop(x) || !pop(cstrAddr)) return false;
         if (!checkAddr(cstrAddr, 1)) return false;
-        int w = tft.drawString((const char*)(mem + cstrAddr), (int32_t)x, (int32_t)y, (uint8_t)font);
+        int w;
+        {
+          LakatosTftGuard tftGuard;
+          w = tft.drawString((const char*)(mem + cstrAddr), (int32_t)x, (int32_t)y, (uint8_t)font);
+        }
         return push((uint32_t)w);
       }
       case SysTftDrawInt: {
@@ -693,7 +714,11 @@ struct LCodeVM {
         if (!pop(font) || !pop(y) || !pop(x) || !pop(val)) return false;
         char numBuf[24];
         snprintf(numBuf, sizeof(numBuf), "%ld", (long)(int32_t)val);
-        int w = tft.drawString(numBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        int w;
+        {
+          LakatosTftGuard tftGuard;
+          w = tft.drawString(numBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        }
         return push((uint32_t)w);
       }
       case SysFmtIntToStr: {
@@ -736,7 +761,11 @@ struct LCodeVM {
         if (dec > 9) dec = 9;
         char numBuf[32];
         snprintf(numBuf, sizeof(numBuf), "%.*f", (int)dec, (double)f);
-        int w = tft.drawString(numBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        int w;
+        {
+          LakatosTftGuard tftGuard;
+          w = tft.drawString(numBuf, (int32_t)x, (int32_t)y, (uint8_t)font);
+        }
         return push((uint32_t)w);
       }
       case SysTftPushRGB565: {
@@ -744,6 +773,7 @@ struct LCodeVM {
         if (!pop(pixAddr) || !pop(h) || !pop(w) || !pop(y) || !pop(x)) return false;
         uint32_t totalBytes = w * h * 2;
         if (!checkAddr(pixAddr, totalBytes)) return false;
+        LakatosTftGuard tftGuard;
         tft.pushImage((int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h,
                       (uint16_t*)(mem + pixAddr));
         return true;
@@ -846,6 +876,12 @@ struct LCodeVM {
       // Touch, Keyboard, LED & Sensors
       case SysReadTouch: {
         LakatosTouchSample ts = lakatosReadTouchLatched();
+        return push(ts.touched ? 1 : 0) &&
+               push((uint32_t)ts.x) &&
+               push((uint32_t)ts.y);
+      }
+      case SysReadClick: {
+        LakatosTouchSample ts = lakatosReadClick();
         return push(ts.touched ? 1 : 0) &&
                push((uint32_t)ts.x) &&
                push((uint32_t)ts.y);
@@ -1208,17 +1244,17 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                 (unsigned)ESP.getFreeHeap());
 
-  lakatosClearTouchLatch();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  lakatosWaitTouchRelease();
+  {
+    LakatosTftGuard tftGuard;
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  }
 
   uint32_t stepCounter = 0;
   while (vm->running) {
-    if (__builtin_expect((++stepCounter & 0x03FFu) == 0, 0)) {
-      lakatosPollTouchLatch();
-      if ((stepCounter & 0x1FFFu) == 0) {
-        yield();
-      }
+    if (__builtin_expect((++stepCounter & 0x1FFFu) == 0, 0)) {
+      yield();
     }
     if (__builtin_expect(vm->pc < 0 || (uint32_t)vm->pc >= vm->codeSize, 0)) {
       vm->setErr("PC out of bounds");
@@ -1958,7 +1994,10 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   }
 
   if (outExitCode) *outExitCode = vm->exitCode;
-  tft.setTextDatum(TL_DATUM);
+  {
+    LakatosTftGuard tftGuard;
+    tft.setTextDatum(TL_DATUM);
+  }
 
   lakatosPrefetchFree();
   if (!codeFromScratch && vm->codeBuf) free(vm->codeBuf);

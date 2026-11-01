@@ -134,67 +134,83 @@ static size_t api_free_heap_bytes(void) {
 }
 
 static void api_tft_fill_screen(uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.fillScreen(color);
 }
 
 static void api_tft_fill_rect(int x, int y, int w, int h, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.fillRect(x, y, w, h, color);
 }
 
 static void api_tft_draw_rect(int x, int y, int w, int h, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawRect(x, y, w, h, color);
 }
 
 static void api_tft_fill_round_rect(int x, int y, int w, int h, int r, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.fillRoundRect(x, y, w, h, r, color);
 }
 
 static void api_tft_draw_round_rect(int x, int y, int w, int h, int r, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawRoundRect(x, y, w, h, r, color);
 }
 
 static void api_tft_draw_line(int x0, int y0, int x1, int y1, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawLine(x0, y0, x1, y1, color);
 }
 
 static void api_tft_draw_fast_h_line(int x, int y, int w, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawFastHLine(x, y, w, color);
 }
 
 static void api_tft_draw_fast_v_line(int x, int y, int h, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawFastVLine(x, y, h, color);
 }
 
 static void api_tft_fill_circle(int x, int y, int r, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.fillCircle(x, y, r, color);
 }
 
 static void api_tft_draw_circle(int x, int y, int r, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.drawCircle(x, y, r, color);
 }
 
 static void api_tft_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
+  LakatosTftGuard tftLock;
   tft.fillTriangle(x0, y0, x1, y1, x2, y2, color);
 }
 
 static void api_tft_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg, uint8_t size) {
+  LakatosTftGuard tftLock;
   tft.drawChar(x, y, c, fg, bg, size);
 }
 
 static void api_tft_set_text_color(uint16_t fg, uint16_t bg) {
+  LakatosTftGuard tftLock;
   tft.setTextColor(fg, bg);
 }
 
 static void api_tft_set_text_datum(uint8_t datum) {
+  LakatosTftGuard tftLock;
   tft.setTextDatum(datum);
 }
 
 static int api_tft_draw_string(const char* str, int x, int y, uint8_t font) {
+  LakatosTftGuard tftLock;
   return tft.drawString(str ? str : "", x, y, font);
 }
 
 static void api_tft_push_rgb565(int x, int y, int w, int h, const uint16_t* pixels) {
   if (!pixels || w <= 0 || h <= 0) return;
+  LakatosTftGuard tftLock;
   tft.pushImage(x, y, w, h, (uint16_t*)pixels);
 }
 
@@ -342,6 +358,7 @@ bool initLakatosLoader() {
 }
 
 static void drawLoaderStatusBox(const char* title, const char* detail, int pct) {
+  LakatosTftGuard tftLock;
   tft.fillRoundRect(24, 72, 272, 96, 8, 0x10A2);
   tft.drawRoundRect(24, 72, 272, 96, 8, TFT_CYAN);
   tft.setTextDatum(TC_DATUM);

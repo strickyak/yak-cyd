@@ -56,7 +56,6 @@ UINT jpgInCallback(JDEC* jd, BYTE* buff, UINT nbyte) {
 
 UINT jpgOutCallback(JDEC* jd, void* bitmap, JRECT* rect) {
   JpgReaderContext* ctx = (JpgReaderContext*)jd->device;
-  lakatosPollTouchLatch();
 
   int bw = (int)rect->right - (int)rect->left + 1;
   int bh = (int)rect->bottom - (int)rect->top + 1;
@@ -82,6 +81,7 @@ UINT jpgOutCallback(JDEC* jd, void* bitmap, JRECT* rect) {
     mcu565[i] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
   }
 
+  LakatosTftGuard tftLock;
   if (dx >= 0 && dy >= 0 && dx + bw <= LAKATOS_SCREEN_W && dy + bh <= LAKATOS_SCREEN_H) {
     tft.pushImage(dx, dy, bw, bh, mcu565);
   } else {
