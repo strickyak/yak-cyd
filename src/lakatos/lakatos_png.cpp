@@ -588,14 +588,14 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
 
   tft.setSwapBytes(prevSwap);
 
-  Serial.printf("[TIMING] PNG %lux%lu color=%u step=%d rows=%lu read=%lu ms tinfl=%lu ms draw=%lu ms total=%lu ms\r\n",
-                (unsigned long)st->width, (unsigned long)st->height,
-                (unsigned)st->colorType, st->step,
-                (unsigned long)st->curY,
-                (unsigned long)(reader.readUs / 1000),
-                (unsigned long)(st->tinflUs / 1000),
-                (unsigned long)(st->drawUs / 1000),
-                (unsigned long)(millis() - tStart));
+  lakatosDevLogf("PNG %lux%lu color=%u step=%d rows=%lu read=%lu ms tinfl=%lu ms draw=%lu ms total=%lu ms",
+                 (unsigned long)st->width, (unsigned long)st->height,
+                 (unsigned)st->colorType, st->step,
+                 (unsigned long)st->curY,
+                 (unsigned long)(reader.readUs / 1000),
+                 (unsigned long)(st->tinflUs / 1000),
+                 (unsigned long)(st->drawUs / 1000),
+                 (unsigned long)(millis() - tStart));
 
   if (st->curRow) free(st->curRow);
   if (st->prevRow) free(st->prevRow);

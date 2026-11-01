@@ -139,9 +139,9 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
   tft.setSwapBytes(prevSwap);
   free(workBuf);
 
-  Serial.printf("[TIMING] JPG %ux%u scale=%d decode+draw=%lu ms\r\n",
-                (unsigned)jdec.width, (unsigned)jdec.height, scale,
-                (unsigned long)(millis() - tStart));
+  lakatosDevLogf("JPG %ux%u scale=%d decode+draw=%lu ms",
+                 (unsigned)jdec.width, (unsigned)jdec.height, scale,
+                 (unsigned long)(millis() - tStart));
 
   // Note: JDR_INTR means jpgOutCallback returned 0 because the rest of the image
   // was below SCREEN_H, and JDR_INP after jd_prepare succeeds means a truncated

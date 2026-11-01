@@ -69,6 +69,18 @@ static volatile bool gTouchClickConsumed = false;
 static uint32_t gLatchedTouchMs = 0;
 static LakatosTouchSample gLatchedTouch = {false, 0, 0, 0, 0, 0};
 
+#include <stdarg.h>
+
+void lakatosDevLogf(const char* fmt, ...) {
+  if (!lakatosGetDeveloperMode() || !fmt) return;
+  char buf[192];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Serial.printf("[DEV] %s\r\n", buf);
+}
+
 void lakatosTftLock() {
   if (gTftMutex) {
     xSemaphoreTakeRecursive(gTftMutex, portMAX_DELAY);
@@ -356,6 +368,7 @@ LakatosTouchSample lakatosReadTouchLatched() {
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (valid) {
       onTouchDeliveredToAppOrUi(latched.x, latched.y);
+      lakatosDevLogf("Click: (%d,%d)", latched.x, latched.y);
       return latched;
     }
   }
@@ -393,6 +406,7 @@ LakatosTouchSample lakatosReadClick() {
     gTouchClickConsumed = true;
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (firstClick) {
+      lakatosDevLogf("Click: (%d,%d)", live.x, live.y);
       return live;
     }
     return {false, 0, 0, 0, 0, 0};
@@ -411,6 +425,7 @@ LakatosTouchSample lakatosReadClick() {
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (valid) {
       onTouchDeliveredToAppOrUi(latched.x, latched.y);
+      lakatosDevLogf("Click: (%d,%d)", latched.x, latched.y);
       return latched;
     }
   }
@@ -759,8 +774,7 @@ static void drawShellScreen() {
 static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
                           bool waitForTouch = true) {
   uint32_t tModalStart = millis();
-  Serial.printf("[TIMING] showFileModal START %s (size=%lld)\r\n",
-                fullPath, (long long)entry.size);
+  lakatosDevLogf("Open File Modal: %s (%lld B)", fullPath, (long long)entry.size);
 
   {
     LakatosTftGuard tftGuard;
@@ -853,8 +867,8 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     tft.drawString("CLOSE", 255, 195, 2);
   }
 
-  Serial.printf("[TIMING] showFileModal DONE %s total=%lu ms\r\n",
-                fullPath, (unsigned long)(millis() - tModalStart));
+  lakatosDevLogf("File Modal Rendered: %s in %lu ms",
+                 fullPath, (unsigned long)(millis() - tModalStart));
 
   if (!waitForTouch) return;
 
@@ -868,16 +882,19 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     }
     LakatosTouchSample ts = lakatosReadTouch();
     if (ts.touched && ts.y <= 25 && ts.x <= 64) {
+      lakatosDevLogf("Button: Modal HOME (%d,%d)", ts.x, ts.y);
       lakatosWaitTouchRelease();
       return;
     }
     if (ts.touched && ts.y >= 178 && ts.y <= 212) {
       lakatosWaitTouchRelease();
       if (canCopyLo && ts.x >= 20 && ts.x <= 110) {
+        lakatosDevLogf("Button: Modal COPY -> /lo %s (%d,%d)", fullPath, ts.x, ts.y);
         copyFileToLo(fullPath, entry.name);
         return;
       }
       if (ts.x >= 116 && ts.x <= 204) {
+        lakatosDevLogf("Button: Modal DELETE %s (%d,%d)", fullPath, ts.x, ts.y);
         if (lakatosFsRm(fullPath)) {
           snprintf(gStatusMsg, sizeof(gStatusMsg), "Deleted %s", entry.name);
         } else {
@@ -886,6 +903,7 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
         return;
       }
       if (ts.x >= 210 && ts.x <= 302) {
+        lakatosDevLogf("Button: Modal CLOSE (%d,%d)", ts.x, ts.y);
         return;
       }
     }
@@ -894,12 +912,14 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
 }
 
 static void launchAppAndRestoreShell(const char* appPath) {
+  lakatosDevLogf("Launch App: %s", appPath);
   lakatosSetRgbLed(false, false, true, 250);
   int exitCode = 0;
   String errMsg;
   bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
   lakatosWaitTouchRelease();
   if (ok) {
+    lakatosDevLogf("App Exited: %s (code=%d)", appPath, exitCode);
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
     lakatosSetRgbLed(false, true, false, 200);
   } else {
@@ -985,15 +1005,18 @@ static void handleSerialCommand() {
     runLakatosConfigScreen(false);
     refreshDirectory();
     drawShellScreen();
-  } else if (line.startsWith("spot")) {
-    String arg = line.substring(4);
+  } else if (line.startsWith("dev") || line.startsWith("spot")) {
+    int pfx = line.startsWith("spot") ? 4 : 3;
+    String arg = line.substring(pfx);
     arg.trim();
     if (arg == "on" || arg == "1") {
-      lakatosSetTouchSpotEnabled(true);
+      lakatosSetDeveloperMode(true);
     } else if (arg == "off" || arg == "0") {
-      lakatosSetTouchSpotEnabled(false);
+      lakatosSetDeveloperMode(false);
     }
-    Serial.printf("Touch Spot: %s\r\n", lakatosGetTouchSpotEnabled() ? "ON" : "OFF");
+    Serial.printf("Developer Mode: %s\r\n", lakatosGetDeveloperMode() ? "ON" : "OFF");
+  } else if (line == "help" || line == "?") {
+    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | config | dev [on|off]");
   }
 }
 
@@ -1056,6 +1079,7 @@ void loop() {
 
   // 1. Header [CONFIG] button
   if (ty < 24 && tx >= 250) {
+    lakatosDevLogf("Button: CONFIG (%d,%d)", tx, ty);
     runLakatosConfigScreen(false);
     refreshDirectory();
     drawShellScreen();
@@ -1065,18 +1089,22 @@ void loop() {
   // 2. VFS Tree Tabs (/lo, /sd, /sh) and [.. UP]
   if (ty >= 24 && ty <= 48) {
     if (tx >= 4 && tx <= 90) {
+      lakatosDevLogf("Button: Tab /lo (%d,%d)", tx, ty);
       strncpy(gCurPath, "/lo", sizeof(gCurPath) - 1);
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 92 && tx <= 180) {
+      lakatosDevLogf("Button: Tab /sd (%d,%d)", tx, ty);
       strncpy(gCurPath, "/sd", sizeof(gCurPath) - 1);
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 182 && tx <= 266) {
+      lakatosDevLogf("Button: Tab /sh (%d,%d)", tx, ty);
       strncpy(gCurPath, "/sh", sizeof(gCurPath) - 1);
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 268) {
+      lakatosDevLogf("Button: .. UP from %s (%d,%d)", gCurPath, tx, ty);
       navigateUp();
       refreshDirectory();
       drawShellScreen();
@@ -1086,6 +1114,7 @@ void loop() {
 
   // 3. [REFRESH] button
   if (ty >= 49 && ty <= 68 && tx >= 248) {
+    lakatosDevLogf("Button: REFRESH %s (%d,%d)", gCurPath, tx, ty);
     refreshDirectory();
     drawShellScreen();
     return;
@@ -1104,19 +1133,23 @@ void loop() {
       bool isApp = !entry.isDir && endsWithLapp(entry.name);
 
       if (isApp && inRemoteOrSd && tx >= 264) {
+        lakatosDevLogf("Button:Row [->/lo] %s (%d,%d)", fullPath, tx, ty);
         copyFileToLo(fullPath, entry.name);
         drawShellScreen();
         return;
       }
 
       if (entry.isDir) {
+        lakatosDevLogf("Button: Open Dir %s (%d,%d)", fullPath, tx, ty);
         strncpy(gCurPath, fullPath, sizeof(gCurPath) - 1);
         gCurPath[sizeof(gCurPath) - 1] = '\0';
         refreshDirectory();
         drawShellScreen();
       } else if (isApp) {
+        lakatosDevLogf("Button: Row Launch %s (%d,%d)", fullPath, tx, ty);
         launchAppAndRestoreShell(fullPath);
       } else {
+        lakatosDevLogf("Button: Row Open File %s (%d,%d)", fullPath, tx, ty);
         showFileModal(fullPath, entry);
         refreshDirectory();
         drawShellScreen();
@@ -1131,9 +1164,11 @@ void loop() {
     if (totalPages > 1) {
       if (tx >= 224 && tx <= 270) {
         gPageIdx = (gPageIdx + totalPages - 1) % totalPages;
+        lakatosDevLogf("Button: Page PREV -> %d/%d (%d,%d)", gPageIdx + 1, totalPages, tx, ty);
         drawShellScreen();
       } else if (tx >= 272 && tx <= 318) {
         gPageIdx = (gPageIdx + 1) % totalPages;
+        lakatosDevLogf("Button: Page NEXT -> %d/%d (%d,%d)", gPageIdx + 1, totalPages, tx, ty);
         drawShellScreen();
       }
     }

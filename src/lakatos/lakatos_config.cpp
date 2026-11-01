@@ -278,13 +278,21 @@ void lakatosSetSuperhighwayPassword(const char* pass) {
   saveConfigToNvs();
 }
 
+bool lakatosGetDeveloperMode() {
+  return gTouchSpotEnabled;
+}
+
+void lakatosSetDeveloperMode(bool en) {
+  gTouchSpotEnabled = en;
+  saveConfigToNvs();
+}
+
 bool lakatosGetTouchSpotEnabled() {
   return gTouchSpotEnabled;
 }
 
 void lakatosSetTouchSpotEnabled(bool en) {
-  gTouchSpotEnabled = en;
-  saveConfigToNvs();
+  lakatosSetDeveloperMode(en);
 }
 
 bool lakatosWifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
@@ -938,7 +946,7 @@ static void drawConfigScreen() {
   tft.setTextColor(TFT_WHITE, 0x18E3);
   tft.drawString((WiFi.status() == WL_CONNECTED) ? "ONLINE" : "CONFIGURE", 159, 212, 2);
 
-  // Right column (x: 215..316): [x] TOUCH DOT checkbox (y: 172..201) + [CALIBRATE] (y: 205..234)
+  // Right column (x: 215..316): [x] DEVELOPER checkbox (y: 172..201) + [CALIBRATE] (y: 205..234)
   uint16_t spotBg = gTouchSpotEnabled ? 0x1A26 : 0x18E3;
   uint16_t spotBorder = gTouchSpotEnabled ? TFT_GREEN : TFT_LIGHTGREY;
   tft.fillRoundRect(215, 172, 101, 29, 5, spotBg);
@@ -955,7 +963,7 @@ static void drawConfigScreen() {
   }
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(gTouchSpotEnabled ? TFT_YELLOW : TFT_LIGHTGREY, spotBg);
-  tft.drawString("TOUCH DOT", 240, 186, 1);
+  tft.drawString("DEVELOPER", 240, 186, 1);
 
   tft.fillRoundRect(215, 205, 101, 29, 5, 0x18E3);
   tft.drawRoundRect(215, 205, 101, 29, 5, TFT_ORANGE);
@@ -991,12 +999,15 @@ void runLakatosConfigScreen(bool startInCalibration) {
       } else if (!wasDown && (now - lastRel > 100)) {
         wasDown = true;
         if (t.y <= 25 && t.x <= 62) {
+          lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
           return;  // HOME -> Exit Config back to YAK-CYD index page
         } else if (t.y <= 25 && t.x >= 254) {
+          lakatosDevLogf("Button: CONFIG -> ABOUT (%d,%d)", t.x, t.y);
           if (runAboutModal()) return;
           drawConfigScreen();
         } else if (t.y >= 28 && t.y <= 66 && t.x >= 238) {
           gAutoBright = !gAutoBright;
+          lakatosDevLogf("Button: CONFIG -> AUTO BRIGHT=%s (%d,%d)", gAutoBright ? "ON" : "OFF", t.x, t.y);
           if (gAutoBright) {
             applyBacklightPercent(computeAutoBrightPct(gSmoothedLdr));
           } else {
@@ -1006,10 +1017,12 @@ void runLakatosConfigScreen(bool startInCalibration) {
           drawConfigScreen();
         } else if (t.y >= 70 && t.y <= 116) {
           if (t.x < 160) {
+            lakatosDevLogf("Button: CONFIG -> DEVICE NAME (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("DEVICE NAME", gDeviceName, sizeof(gDeviceName), false, false) == 1) {
               saveConfigToNvs();
             }
           } else {
+            lakatosDevLogf("Button: CONFIG -> SERIAL NUMBER (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("SERIAL NUMBER", gSerialNo, sizeof(gSerialNo), false, false) == 1) {
               saveConfigToNvs();
             }
@@ -1017,10 +1030,12 @@ void runLakatosConfigScreen(bool startInCalibration) {
           drawConfigScreen();
         } else if (t.y >= 120 && t.y <= 166) {
           if (t.x < 200) {
+            lakatosDevLogf("Button: CONFIG -> /sh URL (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
               saveConfigToNvs();
             }
           } else {
+            lakatosDevLogf("Button: CONFIG -> /sh PASSWORD (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("/sh PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
               saveConfigToNvs();
             }
@@ -1028,12 +1043,17 @@ void runLakatosConfigScreen(bool startInCalibration) {
           drawConfigScreen();
         } else if (t.y >= 172) {
           if (t.x <= 106) {
+            lakatosDevLogf("Button: CONFIG -> AIRPORT (%d,%d)", t.x, t.y);
             if (runAirportSelectorModal()) return;
           } else if (t.x <= 212) {
+            lakatosDevLogf("Button: CONFIG -> WI-FI SETUP (%d,%d)", t.x, t.y);
             if (runWifiConfigModal()) return;
           } else if (t.y < 203) {
-            lakatosSetTouchSpotEnabled(!lakatosGetTouchSpotEnabled());
+            bool nextDev = !lakatosGetDeveloperMode();
+            lakatosSetDeveloperMode(nextDev);
+            Serial.printf("[DEV] Developer Mode: %s\r\n", nextDev ? "ON" : "OFF");
           } else {
+            lakatosDevLogf("Button: CONFIG -> CALIBRATE (%d,%d)", t.x, t.y);
             runTouchCalibrationModal();
           }
           drawConfigScreen();

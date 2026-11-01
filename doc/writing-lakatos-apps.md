@@ -265,50 +265,23 @@ When the physical CYD is connected via USB (`/dev/ttyUSB0` at `115200` baud), `h
 | `run <path>` | Remotely launches a `.lapp` on the physical screen (e.g. `run /lo/life.lapp` or `run /sh/life.lapp`). The loader and VM print exact arena/heap/bytecode telemetry (`[LCODE] Launching ...`) and any `println()` output back over USB. |
 | `cp <src> <dst>` | Copies a file between VFS trees on the device (e.g. `cp /sh/life.lapp /lo/life.lapp`). |
 | `shpass <password>` | Saves the Superhighway `/sh` password directly into NVS (`cyd_cfg`) so credentials never appear in source code. |
+| `dev [on\|off]` | Queries or toggles `DEVELOPER` mode (shows the Core 0 white/yellow touch indicator dot and logs `[DEV]` events for button clicks, VFS file opens/reads/writes, image decoding, and app launches). |
 | `config` | Opens the interactive `CONFIG` screen on the device. |
 
-### 6.3 Python One-Liner to Inject USB Serial Commands
+### 6.3 Using `./bin/lcode tether` for Live Logs & Serial Commands
 
-Use the project's `.venv/bin/python` (`pyserial`) to send commands to `/dev/ttyUSB0` and capture the device's response without toggling DTR/RTS (which would otherwise reset the ESP32):
-
-```bash
-.venv/bin/python -c '
-import serial, time
-s = serial.Serial()
-s.port = "/dev/ttyUSB0"
-s.baudrate = 115200
-s.dtr = False
-s.rts = False
-s.timeout = 0.5
-s.open()
-s.reset_input_buffer()
-for cmd in ["info", "ls /lo", "ls /sh"]:
-    s.write((cmd + "\n").encode())
-    time.sleep(1.2)
-    out = s.read(8192).decode("utf-8", errors="replace")
-    print(f"=== {cmd} ===\n{out.strip()}")
-s.close()
-'
-```
-
-To remotely copy an updated `.lapp` from the Superhighway (`/sh`) to `/lo` and launch it on the physical CYD over USB:
+`./bin/lcode tether` connects directly to the CYD over USB serial (default `--wire=/dev/ttyUSB0`, or `--wire=/dev/ttyACM0`), streams log output to `stdout`, and sends lines read from `stdin` (or positional arguments) to the CYD:
 
 ```bash
-.venv/bin/python -c '
-import serial, time
-s = serial.Serial()
-s.port = "/dev/ttyUSB0"
-s.baudrate = 115200
-s.dtr = False
-s.rts = False
-s.timeout = 0.5
-s.open()
-s.reset_input_buffer()
-for cmd in ["cp /sh/life.lapp /lo/life.lapp", "run /lo/life.lapp"]:
-    s.write((cmd + "\n").encode())
-    time.sleep(2.5)
-    print(s.read(8192).decode("utf-8", errors="replace"), end="")
-s.close()
-'
+# Interactive cooked-stdin session (type commands + Enter, Ctrl-D or Ctrl-C to exit):
+./bin/lcode tether --wire=/dev/ttyUSB0
+
+# One-shot scripted commands with a 1.5s response drain:
+./bin/lcode tether --wire=/dev/ttyUSB0 -drain 1500ms info "dev on" "ls /lo"
+
+# Pipe commands from stdin:
+printf "info\nls /sh\n" | ./bin/lcode tether -drain 2s
 ```
+
+When `DEVELOPER` mode is enabled (either via the `[x] DEVELOPER` checkbox on the `CONFIG` screen or by sending `dev on` over `tether`), the CYD renders the Core 0 white/yellow touch indicator dot and logs `[DEV]` telemetry to serial whenever buttons are pressed, VFS files or directories are opened/read/written, images are decoded, or apps are launched/exited.
 

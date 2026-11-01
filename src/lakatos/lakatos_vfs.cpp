@@ -314,12 +314,11 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
   if (!outEntries || maxEntries <= 0) return -1;
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
+  int count = -1;
   if (b == VFS_LO) {
-    if (!gLoMounted) return -1;
-    return lsFsImpl(LittleFS, subPath, outEntries, maxEntries);
+    if (gLoMounted) count = lsFsImpl(LittleFS, subPath, outEntries, maxEntries);
   } else if (b == VFS_SD) {
-    if (!ensureSdMounted()) return -1;
-    return lsFsImpl(SD, subPath, outEntries, maxEntries);
+    if (ensureSdMounted()) count = lsFsImpl(SD, subPath, outEntries, maxEntries);
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
     WiFiClient cli;
@@ -338,7 +337,7 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
     String body = http.getString();
     http.end();
 
-    int count = parseShLsBody(body, outEntries, maxEntries);
+    count = parseShLsBody(body, outEntries, maxEntries);
     if (count < 0) {
       int nl = body.indexOf('\n');
       String firstLine = (nl >= 0) ? body.substring(0, nl) : body;
@@ -348,9 +347,9 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
       Serial.printf("[Lakatos VFS] LS %s failed framing/count check (len=%u, first='%s', tail='%s')\r\n",
                     subPath.c_str(), (unsigned)body.length(), firstLine.c_str(), tail.c_str());
     }
-    return count;
   }
-  return -1;
+  lakatosDevLogf("VFS ls %s -> %d entries", path ? path : "", count);
+  return count;
 }
 
 bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
@@ -418,6 +417,9 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
     }
     int32_t n = (int32_t)f.read((uint8_t*)buf, len);
     f.close();
+    if (offset == 0) {
+      lakatosDevLogf("VFS read %s (len=%u) -> %ld B", path, (unsigned)len, (long)n);
+    }
     return n;
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
@@ -458,6 +460,9 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
       }
     }
     http.end();
+    if (offset == 0) {
+      lakatosDevLogf("VFS read %s (len=%u) -> %ld B", path, (unsigned)len, (long)total);
+    }
     return (int32_t)total;
   }
   return -1;
@@ -466,6 +471,7 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
 bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
+  bool ok = false;
   if (b == VFS_LO || b == VFS_SD) {
     fs::FS* fsPtr = (b == VFS_LO) ? (fs::FS*)&LittleFS : (fs::FS*)&SD;
     if (b == VFS_LO && !gLoMounted) return false;
@@ -474,7 +480,7 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
     if (!f) return false;
     size_t w = (len > 0 && buf) ? f.write((const uint8_t*)buf, len) : 0;
     f.close();
-    return w == len;
+    ok = (w == len);
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
@@ -484,9 +490,10 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
     addShBasicAuthHeader(http);
     int code = http.sendRequest("PUT", (uint8_t*)buf, len);
     http.end();
-    return (code >= 200 && code < 300);
+    ok = (code >= 200 && code < 300);
   }
-  return false;
+  lakatosDevLogf("VFS write %s (%u B) -> %s", path ? path : "", (unsigned)len, ok ? "OK" : "FAIL");
+  return ok;
 }
 
 bool lakatosFsWriteAt(const char* path, uint32_t offset, const void* buf, size_t len) {
@@ -690,6 +697,7 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
       return nullptr;
     }
     s->contentLen = (int64_t)s->file.size();
+    lakatosDevLogf("VFS open %s (%lld B)", path, (long long)s->contentLen);
     return s;
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) { delete s; return nullptr; }
@@ -729,9 +737,9 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
         code = s->httpPtr->GET();
       }
     }
-    Serial.printf("[TIMING] VFS-SH GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)\r\n",
-                  path, code, s->httpPtr->getSize(), (unsigned long)(millis() - t0),
-                  s->usesShared ? 1 : 0);
+    lakatosDevLogf("VFS-SH GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)",
+                   path, code, s->httpPtr->getSize(), (unsigned long)(millis() - t0),
+                   s->usesShared ? 1 : 0);
     if (code < 200 || code >= 300) {
       s->httpPtr->end();
       if (s->usesShared) gShStreamBusy = false;
@@ -831,9 +839,9 @@ void lakatosFsClose(LakatosVfsStream* s) {
         s->httpPtr->setReuse(false);
       }
     }
-    Serial.printf("[TIMING] VFS-SH CLOSE read=%lu B, streamTotal=%lu ms\r\n",
-                  (unsigned long)s->bytesRead,
-                  (unsigned long)(millis() - s->openMs));
+    lakatosDevLogf("VFS-SH CLOSE read=%lu B, streamTotal=%lu ms",
+                   (unsigned long)s->bytesRead,
+                   (unsigned long)(millis() - s->openMs));
     s->httpPtr->end();
     if (s->usesShared) gShStreamBusy = false;
   }
@@ -908,14 +916,14 @@ static void prefetchWorkerTaskCore0(void* arg) {
     uint32_t elapsed = millis() - t0;
     if (err || total == 0) {
       gPrefetchStatus = -1;
-      Serial.printf("[TIMING] CORE0-PREFETCH ERROR %s (%lu ms)\r\n",
-                    gPrefetchPath, (unsigned long)elapsed);
+      lakatosDevLogf("CORE0-PREFETCH ERROR %s (%lu ms)",
+                     gPrefetchPath, (unsigned long)elapsed);
     } else {
       gPrefetchBytesGot = (uint32_t)total;
       gPrefetchStatus   = 2;
-      Serial.printf("[TIMING] CORE0-PREFETCH READY %s -> %lu B in %lu ms (core=%d)\r\n",
-                    gPrefetchPath, (unsigned long)total, (unsigned long)elapsed,
-                    (int)xPortGetCoreID());
+      lakatosDevLogf("CORE0-PREFETCH READY %s -> %lu B in %lu ms (core=%d)",
+                     gPrefetchPath, (unsigned long)total, (unsigned long)elapsed,
+                     (int)xPortGetCoreID());
     }
     gPrefetchWorkerActive = false;
   }

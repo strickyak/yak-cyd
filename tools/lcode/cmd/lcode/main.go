@@ -24,6 +24,7 @@ Commands:
   dis       Disassemble an LCode .lapp or LCOD binary into .lasm assembly
   run       Run an LCode .lapp binary in the headless 320x240 RGB565 emulator
   upload    Upload a .lapp binary to the Lakatos Superhighway HTTP server
+  tether    Connect to CYD over USB serial (--wire=/dev/ttyUSB0), stream logs, and send stdin commands
 `)
 	os.Exit(2)
 }
@@ -365,6 +366,8 @@ func main() {
 		cmdRun(os.Args[2:])
 	case "upload":
 		cmdUpload(os.Args[2:])
+	case "tether":
+		cmdTether(os.Args[2:])
 	default:
 		usage()
 	}
