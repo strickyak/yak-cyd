@@ -44,8 +44,8 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
    ```bash
    ./bin/lcode run --steps 300000 --ascii --dump-ppm /tmp/screen.ppm build/apps/mygame.lapp
    ```
-   - Inject touch events with `--tap x,y` (can be repeated, e.g., `--tap 160,120 --tap 285,12`).
-   - Always test that your game renders properly with `--ascii` (or `--dump-ppm`) and exits cleanly (`exit=0`) when its `EXIT` button is tapped!
+   - Inject touch events with `--tap x,y` (can be repeated, e.g., `--tap 160,120 --tap 30,12`).
+   - Always test that your game renders properly with `--ascii` (or `--dump-ppm`) and exits cleanly (`exit=0`) when its top-left `HOME` button (`x <= 64, y < 25`) is tapped!
 3. **Disassemble `.lapp`**:
    ```bash
    ./bin/lcode dis build/apps/mygame.lapp
@@ -216,3 +216,88 @@ func main() {
     }
 }
 ```
+
+---
+
+## 6. Controlling, Scripting, and Debugging the Device
+
+Developers and AI agents have two complementary tools for inspecting the display, injecting inputs, and remotely controlling the CYD:
+
+### 6.1 Reading the Display & Testing Touch (`./bin/lcode run`)
+
+Rather than reading pixels back over the physical SPI bus, the host emulator in `tools/lcode/pkg/lcode/vm.go` executes the exact same `.lapp` bytecode against a virtual `320×240` `uint16` `RGB565` framebuffer (`VM.Screen[240][320]`):
+
+- **ASCII Screen Snapshot (`80×30`)**:
+  ```bash
+  ./bin/lcode run --steps 400000 --ascii build/apps/life.lapp
+  ```
+- **Exact `320×240` Pixel Image Dump (`.ppm`)**:
+  ```bash
+  ./bin/lcode run --steps 400000 --dump-ppm /tmp/screen.ppm build/apps/life.lapp
+  ```
+- **Deterministic Touch Injection (`--tap x,y`)**:
+  Queue one or more synthetic stylus taps into `os_read_touch()` to verify button hitboxes (such as the top-left `HOME` button at `30,12`):
+  ```bash
+  ./bin/lcode run --steps 400000 --tap 180,12 --tap 30,12 build/apps/life.lapp
+  ```
+- **Virtual VFS Root (`-vfs <dir>`)**:
+  Mount a local host directory as `/` so `/lo/...`, `/sd/...`, and `/sh/...` file reads/writes and `tft_draw_png_file` / `tft_draw_jpg_file` calls can be tested offline.
+
+### 6.2 Remote Control over the USB Serial Cable (`/dev/ttyUSB0`)
+
+When the physical CYD is connected via USB (`/dev/ttyUSB0` at `115200` baud), `handleSerialCommand()` in `src/lakatos/lakatos_main.cpp` listens for newline-terminated commands whenever Lakatos OS is on the index screen:
+
+| Serial Command | Description |
+|---|---|
+| `info` | Prints Lakatos OS version, device ID, airport code, `/sh` URL, Wi-Fi state, and free RAM (`ESP.getFreeHeap()`). |
+| `ls [path]` | Lists any VFS directory directly on the device (`ls /lo`, `ls /sd`, `ls /sh`). |
+| `run <path>` | Remotely launches a `.lapp` on the physical screen (e.g. `run /lo/life.lapp` or `run /sh/life.lapp`). The loader and VM print exact arena/heap/bytecode telemetry (`[LCODE] Launching ...`) and any `println()` output back over USB. |
+| `cp <src> <dst>` | Copies a file between VFS trees on the device (e.g. `cp /sh/life.lapp /lo/life.lapp`). |
+| `shpass <password>` | Saves the Superhighway `/sh` password directly into NVS (`cyd_cfg`) so credentials never appear in source code. |
+| `config` | Opens the interactive `CONFIG` screen on the device. |
+
+### 6.3 Python One-Liner to Inject USB Serial Commands
+
+Use the project's `.venv/bin/python` (`pyserial`) to send commands to `/dev/ttyUSB0` and capture the device's response without toggling DTR/RTS (which would otherwise reset the ESP32):
+
+```bash
+.venv/bin/python -c '
+import serial, time
+s = serial.Serial()
+s.port = "/dev/ttyUSB0"
+s.baudrate = 115200
+s.dtr = False
+s.rts = False
+s.timeout = 0.5
+s.open()
+s.reset_input_buffer()
+for cmd in ["info", "ls /lo", "ls /sh"]:
+    s.write((cmd + "\n").encode())
+    time.sleep(1.2)
+    out = s.read(8192).decode("utf-8", errors="replace")
+    print(f"=== {cmd} ===\n{out.strip()}")
+s.close()
+'
+```
+
+To remotely copy an updated `.lapp` from the Superhighway (`/sh`) to `/lo` and launch it on the physical CYD over USB:
+
+```bash
+.venv/bin/python -c '
+import serial, time
+s = serial.Serial()
+s.port = "/dev/ttyUSB0"
+s.baudrate = 115200
+s.dtr = False
+s.rts = False
+s.timeout = 0.5
+s.open()
+s.reset_input_buffer()
+for cmd in ["cp /sh/life.lapp /lo/life.lapp", "run /lo/life.lapp"]:
+    s.write((cmd + "\n").encode())
+    time.sleep(2.5)
+    print(s.read(8192).decode("utf-8", errors="replace"), end="")
+s.close()
+'
+```
+
