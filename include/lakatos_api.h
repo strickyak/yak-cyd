@@ -174,7 +174,7 @@ typedef struct LakatosApi {
   int      (*read_ldr)(void);
   float    (*read_cpu_temp_c)(void);
 
-  // --- Unified VFS: /lo/..., /sd/..., /sh/... ---
+  // --- Unified VFS: /flash/..., /sd/..., /net/... ---
   int      (*fs_ls)(const char* path, LakatosFsEntry* out_entries, int max_entries);
   bool     (*fs_stat)(const char* path, LakatosFsEntry* out_entry);
   int32_t  (*fs_read)(const char* path, uint32_t offset, void* buf, size_t len);

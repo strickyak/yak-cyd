@@ -26,21 +26,21 @@ enum VfsBackend {
   VFS_SH
 };
 
-// Strips "/lo", "/sd", or "/sh" prefix and returns normalized sub-path starting with "/"
+// Strips "/flash", "/sd", or "/net" prefix and returns normalized sub-path starting with "/"
 static VfsBackend parseVfsPath(const char* vfsPath, String& outSubPath) {
   if (!vfsPath || vfsPath[0] != '/') return VFS_NONE;
   VfsBackend b = VFS_NONE;
   const char* rest = nullptr;
 
-  if (strncmp(vfsPath, "/lo", 3) == 0 && (vfsPath[3] == '/' || vfsPath[3] == '\0')) {
+  if (strncmp(vfsPath, "/flash", 6) == 0 && (vfsPath[6] == '/' || vfsPath[6] == '\0')) {
     b = VFS_LO;
-    rest = vfsPath + 3;
+    rest = vfsPath + 6;
   } else if (strncmp(vfsPath, "/sd", 3) == 0 && (vfsPath[3] == '/' || vfsPath[3] == '\0')) {
     b = VFS_SD;
     rest = vfsPath + 3;
-  } else if (strncmp(vfsPath, "/sh", 3) == 0 && (vfsPath[3] == '/' || vfsPath[3] == '\0')) {
+  } else if (strncmp(vfsPath, "/net", 4) == 0 && (vfsPath[4] == '/' || vfsPath[4] == '\0')) {
     b = VFS_SH;
-    rest = vfsPath + 3;
+    rest = vfsPath + 4;
   } else {
     return VFS_NONE;
   }
@@ -98,20 +98,20 @@ static void seedLoAppFile(const char* loSubPath, const uint8_t* data, size_t len
     if (f) {
       f.write(data, len);
       f.close();
-      Serial.printf("[Lakatos VFS] Seeded /lo%s (%u bytes)\n",
+      Serial.printf("[Lakatos VFS] Seeded /flash%s (%u bytes)\n",
                     loSubPath, (unsigned)len);
     }
   }
 }
 
 void initLakatosVfs() {
-  if (LittleFS.begin(true, "/lo", 8, "spiffs")) {
+  if (LittleFS.begin(true, "/flash", 8, "spiffs")) {
     gLoMounted = true;
-    Serial.println("[Lakatos VFS] Mounted /lo (LittleFS on spiffs partition).");
+    Serial.println("[Lakatos VFS] Mounted /flash (LittleFS on spiffs partition).");
     seedLoAppFile("/life.lapp", kSeedApp_life, sizeof(kSeedApp_life));
     seedLoAppFile("/gallery.lapp", kSeedApp_gallery, sizeof(kSeedApp_gallery));
   } else {
-    Serial.println("[Lakatos VFS] ERROR: Failed to mount /lo LittleFS!");
+    Serial.println("[Lakatos VFS] ERROR: Failed to mount /flash LittleFS!");
   }
 
   ensureSdMounted();
@@ -119,7 +119,7 @@ void initLakatosVfs() {
 }
 
 // ---------------------------------------------------------------------------
-// Superhighway HTTP Helpers (/sh/...) per doc/superhighway-client.md
+// Superhighway HTTP Helpers (/net/...) per doc/superhighway-client.md
 // ---------------------------------------------------------------------------
 static bool isUnreservedUrlChar(uint8_t c) {
   return (c >= 'A' && c <= 'Z') ||
@@ -737,7 +737,7 @@ LakatosVfsStream* lakatosFsOpenRead(const char* path) {
         code = s->httpPtr->GET();
       }
     }
-    lakatosDevLogf("VFS-SH GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)",
+    lakatosDevLogf("VFS-NET GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)",
                    path, code, s->httpPtr->getSize(), (unsigned long)(millis() - t0),
                    s->usesShared ? 1 : 0);
     if (code < 200 || code >= 300) {
@@ -839,7 +839,7 @@ void lakatosFsClose(LakatosVfsStream* s) {
         s->httpPtr->setReuse(false);
       }
     }
-    lakatosDevLogf("VFS-SH CLOSE read=%lu B, streamTotal=%lu ms",
+    lakatosDevLogf("VFS-NET CLOSE read=%lu B, streamTotal=%lu ms",
                    (unsigned long)s->bytesRead,
                    (unsigned long)(millis() - s->openMs));
     s->httpPtr->end();

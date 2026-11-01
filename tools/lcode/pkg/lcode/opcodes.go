@@ -217,7 +217,7 @@ const (
 	SysReadCpuTemp    = byte(0x2D) // ( -- deciCelsius)
 	SysReadClick      = byte(0x2E) // ( -- clicked x y)
 
-	// Unified VFS (/lo, /sd, /sh), Network & Serial (0x30 .. 0x3F)
+	// Unified VFS (/flash, /sd, /net), Network & Serial (0x30 .. 0x3F)
 	SysFsLs          = byte(0x30) // (pathSlice entriesAddr maxEntries -- count)
 	SysFsStat        = byte(0x31) // (pathSlice entryAddr -- ok)
 	SysFsRead        = byte(0x32) // (pathSlice offset bufAddr len -- bytesRead)

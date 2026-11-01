@@ -3376,7 +3376,7 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		c.emitOp("SYSCALL", "SYS_READ_CPU_TEMP")
 		return ScalarInt, nil
 
-	// VFS (/lo, /sd, /sh), Wi-Fi & Serial
+	// VFS (/flash, /sd, /net), Wi-Fi & Serial
 	case "fs_ls", "os_fs_ls":
 		c.emitOp("SYSCALL", "SYS_FS_LS")
 		return ScalarInt, nil

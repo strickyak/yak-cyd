@@ -247,8 +247,8 @@ func main() {
 
 func TestPngDecodeAndDraw(t *testing.T) {
 	tmpDir := t.TempDir()
-	loDir := filepath.Join(tmpDir, "lo")
-	if err := os.MkdirAll(loDir, 0o755); err != nil {
+	flashDir := filepath.Join(tmpDir, "flash")
+	if err := os.MkdirAll(flashDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
@@ -265,7 +265,7 @@ func TestPngDecodeAndDraw(t *testing.T) {
 	if err := png.Encode(&pngBuf, img); err != nil {
 		t.Fatalf("png.Encode: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(loDir, "sprite.png"), pngBuf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(flashDir, "sprite.png"), pngBuf.Bytes(), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -276,10 +276,10 @@ var rawBuf [512]byte
 
 func main() {
 	tft_fill_screen(0x07E0) // Green background
-	ok, w, h := os_png_info("/lo/sprite.png")
-	drawn1 := tft_draw_png_file("/lo/sprite.png", 10, 20)
+	ok, w, h := os_png_info("/flash/sprite.png")
+	drawn1 := tft_draw_png_file("/flash/sprite.png", 10, 20)
 
-	n := fs_read("/lo/sprite.png", 0, &rawBuf, 512)
+	n := fs_read("/flash/sprite.png", 0, &rawBuf, 512)
 	drawn2 := tft_draw_png(&rawBuf, n, 50, 60)
 
 	println(ok, w, h, drawn1, drawn2)
@@ -322,8 +322,8 @@ func main() {
 
 func TestJpgDecodeAndDraw(t *testing.T) {
 	tmpDir := t.TempDir()
-	loDir := filepath.Join(tmpDir, "lo")
-	if err := os.MkdirAll(loDir, 0o755); err != nil {
+	flashDir := filepath.Join(tmpDir, "flash")
+	if err := os.MkdirAll(flashDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestJpgDecodeAndDraw(t *testing.T) {
 	if err := jpeg.Encode(&jpgBuf, img, &jpeg.Options{Quality: 100}); err != nil {
 		t.Fatalf("jpeg.Encode: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(loDir, "tile.jpg"), jpgBuf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(flashDir, "tile.jpg"), jpgBuf.Bytes(), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -350,10 +350,10 @@ var rawBuf [2048]byte
 
 func main() {
 	tft_fill_screen(0x0000)
-	ok, w, h := os_jpg_info("/lo/tile.jpg")
-	drawn1 := tft_draw_jpg_file("/lo/tile.jpg", 10, 20, 0)
+	ok, w, h := os_jpg_info("/flash/tile.jpg")
+	drawn1 := tft_draw_jpg_file("/flash/tile.jpg", 10, 20, 0)
 
-	n := fs_read("/lo/tile.jpg", 0, &rawBuf, 2048)
+	n := fs_read("/flash/tile.jpg", 0, &rawBuf, 2048)
 	drawn2 := tft_draw_jpg(&rawBuf, n, 50, 60, 1) // 1/2 scale (8x8)
 
 	println(ok, w, h, drawn1, drawn2)
@@ -390,8 +390,8 @@ func main() {
 
 func TestPrefetchAndCenteredDraw(t *testing.T) {
 	tmpDir := t.TempDir()
-	loDir := filepath.Join(tmpDir, "lo")
-	if err := os.MkdirAll(loDir, 0o755); err != nil {
+	flashDir := filepath.Join(tmpDir, "flash")
+	if err := os.MkdirAll(flashDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
@@ -405,7 +405,7 @@ func TestPrefetchAndCenteredDraw(t *testing.T) {
 	if err := png.Encode(&pngBuf, img); err != nil {
 		t.Fatalf("png.Encode: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(loDir, "box.png"), pngBuf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(flashDir, "box.png"), pngBuf.Bytes(), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -416,7 +416,7 @@ var imgBuf [102400]byte
 
 func main() {
 	tft_fill_screen(0x0000)
-	started := os_prefetch_start("/lo/box.png", &imgBuf, 102400)
+	started := os_prefetch_start("/flash/box.png", &imgBuf, 102400)
 	st, got := os_prefetch_status()
 	drawn := tft_draw_png(&imgBuf, got, -1, 20)
 	os_prefetch_cancel()

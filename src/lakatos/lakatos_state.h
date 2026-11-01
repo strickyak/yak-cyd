@@ -88,7 +88,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
 void runLakatosConfigScreen(bool startInCalibration = false);
 
 // ---------------------------------------------------------------------------
-// Unified VFS (/lo/..., /sd/..., /sh/...) (implemented in lakatos_vfs.cpp)
+// Unified VFS (/flash/..., /sd/..., /net/...) (implemented in lakatos_vfs.cpp)
 // ---------------------------------------------------------------------------
 void initLakatosVfs();
 bool lakatosSdIsMounted();
@@ -128,7 +128,7 @@ extern uint8_t* gLakatosPngScratch;
 extern size_t   gLakatosPngScratchSize;
 bool lakatosIsNativeAppRunning();
 bool initLakatosLoader();
-// Stages and executes a .lapp binary from /lo/..., /sd/..., or /sh/...
+// Stages and executes a .lapp binary from /flash/..., /sd/..., or /net/...
 // Returns to caller when the app calls os->exit(code) or returns from app_main.
 bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode = nullptr,
                            String* outErrMsg = nullptr);

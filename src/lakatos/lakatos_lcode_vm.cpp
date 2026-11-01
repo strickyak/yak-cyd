@@ -915,7 +915,7 @@ struct LCodeVM {
       case SysReadCpuTemp:
         return push((uint32_t)(int32_t)(lakatosReadCpuTempC() * 10.0f));
 
-      // Unified VFS (/lo, /sd, /sh), Network & Serial
+      // Unified VFS (/flash, /sd, /net), Network & Serial
       case SysFsLs: {
         uint32_t maxEnt = 0, entAddr = 0;
         if (!pop(maxEnt) || !pop(entAddr)) return false;

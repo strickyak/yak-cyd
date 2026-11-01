@@ -482,7 +482,7 @@ static constexpr int kRowsPerPage = 6;
 static LakatosFsEntry* const gDirEntries = (LakatosFsEntry*)gLakatosAppRamArena;
 static int gDirCount = 0;
 static int gPageIdx = 0;
-static char gCurPath[128] = "/lo";
+static char gCurPath[128] = "/flash";
 static char gStatusMsg[64] = "Ready";
 static uint32_t gLastClockDrawMs = 0;
 static bool gLastWifiState = false;
@@ -503,9 +503,9 @@ static void joinVfsPath(const char* dir, const char* name, char* out, size_t max
 }
 
 static void navigateUp() {
-  // Don't go above /lo, /sd, or /sh roots
-  if (strcmp(gCurPath, "/lo") == 0 || strcmp(gCurPath, "/sd") == 0 ||
-      strcmp(gCurPath, "/sh") == 0) {
+  // Don't go above /flash, /sd, or /net roots
+  if (strcmp(gCurPath, "/flash") == 0 || strcmp(gCurPath, "/sd") == 0 ||
+      strcmp(gCurPath, "/net") == 0) {
     return;
   }
   char* lastSlash = strrchr(gCurPath, '/');
@@ -513,9 +513,9 @@ static void navigateUp() {
   *lastSlash = '\0';
 }
 
-static bool copyFileToLo(const char* srcPath, const char* baseName) {
+static bool copyFileToFlash(const char* srcPath, const char* baseName) {
   char dstPath[128];
-  snprintf(dstPath, sizeof(dstPath), "/lo/%s", baseName);
+  snprintf(dstPath, sizeof(dstPath), "/flash/%s", baseName);
 
   LakatosFsEntry st;
   if (!lakatosFsStat(srcPath, &st) || st.isDir || st.size < 0) {
@@ -570,10 +570,10 @@ static void refreshDirectory() {
     gDirListError = true;
     if (strncmp(gCurPath, "/sd", 3) == 0 && !lakatosSdIsMounted()) {
       snprintf(gStatusMsg, sizeof(gStatusMsg), "No MicroSD card detected");
-    } else if (strncmp(gCurPath, "/sh", 3) == 0 && !lakatosWifiIsConnected()) {
+    } else if (strncmp(gCurPath, "/net", 4) == 0 && !lakatosWifiIsConnected()) {
       snprintf(gStatusMsg, sizeof(gStatusMsg), "Wi-Fi offline (set in CONFIG)");
-    } else if (strncmp(gCurPath, "/sh", 3) == 0 && strlen(lakatosGetSuperhighwayPassword()) == 0) {
-      snprintf(gStatusMsg, sizeof(gStatusMsg), "Set /sh Pass in CONFIG first");
+    } else if (strncmp(gCurPath, "/net", 4) == 0 && strlen(lakatosGetSuperhighwayPassword()) == 0) {
+      snprintf(gStatusMsg, sizeof(gStatusMsg), "Set /net Pass in CONFIG first");
     } else {
       snprintf(gStatusMsg, sizeof(gStatusMsg), "Cannot list %s", gCurPath);
     }
@@ -653,12 +653,14 @@ static void drawShellScreen() {
     int w;
   };
   const TabDef tabs[3] = {
-      {"/lo", "/lo Flash", 4, 86},
-      {"/sd", "/sd Card",  94, 86},
-      {"/sh", "/sh Net",   184, 82},
+      {"/flash", "/flash",   4, 86},
+      {"/sd",    "/sd Card", 94, 86},
+      {"/net",   "/net",     184, 82},
   };
   for (int i = 0; i < 3; i++) {
-    bool active = strncmp(gCurPath, tabs[i].prefix, 3) == 0;
+    size_t plen = strlen(tabs[i].prefix);
+    bool active = strncmp(gCurPath, tabs[i].prefix, plen) == 0 &&
+                  (gCurPath[plen] == '/' || gCurPath[plen] == '\0');
     uint16_t bg = active ? TFT_DARKCYAN : 0x2104;
     uint16_t fg = active ? TFT_WHITE : TFT_LIGHTGREY;
     tft.fillRoundRect(tabs[i].x, 26, tabs[i].w, 20, 4, bg);
@@ -689,7 +691,7 @@ static void drawShellScreen() {
 
   // Directory Rows (y=70..210)
   int startIdx = gPageIdx * kRowsPerPage;
-  bool inRemoteOrSd = (strncmp(gCurPath, "/lo", 3) != 0);
+  bool inRemoteOrSd = (strncmp(gCurPath, "/flash", 6) != 0);
 
   if (gDirCount == 0) {
     tft.setTextDatum(MC_DATUM);
@@ -732,18 +734,18 @@ static void drawShellScreen() {
         } else {
           snprintf(szBuf, sizeof(szBuf), "%lldB", (long long)e.size);
         }
-        int rightX = (isApp && inRemoteOrSd) ? 260 : 312;
+        int rightX = (isApp && inRemoteOrSd) ? 254 : 312;
         tft.setTextDatum(MR_DATUM);
         tft.setTextColor(TFT_CYAN, rowBg);
         tft.drawString(szBuf, rightX, ry + 10, 1);
       }
 
       if (isApp && inRemoteOrSd) {
-        tft.fillRoundRect(266, ry + 2, 46, 17, 3, TFT_PURPLE);
-        tft.drawRoundRect(266, ry + 2, 46, 17, 3, TFT_WHITE);
+        tft.fillRoundRect(258, ry + 2, 54, 17, 3, TFT_PURPLE);
+        tft.drawRoundRect(258, ry + 2, 54, 17, 3, TFT_WHITE);
         tft.setTextDatum(MC_DATUM);
         tft.setTextColor(TFT_WHITE, TFT_PURPLE);
-        tft.drawString("->/lo", 289, ry + 10, 1);
+        tft.drawString("->/flash", 285, ry + 10, 1);
       }
     }
   }
@@ -808,7 +810,7 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     drawnImg = lakatosDrawJpgFileCentered(fullPath, 21, 51, 278, 122);
   }
 
-  bool canCopyLo = (strncmp(fullPath, "/lo/", 4) != 0);
+  bool canCopyFlash = (strncmp(fullPath, "/flash/", 7) != 0);
 
   {
     LakatosTftGuard tftGuard;
@@ -847,12 +849,12 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
       }
     }
 
-    if (canCopyLo) {
+    if (canCopyFlash) {
       tft.fillRoundRect(22, 182, 86, 26, 4, TFT_PURPLE);
       tft.drawRoundRect(22, 182, 86, 26, 4, TFT_WHITE);
       tft.setTextDatum(MC_DATUM);
       tft.setTextColor(TFT_WHITE, TFT_PURPLE);
-      tft.drawString("COPY -> /lo", 65, 195, 1);
+      tft.drawString("COPY -> /flash", 65, 195, 1);
     }
 
     tft.fillRoundRect(118, 182, 84, 26, 4, TFT_MAROON);
@@ -888,9 +890,9 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     }
     if (ts.touched && ts.y >= 178 && ts.y <= 212) {
       lakatosWaitTouchRelease();
-      if (canCopyLo && ts.x >= 20 && ts.x <= 110) {
-        lakatosDevLogf("Button: Modal COPY -> /lo %s (%d,%d)", fullPath, ts.x, ts.y);
-        copyFileToLo(fullPath, entry.name);
+      if (canCopyFlash && ts.x >= 20 && ts.x <= 110) {
+        lakatosDevLogf("Button: Modal COPY -> /flash %s (%d,%d)", fullPath, ts.x, ts.y);
+        copyFileToFlash(fullPath, entry.name);
         return;
       }
       if (ts.x >= 116 && ts.x <= 204) {
@@ -986,11 +988,12 @@ static void handleSerialCommand() {
         Serial.printf("CP stat failed for %s\r\n", src.c_str());
       }
     }
-  } else if (line.startsWith("shpass ")) {
-    String pass = line.substring(7);
+  } else if (line.startsWith("netpass ") || line.startsWith("shpass ")) {
+    int pfx = line.startsWith("netpass ") ? 8 : 7;
+    String pass = line.substring(pfx);
     pass.trim();
     lakatosSetSuperhighwayPassword(pass.c_str());
-    Serial.println("Saved /sh password to NVS (cyd_cfg).");
+    Serial.println("Saved /net password to NVS (cyd_cfg).");
     refreshDirectory();
     drawShellScreen();
   } else if (line.startsWith("preview ")) {
@@ -1016,7 +1019,7 @@ static void handleSerialCommand() {
     }
     Serial.printf("Developer Mode: %s\r\n", lakatosGetDeveloperMode() ? "ON" : "OFF");
   } else if (line == "help" || line == "?") {
-    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | config | dev [on|off]");
+    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | netpass <pw> | config | dev [on|off]");
   }
 }
 
@@ -1086,11 +1089,11 @@ void loop() {
     return;
   }
 
-  // 2. VFS Tree Tabs (/lo, /sd, /sh) and [.. UP]
+  // 2. VFS Tree Tabs (/flash, /sd, /net) and [.. UP]
   if (ty >= 24 && ty <= 48) {
     if (tx >= 4 && tx <= 90) {
-      lakatosDevLogf("Button: Tab /lo (%d,%d)", tx, ty);
-      strncpy(gCurPath, "/lo", sizeof(gCurPath) - 1);
+      lakatosDevLogf("Button: Tab /flash (%d,%d)", tx, ty);
+      strncpy(gCurPath, "/flash", sizeof(gCurPath) - 1);
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 92 && tx <= 180) {
@@ -1099,8 +1102,8 @@ void loop() {
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 182 && tx <= 266) {
-      lakatosDevLogf("Button: Tab /sh (%d,%d)", tx, ty);
-      strncpy(gCurPath, "/sh", sizeof(gCurPath) - 1);
+      lakatosDevLogf("Button: Tab /net (%d,%d)", tx, ty);
+      strncpy(gCurPath, "/net", sizeof(gCurPath) - 1);
       refreshDirectory();
       drawShellScreen();
     } else if (tx >= 268) {
@@ -1129,12 +1132,12 @@ void loop() {
       char fullPath[160];
       joinVfsPath(gCurPath, entry.name, fullPath, sizeof(fullPath));
 
-      bool inRemoteOrSd = (strncmp(gCurPath, "/lo", 3) != 0);
+      bool inRemoteOrSd = (strncmp(gCurPath, "/flash", 6) != 0);
       bool isApp = !entry.isDir && endsWithLapp(entry.name);
 
-      if (isApp && inRemoteOrSd && tx >= 264) {
-        lakatosDevLogf("Button:Row [->/lo] %s (%d,%d)", fullPath, tx, ty);
-        copyFileToLo(fullPath, entry.name);
+      if (isApp && inRemoteOrSd && tx >= 256) {
+        lakatosDevLogf("Button: Row [->/flash] %s (%d,%d)", fullPath, tx, ty);
+        copyFileToFlash(fullPath, entry.name);
         drawShellScreen();
         return;
       }

@@ -480,11 +480,11 @@ func main() {
 	pathSlice = make([]byte, 128)
 	autoPlay = false
 
-	// Default to /sh/png-1 if Wi-Fi is connected, otherwise /lo
+	// Default to /net/png-1 if Wi-Fi is connected, otherwise /flash
 	if os_wifi_connected() != 0 {
-		setDirString("/sh/png-1")
+		setDirString("/net/png-1")
 	} else {
-		setDirString("/lo")
+		setDirString("/flash")
 	}
 
 	tft_fill_screen(BLACK)

@@ -9,10 +9,10 @@ This guide explains how to write, compile, emulate, debug, and publish games and
 - **Target Hardware**: ESP32-2432S028R ("Cheap Yellow Display")
   - **Display**: `320×240` 16-bit `RGB565` ILI9341 TFT (landscape orientation: `x = 0..319`, `y = 0..239`).
   - **Touchscreen**: XPT2046 resistive touch controller (`os_read_touch()` returns calibrated screen coordinates).
-  - **Peripherals**: Active-low RGB LED (`os_set_rgb_led`), Light Dependent Resistor (`os_read_ldr`), internal temperature sensor (`os_read_cpu_temp`), and 3 unified VFS trees (`/lo` LittleFS, `/sd` MicroSD card, `/sh` Wi-Fi HTTP Superhighway).
+  - **Peripherals**: Active-low RGB LED (`os_set_rgb_led`), Light Dependent Resistor (`os_read_ldr`), internal temperature sensor (`os_read_cpu_temp`), and 3 unified VFS trees (`/flash` LittleFS, `/sd` MicroSD card, `/net` Wi-Fi HTTP Superhighway).
 - **Zero Flash Wear Execution**:
   - `.lapp` binaries compiled with `bin/lcode` have `LAKATOS_APP_FLAG_LCODE = 1` in their 128-byte SHA-256 `LakatosAppHeader` and contain a compact `LCOD` bytecode module (typically `1 KB – 16 KB`).
-  - When selected in Lakatos OS (from `/lo`, `/sd`, or `/sh`), the `.lapp` streams directly into ESP32 RAM and runs inside the resident C++ LCode VM (`lakatosRunLCodeApp`) with **zero Flash erases**.
+  - When selected in Lakatos OS (from `/flash`, `/sd`, or `/net`), the `.lapp` streams directly into ESP32 RAM and runs inside the resident C++ LCode VM (`lakatosRunLCodeApp`) with **zero Flash erases**.
 - **Flat 32-Bit Memory Arena (Up to 128 KB)**:
   - `0x00000 .. 0x000FF`: Null guard page (`256 B`, traps null pointer dereferences).
   - `0x00100 .. StringPoolEnd`: Read-only string pool.
@@ -50,7 +50,7 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
    ```bash
    ./bin/lcode dis build/apps/mygame.lapp
    ```
-4. **Upload `.lapp` to the Superhighway (`/sh`)**:
+4. **Upload `.lapp` to the Superhighway (`/net`)**:
    ```bash
    ./bin/lcode upload -url http://pizga.net:1908/ build/apps/mygame.lapp mygame.lapp
    ```
@@ -143,7 +143,7 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
 | | `tft_draw_float(val float32, decimals, x, y, font int) int` | Draws `float32` with `decimals` places at `(x,y)` |
 | | `ftoa(val float32, decimals int) string` | Formats `float32` as a `string` slice |
 | | `tft_push_rgb565(x, y, w, h, pixAddr int)` | Pushes raw `uint16` RGB565 sprite buffer at `pixAddr` |
-| | `tft_draw_png_file(path string, x, y int) bool` | Streams and draws a `.png` file from `/lo`, `/sd`, or `/sh` at `(x,y)` (transparent pixels skipped) |
+| | `tft_draw_png_file(path string, x, y int) bool` | Streams and draws a `.png` file from `/flash`, `/sd`, or `/net` at `(x,y)` (transparent pixels skipped) |
 | | `tft_draw_png(bufAddr, len, x, y int) bool` | Decodes and draws a PNG image from RAM buffer (or 3-arg `(sliceOrPath, x, y)`) |
 | | `ok, w, h := os_png_info(path string)` | Reads the `IHDR` header of a `.png` file and returns `(ok, width, height)` |
 | | `tft_draw_jpg_file(path string, x, y[, scale] int) bool` | Streams and draws a `.jpg` file via ROM TJpgDec (`scale`: `0`=1/1, `1`=1/2, `2`=1/4, `3`=1/8) |
@@ -170,8 +170,8 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lcode ./cmd/lcode
 | | `os_prefetch_cancel()` | Cancels any in-flight Core 0 prefetch and waits for idle |
 | **VFS** | `fs_ls(path string, entriesBufAddr, maxEntries int) int` | Lists up to `maxEntries` `LakatosFsEntry` (`88 B` each) records (`<0` on error) |
 | | `fs_stat(path string, entryBufAddr int) int` | Stats a single path into an `88 B` `LakatosFsEntry` struct (`1` if ok, `0` on error) |
-| | `fs_read(path string, off, bufAddr, len int) int` | Reads bytes from `/lo/...`, `/sd/...`, or `/sh/...` |
-| | `fs_write(path string, bufAddr, len int) int` | Writes file to `/lo/...`, `/sd/...`, or `/sh/...` |
+| | `fs_read(path string, off, bufAddr, len int) int` | Reads bytes from `/flash/...`, `/sd/...`, or `/net/...` |
+| | `fs_write(path string, bufAddr, len int) int` | Writes file to `/flash/...`, `/sd/...`, or `/net/...` |
 | | `println(args...)` | Prints values to Serial / emulator stdout |
 
 ---
@@ -252,7 +252,7 @@ Rather than reading pixels back over the physical SPI bus, the host emulator in 
   ./bin/lcode run --steps 400000 --tap 180,12 --tap 30,12 build/apps/life.lapp
   ```
 - **Virtual VFS Root (`-vfs <dir>`)**:
-  Mount a local host directory as `/` so `/lo/...`, `/sd/...`, and `/sh/...` file reads/writes and `tft_draw_png_file` / `tft_draw_jpg_file` calls can be tested offline.
+  Mount a local host directory as `/` so `/flash/...`, `/sd/...`, and `/net/...` file reads/writes and `tft_draw_png_file` / `tft_draw_jpg_file` calls can be tested offline.
 
 ### 6.2 Remote Control over the USB Serial Cable (`/dev/ttyUSB0`)
 
@@ -260,11 +260,11 @@ When the physical CYD is connected via USB (`/dev/ttyUSB0` at `115200` baud), `h
 
 | Serial Command | Description |
 |---|---|
-| `info` | Prints Lakatos OS version, device ID, airport code, `/sh` URL, Wi-Fi state, and free RAM (`ESP.getFreeHeap()`). |
-| `ls [path]` | Lists any VFS directory directly on the device (`ls /lo`, `ls /sd`, `ls /sh`). |
-| `run <path>` | Remotely launches a `.lapp` on the physical screen (e.g. `run /lo/life.lapp` or `run /sh/life.lapp`). The loader and VM print exact arena/heap/bytecode telemetry (`[LCODE] Launching ...`) and any `println()` output back over USB. |
-| `cp <src> <dst>` | Copies a file between VFS trees on the device (e.g. `cp /sh/life.lapp /lo/life.lapp`). |
-| `shpass <password>` | Saves the Superhighway `/sh` password directly into NVS (`cyd_cfg`) so credentials never appear in source code. |
+| `info` | Prints Lakatos OS version, device ID, airport code, `/net` URL, Wi-Fi state, and free RAM (`ESP.getFreeHeap()`). |
+| `ls [path]` | Lists any VFS directory directly on the device (`ls /flash`, `ls /sd`, `ls /net`). |
+| `run <path>` | Remotely launches a `.lapp` on the physical screen (e.g. `run /flash/life.lapp` or `run /net/life.lapp`). The loader and VM print exact arena/heap/bytecode telemetry (`[LCODE] Launching ...`) and any `println()` output back over USB. |
+| `cp <src> <dst>` | Copies a file between VFS trees on the device (e.g. `cp /net/life.lapp /flash/life.lapp`). |
+| `netpass <password>` | Saves the Superhighway `/net` password directly into NVS (`cyd_cfg`) so credentials never appear in source code. |
 | `dev [on\|off]` | Queries or toggles `DEVELOPER` mode (shows the Core 0 white/yellow touch indicator dot and logs `[DEV]` events for button clicks, VFS file opens/reads/writes, image decoding, and app launches). |
 | `config` | Opens the interactive `CONFIG` screen on the device. |
 
@@ -277,10 +277,10 @@ When the physical CYD is connected via USB (`/dev/ttyUSB0` at `115200` baud), `h
 ./bin/lcode tether --wire=/dev/ttyUSB0
 
 # One-shot scripted commands with a 1.5s response drain:
-./bin/lcode tether --wire=/dev/ttyUSB0 -drain 1500ms info "dev on" "ls /lo"
+./bin/lcode tether --wire=/dev/ttyUSB0 -drain 1500ms info "dev on" "ls /flash"
 
 # Pipe commands from stdin:
-printf "info\nls /sh\n" | ./bin/lcode tether -drain 2s
+printf "info\nls /net\n" | ./bin/lcode tether -drain 2s
 ```
 
 When `DEVELOPER` mode is enabled (either via the `[x] DEVELOPER` checkbox on the `CONFIG` screen or by sending `dev on` over `tether`), the CYD renders the Core 0 white/yellow touch indicator dot and logs `[DEV]` telemetry to serial whenever buttons are pressed, VFS files or directories are opened/read/written, images are decoded, or apps are launched/exited.

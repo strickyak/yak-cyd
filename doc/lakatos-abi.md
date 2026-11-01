@@ -2,7 +2,7 @@
 
 **Lakatos** (named for Imre Lakatos, with the `-os` ending) is the resident operating system and fixed-address native application loader for the **ESP32-2432S028R (CYD)** board.
 
-Lakatos owns hardware configuration (touch calibration, Wi-Fi auto-connect, LDR auto-brightness, home airport + timezone + NTP, device name & serial number, Superhighway URL & password) in NVS (`cyd_cfg`, `cyd_cal`, `cyd_wifi`), provides three unified filesystem trees (`/lo/...`, `/sd/...`, `/sh/...`), and loads standalone `.lapp` binaries into a fixed virtual memory map.
+Lakatos owns hardware configuration (touch calibration, Wi-Fi auto-connect, LDR auto-brightness, home airport + timezone + NTP, device name & serial number, Superhighway URL & password) in NVS (`cyd_cfg`, `cyd_cal`, `cyd_wifi`), provides three unified filesystem trees (`/flash/...`, `/sd/...`, `/net/...`), and loads standalone `.lapp` binaries into a fixed virtual memory map.
 
 ---
 
@@ -14,13 +14,13 @@ Lakatos owns hardware configuration (touch calibration, Wi-Fi auto-connect, LDR 
 | `otadata` | `data / ota` | `0x00E000` | `8 KB` (`0x002000`) | Boot metadata |
 | `app0` | `app / ota_0` | `0x010000` | `1,472 KB` (`0x170000`) | **Lakatos Resident OS** firmware |
 | `app_slot` | `data / 0x40` | `0x180000` | `768 KB` (`0x0C0000`) | **App Staging & MMU Execution Slot** (`12 × 64 KB` MMU pages) |
-| `spiffs` | `data / spiffs` | `0x240000` | `1,728 KB` (`0x1B0000`) | **Local Flash Filesystem (`/lo/...`)** via `LittleFS` |
+| `spiffs` | `data / spiffs` | `0x240000` | `1,728 KB` (`0x1B0000`) | **Local Flash Filesystem (`/flash/...`)** via `LittleFS` |
 
 ---
 
 ## 2. Fixed Virtual Memory Map for `.lapp` Applications
 
-When Lakatos launches a `.lapp` binary from `/lo/...`, `/sd/...`, or `/sh/...`, it stages the image into `app_slot` (`0x00180000`) and programs the ESP32 Hardware Flash MMU on both CPU cores (`PRO_CPU` and `APP_CPU`) to map those physical 64 KB flash pages simultaneously into `IROM` and `DROM`:
+When Lakatos launches a `.lapp` binary from `/flash/...`, `/sd/...`, or `/net/...`, it stages the image into `app_slot` (`0x00180000`) and programs the ESP32 Hardware Flash MMU on both CPU cores (`PRO_CPU` and `APP_CPU`) to map those physical 64 KB flash pages simultaneously into `IROM` and `DROM`:
 
 | Region | Fixed Virtual Address Range | Max Size | Backing Storage | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -66,17 +66,17 @@ typedef struct LakatosAppHeader {
 
 All Lakatos filesystem calls (`fs_ls`, `fs_stat`, `fs_read`, `fs_write`, `fs_write_at`, `fs_mkdir`, `fs_rmdir`, `fs_rm`, `fs_du`) accept paths in three namespaces:
 
-1. **`/lo/...` — Local Internal Flash (`LittleFS`)**:
+1. **`/flash/...` — Local Internal Flash (`LittleFS`)**:
    - Mounted on the `1,728 KB` `spiffs` flash partition (`0x240000`).
    - Fast, non-volatile local storage for installed `.lapp` binaries and application data.
 2. **`/sd/...` — MicroSD Card (`VSPI`)**:
    - Mounted on hardware `VSPI` (`SCK=18, MISO=19, MOSI=23, CS=5`).
    - Touch controller uses dedicated GPIO SPI (`CLK=25, MISO=39, MOSI=32, CS=33, IRQ=36`) so `/sd/...` and touch never conflict.
-3. **`/sh/...` — Superhighway Server over Wi-Fi HTTP**:
+3. **`/net/...` — Superhighway Server over Wi-Fi HTTP**:
    - Implements [`doc/superhighway-client.md`](superhighway-client.md) against the configured Superhighway URL (default `http://pizga.net:1908/`).
    - Authenticates every request with HTTP Basic Auth where:
      - `username = <device_name><serial_number>` (from Lakatos `CONFIG`)
-     - `password = <sh_password>` (entered via stylus keyboard in Lakatos `CONFIG`, stored in NVS `cyd_cfg`, never stored in source code).
+     - `password = <net_password>` (entered via stylus keyboard in Lakatos `CONFIG`, stored in NVS `cyd_cfg`, never stored in source code).
 
 ---
 
@@ -90,7 +90,7 @@ Add your application under `apps/<name>/<name>.cpp` implementing:
 extern "C" void app_main(const LakatosApi* os) {
   // Query configured airport:
   const char* airport = os->get_airport();
-  // Draw to TFT, read touch, access /lo, /sd, /sh...
+  // Draw to TFT, read touch, access /flash, /sd, /net...
   // Return to Lakatos OS:
   os->exit(0);
 }
@@ -102,4 +102,4 @@ Compile all `.lapp` binaries with:
 make apps
 ```
 
-Output `.lapp` binaries are written to `build/apps/<name>.lapp` and can be placed on `/lo/...`, `/sd/...`, or uploaded to `/sh/...` via `PUT`.
+Output `.lapp` binaries are written to `build/apps/<name>.lapp` and can be placed on `/flash/...`, `/sd/...`, or uploaded to `/net/...` via `PUT`.

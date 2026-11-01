@@ -822,7 +822,7 @@ static bool runAboutModal() {
     drawRow("Device ID:", String(gDeviceName) + String(gSerialNo), TFT_YELLOW);
     drawRow("Airport:", String(gAirportCode) + " (" + String(gAirportCity) + ")", TFT_CYAN);
     drawRow("Free RAM:", String(ESP.getFreeHeap() / 1024) + " KB SRAM", TFT_WHITE);
-    drawRow("/sh URL:", String(gShUrl).substring(0, 24), TFT_MAGENTA);
+    drawRow("/net URL:", String(gShUrl).substring(0, 24), TFT_MAGENTA);
   }
 
   lakatosWaitTouchRelease();
@@ -913,11 +913,11 @@ static void drawConfigScreen() {
   tft.setTextColor(TFT_WHITE, 0x18E3);
   tft.drawString(gSerialNo, 169, 90, 2);
 
-  // Row 3 (y: 120..168): [/sh URL] (x: 4..198) & [/sh PASS] (x: 204..316)
+  // Row 3 (y: 120..168): [/net URL] (x: 4..198) & [/net PASS] (x: 204..316)
   tft.fillRoundRect(4, 120, 194, 46, 5, 0x18E3);
   tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
   tft.setTextColor(TFT_MAGENTA, 0x18E3);
-  tft.drawString("/sh SERVER URL:", 10, 125, 1);
+  tft.drawString("/net SERVER URL:", 10, 125, 1);
   tft.setTextColor(TFT_WHITE, 0x18E3);
   String shortUrl = String(gShUrl);
   if (shortUrl.length() > 28) shortUrl = shortUrl.substring(0, 28);
@@ -926,7 +926,7 @@ static void drawConfigScreen() {
   tft.fillRoundRect(204, 120, 112, 46, 5, 0x18E3);
   tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
   tft.setTextColor(TFT_MAGENTA, 0x18E3);
-  tft.drawString("/sh PASSWORD:", 210, 125, 1);
+  tft.drawString("/net PASSWORD:", 210, 125, 1);
   tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, 0x18E3);
   tft.drawString(gShPass[0] ? "******** (SET)" : "(NOT SET)", 210, 142, 1);
 
@@ -1030,13 +1030,13 @@ void runLakatosConfigScreen(bool startInCalibration) {
           drawConfigScreen();
         } else if (t.y >= 120 && t.y <= 166) {
           if (t.x < 200) {
-            lakatosDevLogf("Button: CONFIG -> /sh URL (%d,%d)", t.x, t.y);
+            lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
               saveConfigToNvs();
             }
           } else {
-            lakatosDevLogf("Button: CONFIG -> /sh PASSWORD (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("/sh PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
+            lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
+            if (lakatosPromptKeyboard("/net PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
               saveConfigToNvs();
             }
           }

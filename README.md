@@ -9,9 +9,9 @@ Build LCode `.lapp` apps, compile Lakatos OS, and flash to CYD with:
 ```bash
 make lakatos
 ```
-- [`src/lakatos/lakatos_main.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_main.cpp) — Lakatos OS shell, file browser across `/lo`, `/sd`, and `/sh`, and bit-banged XPT2046 touchscreen driver.
+- [`src/lakatos/lakatos_main.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_main.cpp) — Lakatos OS shell, file browser across `/flash`, `/sd`, and `/net`, and bit-banged XPT2046 touchscreen driver.
 - [`src/lakatos/lakatos_config.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_config.cpp) — Persistent NVS configuration (`cyd_cfg` & `cyd_cal`): 3-tap touch calibration, Wi-Fi scanner, stylus keyboard, airport/timezone/NTP, device name + serial number, and Superhighway URL/password.
-- [`src/lakatos/lakatos_vfs.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_vfs.cpp) — Unified VFS mounting `/lo` (`LittleFS`), `/sd` (`MicroSD`), and `/sh` (Wi-Fi HTTP Superhighway client).
+- [`src/lakatos/lakatos_vfs.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_vfs.cpp) — Unified VFS mounting `/flash` (`LittleFS`), `/sd` (`MicroSD`), and `/net` (Wi-Fi HTTP Superhighway client).
 - [`src/lakatos/lakatos_lcode_vm.cpp`](file:///home/strick/github.com/strickyak/yak-cyd/src/lakatos/lakatos_lcode_vm.cpp) — Resident 32-bit **LCode** bytecode virtual machine with coalescing `malloc`/`free` heap and `OpSYSCALL` bridge, executing `.lapp` binaries directly in RAM with zero Flash wear.
 - [`tools/lcode/`](file:///home/strick/github.com/strickyak/yak-cyd/tools/lcode/cmd/lcode/main.go) — Go toolchain (`./bin/lcode`) providing the **LGolf** (`.lgolf`) compiler, `.lasm` assembler, disassembler, headless `320×240` `RGB565` emulator, and Superhighway uploader.
 - [`apps/life/life.lgolf`](file:///home/strick/github.com/strickyak/yak-cyd/apps/life/life.lgolf) — Conway's Game of Life in LGolf (`2,196` bytes compiled `.lapp`).
