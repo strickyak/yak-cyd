@@ -758,6 +758,7 @@ struct LCodeVM {
         if (maxLen == 0 || !checkAddr(bufAddr, maxLen)) return false;
         int res = lakatosPromptKeyboard(titleBuf, (char*)(mem + bufAddr),
                                         maxLen, allowCtrlC != 0, false);
+        tft.setTextDatum(TL_DATUM);
         return push((uint32_t)(int32_t)res);
       }
       case SysSetRgbLed: {
@@ -1074,6 +1075,8 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                 (unsigned)ESP.getFreeHeap());
 
   lakatosClearTouchLatch();
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
   uint32_t stepCounter = 0;
   while (vm->running) {

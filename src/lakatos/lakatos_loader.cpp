@@ -327,6 +327,7 @@ static void drawLoaderStatusBox(const char* title, const char* detail, int pct) 
       tft.fillRect(46, 138, fillW, 10, TFT_GREEN);
     }
   }
+  tft.setTextDatum(TL_DATUM);
 }
 
 bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErrMsg) {
@@ -414,7 +415,9 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
     }
 
     drawLoaderStatusBox("STARTING LCODE VM", hdr.name, 95);
+    tft.setTextDatum(TL_DATUM);
     bool ok = lakatosRunLCodeApp(hdr, payloadBuf, payloadLen, outExitCode, outErrMsg);
+    tft.setTextDatum(TL_DATUM);
     if (heapAllocated) free(payloadBuf);
     return ok;
   }
