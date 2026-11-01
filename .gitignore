@@ -1,6 +1,8 @@
 .pio/
 .venv/
 .vscode/
+build/
+bin/
 *.pyc
 *~
 .*.un~
