@@ -489,7 +489,12 @@ static void drawShellScreen() {
   }
 }
 
-static void showFileModal(const char* fullPath, const LakatosFsEntry& entry) {
+static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
+                          bool waitForTouch = true) {
+  uint32_t tModalStart = millis();
+  Serial.printf("[TIMING] showFileModal START %s (size=%lld)\r\n",
+                fullPath, (long long)entry.size);
+
   // Draw top-left [HOME] button
   tft.fillRoundRect(2, 2, 58, 19, 4, 0x2945);
   tft.drawRoundRect(2, 2, 58, 19, 4, TFT_CYAN);
@@ -502,36 +507,27 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry) {
 
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_YELLOW, 0x1082);
-  tft.drawString(fullPath, 160, 34, 2);
+  tft.drawString(fullPath, 160, 32, 2);
 
-  tft.fillRect(20, 56, 280, 118, TFT_BLACK);
-  tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
+  tft.fillRect(20, 50, 280, 124, TFT_BLACK);
+  tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
 
-  int pngW = 0, pngH = 0;
-  int jpgW = 0, jpgH = 0;
-  bool isPng = lakatosPngInfo(fullPath, &pngW, &pngH);
-  bool isJpg = !isPng && lakatosJpgInfo(fullPath, &jpgW, &jpgH);
-  if (isPng) {
-    int px = 21 + ((278 - pngW) > 0 ? (278 - pngW) / 2 : 0);
-    int py = 57 + ((116 - pngH) > 0 ? (116 - pngH) / 2 : 0);
-    lakatosDrawPngFile(fullPath, px, py);
-    // Redraw modal frame around bottom if PNG was taller than preview box
+  size_t plen = strlen(fullPath);
+  bool isPngExt = (plen >= 4 && strcasecmp(fullPath + plen - 4, ".png") == 0);
+  bool isJpgExt = (plen >= 4 && strcasecmp(fullPath + plen - 4, ".jpg") == 0) ||
+                  (plen >= 5 && strcasecmp(fullPath + plen - 5, ".jpeg") == 0);
+
+  bool drawnImg = false;
+  if (isPngExt) {
+    drawnImg = lakatosDrawPngFileCentered(fullPath, 21, 51, 278, 122);
+  } else if (isJpgExt) {
+    drawnImg = lakatosDrawJpgFileCentered(fullPath, 21, 51, 278, 122);
+  }
+
+  if (drawnImg) {
     tft.fillRect(12, 174, 296, 42, 0x1082);
     tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
-    tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
-  } else if (isJpg) {
-    int scale = 0;
-    while (scale < 3 && ((jpgW >> scale) > 278 || (jpgH >> scale) > 116)) {
-      scale++;
-    }
-    int sw = jpgW >> scale;
-    int sh = jpgH >> scale;
-    int px = 21 + ((278 - sw) > 0 ? (278 - sw) / 2 : 0);
-    int py = 57 + ((116 - sh) > 0 ? (116 - sh) / 2 : 0);
-    lakatosDrawJpgFile(fullPath, px, py, scale);
-    tft.fillRect(12, 174, 296, 42, 0x1082);
-    tft.drawRoundRect(12, 28, 296, 188, 6, TFT_CYAN);
-    tft.drawRect(20, 56, 280, 118, TFT_DARKGREY);
+    tft.drawRect(20, 50, 280, 124, TFT_DARKGREY);
   } else {
     char buf[257];
     memset(buf, 0, sizeof(buf));
@@ -583,11 +579,19 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry) {
   tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
   tft.drawString("CLOSE", 255, 195, 2);
 
+  Serial.printf("[TIMING] showFileModal DONE %s total=%lu ms\r\n",
+                fullPath, (unsigned long)(millis() - tModalStart));
+
+  if (!waitForTouch) return;
+
   while (lakatosReadTouch().touched) delay(15);
 
   while (true) {
     updateLakatosConfigBackground();
     lakatosUpdateRgbLed();
+    if (Serial.available()) {
+      return;
+    }
     LakatosTouchSample ts = lakatosReadTouch();
     if (ts.touched && ts.y <= 25 && ts.x <= 64) {
       while (lakatosReadTouch().touched) delay(15);
@@ -694,6 +698,14 @@ static void handleSerialCommand() {
     Serial.println("Saved /sh password to NVS (cyd_cfg).");
     refreshDirectory();
     drawShellScreen();
+  } else if (line.startsWith("preview ")) {
+    String path = line.substring(8);
+    path.trim();
+    LakatosFsEntry dummy;
+    memset(&dummy, 0, sizeof(dummy));
+    const char* slash = strrchr(path.c_str(), '/');
+    strncpy(dummy.name, slash ? (slash + 1) : path.c_str(), sizeof(dummy.name) - 1);
+    showFileModal(path.c_str(), dummy, false);
   } else if (line == "config") {
     runLakatosConfigScreen(false);
     refreshDirectory();

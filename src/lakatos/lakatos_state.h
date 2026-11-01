@@ -88,6 +88,12 @@ bool    lakatosFsRm(const char* path);
 int64_t lakatosFsDu(const char* path);
 int     lakatosHttpGet(const char* url, void* buf, size_t maxLen);
 
+struct LakatosVfsStream;
+LakatosVfsStream* lakatosFsOpenRead(const char* path);
+int32_t           lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len);
+bool              lakatosFsStreamSkip(LakatosVfsStream* s, size_t len);
+void              lakatosFsClose(LakatosVfsStream* s);
+
 // ---------------------------------------------------------------------------
 // Fixed-Address & LCode App Loader (lakatos_loader.cpp & lakatos_lcode_vm.cpp)
 // ---------------------------------------------------------------------------
@@ -107,13 +113,16 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
 // ---------------------------------------------------------------------------
 bool lakatosPngInfo(const char* vfsPath, int* outWidth, int* outHeight);
 bool lakatosDrawPngFile(const char* vfsPath, int x, int y);
+bool lakatosDrawPngFileCentered(const char* vfsPath, int boxX, int boxY, int boxW, int boxH);
 bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y);
 
 // ---------------------------------------------------------------------------
 // JPEG Image Decoder & Renderer via ROM tjpgd (implemented in lakatos_jpg.cpp)
 // ---------------------------------------------------------------------------
 bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight);
+bool lakatosJpgInfoMem(const uint8_t* data, size_t len, int* outWidth, int* outHeight);
 bool lakatosDrawJpgFile(const char* vfsPath, int x, int y, int scale = 0);
+bool lakatosDrawJpgFileCentered(const char* vfsPath, int boxX, int boxY, int boxW, int boxH);
 bool lakatosDrawJpgMem(const uint8_t* data, size_t len, int x, int y, int scale = 0);
 
 

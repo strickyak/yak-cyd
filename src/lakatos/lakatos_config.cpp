@@ -228,6 +228,7 @@ void initLakatosConfig() {
 
   if (ssid.length() > 0) {
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     WiFi.begin(ssid.c_str(), pass.c_str());
     Serial.printf("[Lakatos] Auto-connecting Wi-Fi to '%s'...\n", ssid.c_str());
   }
@@ -627,6 +628,7 @@ static bool runWifiConfigModal() {
               tft.setTextColor(TFT_YELLOW, 0x0841);
               tft.drawString("Connecting to " + ssids[idx] + "...", 160, 120, 2);
               WiFi.disconnect();
+              WiFi.setSleep(false);
               WiFi.begin(ssids[idx].c_str(), passBuf);
               uint32_t startMs = millis();
               while (WiFi.status() != WL_CONNECTED && (millis() - startMs < 9000)) {

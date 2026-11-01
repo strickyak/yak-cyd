@@ -8,18 +8,21 @@
 namespace {
 
 static constexpr size_t kTjpgdWorkSize = 4096;
-static constexpr size_t kVfsCacheSize  = 1024;
 
 struct JpgReaderContext {
-  const char*    vfsPath   = nullptr;
-  const uint8_t* memData   = nullptr;
-  size_t         memLen    = 0;
-  uint32_t       offset    = 0;
-  uint32_t       cacheBase = 0;
-  uint32_t       cacheLen  = 0;
-  int            dstX      = 0;
-  int            dstY      = 0;
-  uint8_t        cache[kVfsCacheSize];
+  LakatosVfsStream* stream  = nullptr;
+  const uint8_t*    memData = nullptr;
+  size_t            memLen  = 0;
+  uint32_t          offset  = 0;
+  int               dstX    = 0;
+  int               dstY    = 0;
+
+  ~JpgReaderContext() {
+    if (stream) {
+      lakatosFsClose(stream);
+      stream = nullptr;
+    }
+  }
 };
 
 UINT jpgInCallback(JDEC* jd, BYTE* buff, UINT nbyte) {
@@ -36,33 +39,16 @@ UINT jpgInCallback(JDEC* jd, BYTE* buff, UINT nbyte) {
     return (UINT)toRead;
   }
 
-  if (ctx->vfsPath) {
-    // When buff == nullptr, TJpgDec is skipping a segment (e.g., EXIF/APPn).
+  if (ctx->stream) {
     if (!buff) {
+      if (!lakatosFsStreamSkip(ctx->stream, nbyte)) return 0;
       ctx->offset += (uint32_t)nbyte;
       return nbyte;
     }
-
-    size_t total = 0;
-    while (total < nbyte) {
-      if (ctx->cacheLen > 0 &&
-          ctx->offset >= ctx->cacheBase &&
-          ctx->offset < ctx->cacheBase + ctx->cacheLen) {
-        uint32_t inCacheOff = ctx->offset - ctx->cacheBase;
-        uint32_t avail = ctx->cacheLen - inCacheOff;
-        uint32_t take = (uint32_t)(nbyte - total);
-        if (take > avail) take = avail;
-        memcpy(buff + total, ctx->cache + inCacheOff, take);
-        ctx->offset += take;
-        total += take;
-      } else {
-        int32_t got = lakatosFsRead(ctx->vfsPath, ctx->offset, ctx->cache, kVfsCacheSize);
-        if (got <= 0) break;
-        ctx->cacheBase = ctx->offset;
-        ctx->cacheLen  = (uint32_t)got;
-      }
-    }
-    return (UINT)total;
+    int32_t got = lakatosFsStreamRead(ctx->stream, buff, nbyte);
+    if (got <= 0) return 0;
+    ctx->offset += (uint32_t)got;
+    return (UINT)got;
   }
 
   return 0;
@@ -114,7 +100,9 @@ UINT jpgOutCallback(JDEC* jd, void* bitmap, JRECT* rect) {
   return 1;
 }
 
-bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale) {
+bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
+                        int boxW = 0, int boxH = 0) {
+  uint32_t tStart = millis();
   if (scale < 0) scale = 0;
   if (scale > 3) scale = 3;
   ctx.dstX = x;
@@ -130,6 +118,17 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale) {
     return false;
   }
 
+  if (boxW > 0 && boxH > 0) {
+    scale = 0;
+    while (scale < 3 && (((int)jdec.width >> scale) > boxW || ((int)jdec.height >> scale) > boxH)) {
+      scale++;
+    }
+    int sw = (int)jdec.width >> scale;
+    int sh = (int)jdec.height >> scale;
+    ctx.dstX = x + ((boxW - sw) > 0 ? (boxW - sw) / 2 : 0);
+    ctx.dstY = y + ((boxH - sh) > 0 ? (boxH - sh) / 2 : 0);
+  }
+
   bool prevSwap = tft.getSwapBytes();
   tft.setSwapBytes(true);
 
@@ -137,6 +136,10 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale) {
 
   tft.setSwapBytes(prevSwap);
   free(workBuf);
+
+  Serial.printf("[TIMING] JPG %ux%u scale=%d decode+draw=%lu ms\r\n",
+                (unsigned)jdec.width, (unsigned)jdec.height, scale,
+                (unsigned long)(millis() - tStart));
 
   // Note: JDR_INTR means jpgOutCallback returned 0 because the rest of the image
   // was below SCREEN_H, which is a valid clipped render.
@@ -150,18 +153,15 @@ bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight) {
   if (outHeight) *outHeight = 0;
   if (!vfsPath || !vfsPath[0]) return false;
 
-  JpgReaderContext* ctx = (JpgReaderContext*)malloc(sizeof(JpgReaderContext));
+  JpgReaderContext ctx;
+  ctx.stream = lakatosFsOpenRead(vfsPath);
+  if (!ctx.stream) return false;
+
   uint8_t* workBuf = (uint8_t*)malloc(kTjpgdWorkSize);
-  if (!ctx || !workBuf) {
-    if (ctx) free(ctx);
-    if (workBuf) free(workBuf);
-    return false;
-  }
-  memset(ctx, 0, sizeof(JpgReaderContext));
-  ctx->vfsPath = vfsPath;
+  if (!workBuf) return false;
 
   JDEC jdec;
-  JRESULT res = jd_prepare(&jdec, jpgInCallback, workBuf, kTjpgdWorkSize, ctx);
+  JRESULT res = jd_prepare(&jdec, jpgInCallback, workBuf, kTjpgdWorkSize, &ctx);
   bool ok = (res == JDR_OK && jdec.width > 0 && jdec.height > 0);
   if (ok) {
     if (outWidth) *outWidth = (int)jdec.width;
@@ -169,29 +169,52 @@ bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight) {
   }
 
   free(workBuf);
-  free(ctx);
+  return ok;
+}
+
+bool lakatosJpgInfoMem(const uint8_t* data, size_t len, int* outWidth, int* outHeight) {
+  if (outWidth) *outWidth = 0;
+  if (outHeight) *outHeight = 0;
+  if (!data || len < 4) return false;
+
+  JpgReaderContext ctx;
+  ctx.memData = data;
+  ctx.memLen  = len;
+
+  uint8_t* workBuf = (uint8_t*)malloc(kTjpgdWorkSize);
+  if (!workBuf) return false;
+
+  JDEC jdec;
+  JRESULT res = jd_prepare(&jdec, jpgInCallback, workBuf, kTjpgdWorkSize, &ctx);
+  bool ok = (res == JDR_OK && jdec.width > 0 && jdec.height > 0);
+  if (ok) {
+    if (outWidth) *outWidth = (int)jdec.width;
+    if (outHeight) *outHeight = (int)jdec.height;
+  }
+  free(workBuf);
   return ok;
 }
 
 bool lakatosDrawJpgFile(const char* vfsPath, int x, int y, int scale) {
   if (!vfsPath || !vfsPath[0]) return false;
-  JpgReaderContext* ctx = (JpgReaderContext*)malloc(sizeof(JpgReaderContext));
-  if (!ctx) return false;
-  memset(ctx, 0, sizeof(JpgReaderContext));
-  ctx->vfsPath = vfsPath;
-  bool ok = decodeAndRenderJpg(*ctx, x, y, scale);
-  free(ctx);
-  return ok;
+  JpgReaderContext ctx;
+  ctx.stream = lakatosFsOpenRead(vfsPath);
+  if (!ctx.stream) return false;
+  return decodeAndRenderJpg(ctx, x, y, scale, 0, 0);
+}
+
+bool lakatosDrawJpgFileCentered(const char* vfsPath, int boxX, int boxY, int boxW, int boxH) {
+  if (!vfsPath || !vfsPath[0]) return false;
+  JpgReaderContext ctx;
+  ctx.stream = lakatosFsOpenRead(vfsPath);
+  if (!ctx.stream) return false;
+  return decodeAndRenderJpg(ctx, boxX, boxY, 0, boxW, boxH);
 }
 
 bool lakatosDrawJpgMem(const uint8_t* data, size_t len, int x, int y, int scale) {
   if (!data || len < 4) return false;
-  JpgReaderContext* ctx = (JpgReaderContext*)malloc(sizeof(JpgReaderContext));
-  if (!ctx) return false;
-  memset(ctx, 0, sizeof(JpgReaderContext));
-  ctx->memData = data;
-  ctx->memLen  = len;
-  bool ok = decodeAndRenderJpg(*ctx, x, y, scale);
-  free(ctx);
-  return ok;
+  JpgReaderContext ctx;
+  ctx.memData = data;
+  ctx.memLen  = len;
+  return decodeAndRenderJpg(ctx, x, y, scale, 0, 0);
 }

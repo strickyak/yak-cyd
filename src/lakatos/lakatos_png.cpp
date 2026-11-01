@@ -37,10 +37,18 @@ static inline uint8_t paethPredictor(uint8_t a, uint8_t b, uint8_t c) {
 }
 
 struct PngReader {
-  const char*    vfsPath = nullptr;
-  const uint8_t* memData = nullptr;
-  size_t         memLen  = 0;
-  uint32_t       offset  = 0;
+  LakatosVfsStream* stream  = nullptr;
+  const uint8_t*    memData = nullptr;
+  size_t            memLen  = 0;
+  uint32_t          offset  = 0;
+  uint32_t          readUs  = 0;
+
+  ~PngReader() {
+    if (stream) {
+      lakatosFsClose(stream);
+      stream = nullptr;
+    }
+  }
 
   bool readExact(void* dst, size_t n) {
     if (n == 0) return true;
@@ -50,16 +58,12 @@ struct PngReader {
       offset += (uint32_t)n;
       return true;
     }
-    if (vfsPath) {
-      uint8_t* out = (uint8_t*)dst;
-      size_t rem = n;
-      while (rem > 0) {
-        int32_t got = lakatosFsRead(vfsPath, offset, out, rem);
-        if (got <= 0) return false;
-        offset += (uint32_t)got;
-        out += got;
-        rem -= (size_t)got;
-      }
+    if (stream) {
+      uint32_t t0 = micros();
+      int32_t got = lakatosFsStreamRead(stream, dst, n);
+      readUs += (micros() - t0);
+      if (got != (int32_t)n) return false;
+      offset += (uint32_t)got;
       return true;
     }
     return false;
@@ -72,8 +76,12 @@ struct PngReader {
       offset += (uint32_t)n;
       return true;
     }
-    offset += (uint32_t)n;
-    return true;
+    if (stream) {
+      if (!lakatosFsStreamSkip(stream, n)) return false;
+      offset += (uint32_t)n;
+      return true;
+    }
+    return false;
   }
 };
 
@@ -90,6 +98,9 @@ struct PngDecoderState {
 
   int dstX = 0;
   int dstY = 0;
+  int step = 1;
+  uint32_t drawUs = 0;
+  uint32_t tinflUs = 0;
 
   uint8_t paletteR[256];
   uint8_t paletteG[256];
@@ -243,15 +254,17 @@ struct PngDecoderState {
   }
 
   void renderCurrentRow() {
-    int sy = dstY + (int)curY;
+    if (step > 1 && (curY % (uint32_t)step) != 0) return;
+    int sy = dstY + (int)(curY / (uint32_t)step);
     if (sy < 0 || sy >= LAKATOS_SCREEN_H) return;
 
     const uint8_t* raw = curRow + 1;
     int spanStartScreenX = -1;
     int spanLen = 0;
 
-    for (uint32_t x = 0; x < width; x++) {
-      int sx = dstX + (int)x;
+    uint32_t outX = 0;
+    for (uint32_t x = 0; x < width; x += (uint32_t)step, outX++) {
+      int sx = dstX + (int)outX;
       if (sx < 0) continue;
       if (sx >= LAKATOS_SCREEN_W) break;
 
@@ -288,8 +301,10 @@ struct PngDecoderState {
       pos += take;
 
       if (curRowPos == rowBytes) {
+        uint32_t t0 = micros();
         unfilterCurrentRow();
         renderCurrentRow();
+        drawUs += (micros() - t0);
         uint8_t* tmp = prevRow;
         prevRow = curRow;
         curRow = tmp;
@@ -300,7 +315,9 @@ struct PngDecoderState {
   }
 };
 
-static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
+static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
+                               int boxW = 0, int boxH = 0) {
+  uint32_t tStart = millis();
   uint8_t sig[8];
   if (!reader.readExact(sig, 8) || memcmp(sig, kPngSig, 8) != 0) {
     return false;
@@ -310,11 +327,12 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
   if (!st) return false;
   st->dstX = dstX;
   st->dstY = dstY;
+  st->step = 1;
   memset(st->paletteA, 255, sizeof(st->paletteA));
 
   tinfl_decompressor* decomp = (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
   uint8_t* dict = (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
-  constexpr size_t kInChunkSize = 1024;
+  constexpr size_t kInChunkSize = 4096;
   uint8_t* inBuf = (uint8_t*)malloc(kInChunkSize);
 
   if (!decomp || !dict || !inBuf) {
@@ -391,21 +409,34 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
         ok = false;
         break;
       }
+      if (boxW > 0 && boxH > 0) {
+        int step = 1;
+        while (step < 8 && ((int)st->width / step > boxW || (int)st->height / step > boxH)) {
+          step++;
+        }
+        st->step = step;
+        int sw = (int)st->width / step;
+        int sh = (int)st->height / step;
+        st->dstX = dstX + ((boxW - sw) > 0 ? (boxW - sw) / 2 : 0);
+        st->dstY = dstY + ((boxH - sh) > 0 ? (boxH - sh) / 2 : 0);
+      }
       gotIhdr = true;
     } else if (memcmp(chType, "PLTE", 4) == 0) {
       uint32_t entries = chLen / 3;
       if (entries > 256) entries = 256;
-      for (uint32_t i = 0; i < entries; i++) {
-        uint8_t rgb[3];
-        if (!reader.readExact(rgb, 3)) {
+      uint32_t readBytes = entries * 3;
+      uint8_t plteBuf[768];
+      if (readBytes > 0) {
+        if (!reader.readExact(plteBuf, readBytes)) {
           ok = false;
           break;
         }
-        st->paletteR[i] = rgb[0];
-        st->paletteG[i] = rgb[1];
-        st->paletteB[i] = rgb[2];
+        for (uint32_t i = 0; i < entries; i++) {
+          st->paletteR[i] = plteBuf[i * 3 + 0];
+          st->paletteG[i] = plteBuf[i * 3 + 1];
+          st->paletteB[i] = plteBuf[i * 3 + 2];
+        }
       }
-      uint32_t readBytes = entries * 3;
       if (ok && chLen > readBytes) {
         ok = reader.skip(chLen - readBytes);
       }
@@ -463,9 +494,11 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
           size_t inBytes = toRead - inPos;
           size_t outBytes = TINFL_LZ_DICT_SIZE - dictOfs;
           uint32_t flags = TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_HAS_MORE_INPUT;
+          uint32_t t0 = micros();
           status = tinfl_decompress(
               decomp, inBuf + inPos, &inBytes,
               dict, dict + dictOfs, &outBytes, flags);
+          st->tinflUs += (micros() - t0);
           inPos += inBytes;
 
           if (outBytes > 0) {
@@ -477,13 +510,15 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
             break;
           }
           if (status == TINFL_STATUS_DONE ||
+              st->curY >= st->height ||
               (status == TINFL_STATUS_NEEDS_MORE_INPUT && inPos >= toRead)) {
             break;
           }
         }
+        if (st->curY >= st->height) break;
       }
+      if (st->curY >= st->height) break;
     } else if (memcmp(chType, "IEND", 4) == 0) {
-      reader.skip(chLen + 4);
       break;
     } else {
       if (!reader.skip(chLen)) {
@@ -497,6 +532,15 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY) {
   }
 
   tft.setSwapBytes(prevSwap);
+
+  Serial.printf("[TIMING] PNG %lux%lu color=%u step=%d rows=%lu read=%lu ms tinfl=%lu ms draw=%lu ms total=%lu ms\r\n",
+                (unsigned long)st->width, (unsigned long)st->height,
+                (unsigned)st->colorType, st->step,
+                (unsigned long)st->curY,
+                (unsigned long)(reader.readUs / 1000),
+                (unsigned long)(st->tinflUs / 1000),
+                (unsigned long)(st->drawUs / 1000),
+                (unsigned long)(millis() - tStart));
 
   if (st->curRow) free(st->curRow);
   if (st->prevRow) free(st->prevRow);
@@ -531,8 +575,17 @@ bool lakatosPngInfo(const char* vfsPath, int* outWidth, int* outHeight) {
 bool lakatosDrawPngFile(const char* vfsPath, int x, int y) {
   if (!vfsPath || !vfsPath[0]) return false;
   PngReader reader;
-  reader.vfsPath = vfsPath;
-  return decodeAndRenderPng(reader, x, y);
+  reader.stream = lakatosFsOpenRead(vfsPath);
+  if (!reader.stream) return false;
+  return decodeAndRenderPng(reader, x, y, 0, 0);
+}
+
+bool lakatosDrawPngFileCentered(const char* vfsPath, int boxX, int boxY, int boxW, int boxH) {
+  if (!vfsPath || !vfsPath[0]) return false;
+  PngReader reader;
+  reader.stream = lakatosFsOpenRead(vfsPath);
+  if (!reader.stream) return false;
+  return decodeAndRenderPng(reader, boxX, boxY, boxW, boxH);
 }
 
 bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y) {

@@ -14,6 +14,10 @@ static bool gLoMounted = false;
 static bool gSdMounted = false;
 static uint32_t gLastSdRetryMs = 0;
 
+static WiFiClient gShClient;
+static HTTPClient gShHttp;
+static bool       gShStreamBusy = false;
+
 enum VfsBackend {
   VFS_NONE = 0,
   VFS_LO,
@@ -236,18 +240,18 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
     return lsFsImpl(SD, subPath, outEntries, maxEntries);
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
-    WiFiClient client;
-    HTTPClient http;
+    gShClient.setNoDelay(true);
+    gShHttp.setReuse(true);
     String url = buildShTargetUrl(subPath);
-    if (!http.begin(client, url)) return -1;
-    addShBasicAuthHeader(http);
-    int code = http.sendRequest("LS");
+    if (!gShHttp.begin(gShClient, url)) return -1;
+    addShBasicAuthHeader(gShHttp);
+    int code = gShHttp.sendRequest("LS");
     if (code < 200 || code >= 300) {
-      http.end();
+      gShHttp.end();
       return -1;
     }
-    String body = http.getString();
-    http.end();
+    String body = gShHttp.getString();
+    gShHttp.end();
 
     int count = 0;
     int start = 0;
@@ -327,6 +331,7 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
     WiFiClient client;
+    client.setNoDelay(true);
     HTTPClient http;
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return -1;
@@ -358,7 +363,7 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
           startMs = millis();
         }
       } else {
-        delay(2);
+        delayMicroseconds(150);
       }
     }
     http.end();
@@ -511,6 +516,7 @@ int64_t lakatosFsDu(const char* path) {
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
     WiFiClient client;
+    client.setNoDelay(true);
     HTTPClient http;
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return -1;
@@ -551,9 +557,164 @@ int lakatosHttpGet(const char* url, void* buf, size_t maxLen) {
         startMs = millis();
       }
     } else {
-      delay(2);
+      delayMicroseconds(150);
     }
   }
   http.end();
   return (int)total;
+}
+
+struct LakatosVfsStream {
+  VfsBackend  backend    = VFS_NONE;
+  File        file;
+  WiFiClient  ownClient;
+  HTTPClient  ownHttp;
+  HTTPClient* httpPtr    = nullptr;
+  WiFiClient* stream     = nullptr;
+  bool        usesShared = false;
+  int64_t     contentLen = -1;
+  uint32_t    bytesRead  = 0;
+  uint32_t    openMs     = 0;
+};
+
+LakatosVfsStream* lakatosFsOpenRead(const char* path) {
+  if (!path || !path[0]) return nullptr;
+  String subPath;
+  VfsBackend b = parseVfsPath(path, subPath);
+  if (b == VFS_NONE) return nullptr;
+
+  LakatosVfsStream* s = new LakatosVfsStream();
+  if (!s) return nullptr;
+  s->backend = b;
+  s->openMs  = millis();
+
+  if (b == VFS_LO || b == VFS_SD) {
+    fs::FS* fsPtr = (b == VFS_LO) ? (fs::FS*)&LittleFS : (fs::FS*)&SD;
+    if (b == VFS_LO && !gLoMounted) { delete s; return nullptr; }
+    if (b == VFS_SD && !ensureSdMounted()) { delete s; return nullptr; }
+    s->file = fsPtr->open(subPath.c_str(), "r");
+    if (!s->file || s->file.isDirectory()) {
+      if (s->file) s->file.close();
+      delete s;
+      return nullptr;
+    }
+    s->contentLen = (int64_t)s->file.size();
+    return s;
+  } else if (b == VFS_SH) {
+    if (WiFi.status() != WL_CONNECTED) { delete s; return nullptr; }
+    String url = buildShTargetUrl(subPath);
+    WiFiClient* cli = nullptr;
+    if (!gShStreamBusy) {
+      gShStreamBusy = true;
+      s->usesShared = true;
+      s->httpPtr    = &gShHttp;
+      cli           = &gShClient;
+    } else {
+      s->usesShared = false;
+      s->httpPtr    = &s->ownHttp;
+      cli           = &s->ownClient;
+    }
+    cli->setNoDelay(true);
+    s->httpPtr->setReuse(true);
+    if (!s->httpPtr->begin(*cli, url)) {
+      if (s->usesShared) gShStreamBusy = false;
+      delete s;
+      return nullptr;
+    }
+    addShBasicAuthHeader(*s->httpPtr);
+    uint32_t t0 = millis();
+    int code = s->httpPtr->GET();
+    Serial.printf("[TIMING] VFS-SH GET %s -> HTTP %d, len=%d, hdr=%lu ms (reuse=%d)\r\n",
+                  path, code, s->httpPtr->getSize(), (unsigned long)(millis() - t0),
+                  s->usesShared ? 1 : 0);
+    if (code < 200 || code >= 300) {
+      s->httpPtr->end();
+      if (s->usesShared) gShStreamBusy = false;
+      delete s;
+      return nullptr;
+    }
+    s->contentLen = (int64_t)s->httpPtr->getSize();
+    s->stream     = s->httpPtr->getStreamPtr();
+    return s;
+  }
+
+  delete s;
+  return nullptr;
+}
+
+int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
+  if (!s || !buf || len == 0) return 0;
+  if (s->backend == VFS_LO || s->backend == VFS_SD) {
+    int32_t got = (int32_t)s->file.read((uint8_t*)buf, len);
+    if (got > 0) s->bytesRead += (uint32_t)got;
+    return got;
+  } else if (s->backend == VFS_SH) {
+    if (!s->stream || !s->httpPtr) return -1;
+    if (s->contentLen >= 0) {
+      int64_t rem = s->contentLen - (int64_t)s->bytesRead;
+      if (rem <= 0) return 0;
+      if ((int64_t)len > rem) len = (size_t)rem;
+    }
+    size_t total = 0;
+    uint32_t startMs = millis();
+    while (total < len &&
+           (s->httpPtr->connected() || s->stream->available() > 0) &&
+           (millis() - startMs < 8000)) {
+      size_t avail = s->stream->available();
+      if (avail > 0) {
+        size_t chunk = (avail > (len - total)) ? (len - total) : avail;
+        int r = s->stream->read((uint8_t*)buf + total, chunk);
+        if (r > 0) {
+          total += (size_t)r;
+          s->bytesRead += (uint32_t)r;
+          startMs = millis();
+        }
+      } else {
+        delayMicroseconds(100);
+      }
+    }
+    return (int32_t)total;
+  }
+  return -1;
+}
+
+bool lakatosFsStreamSkip(LakatosVfsStream* s, size_t len) {
+  if (!s) return false;
+  if (len == 0) return true;
+  if (s->backend == VFS_LO || s->backend == VFS_SD) {
+    bool ok = s->file.seek(len, SeekCur);
+    if (ok) s->bytesRead += (uint32_t)len;
+    return ok;
+  } else if (s->backend == VFS_SH) {
+    uint8_t discard[256];
+    size_t rem = len;
+    while (rem > 0) {
+      size_t chunk = (rem > sizeof(discard)) ? sizeof(discard) : rem;
+      int32_t got = lakatosFsStreamRead(s, discard, chunk);
+      if (got <= 0) return false;
+      rem -= (size_t)got;
+    }
+    return true;
+  }
+  return false;
+}
+
+void lakatosFsClose(LakatosVfsStream* s) {
+  if (!s) return;
+  if (s->backend == VFS_LO || s->backend == VFS_SD) {
+    if (s->file) s->file.close();
+  } else if (s->backend == VFS_SH && s->httpPtr) {
+    // If only a few trailing bytes remain (e.g. 16-byte PNG IEND), drain them
+    // so HTTP Keep-Alive can reuse the open TCP socket cleanly.
+    if (s->contentLen > 0 && s->bytesRead < (uint32_t)s->contentLen &&
+        ((uint32_t)s->contentLen - s->bytesRead) <= 512) {
+      lakatosFsStreamSkip(s, (size_t)((uint32_t)s->contentLen - s->bytesRead));
+    }
+    Serial.printf("[TIMING] VFS-SH CLOSE read=%lu B, streamTotal=%lu ms\r\n",
+                  (unsigned long)s->bytesRead,
+                  (unsigned long)(millis() - s->openMs));
+    s->httpPtr->end();
+    if (s->usesShared) gShStreamBusy = false;
+  }
+  delete s;
 }
