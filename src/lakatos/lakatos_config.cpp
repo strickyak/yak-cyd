@@ -557,9 +557,11 @@ static void runTouchCalibrationModal() {
 // Wi-Fi Network Scanner & Config Modal
 // ---------------------------------------------------------------------------
 static bool runWifiConfigModal() {
-  String ssids[5];
-  int32_t rssis[5];
+  static const int kMaxWifiList = 20;
+  String ssids[kMaxWifiList];
+  int32_t rssis[kMaxWifiList];
   int count = 0;
+  int page = 0;
 
   auto scanNow = [&]() {
     {
@@ -571,14 +573,33 @@ static bool runWifiConfigModal() {
       tft.drawString("SCANNING WI-FI...", 160, 12, 2);
     }
     WiFi.mode(WIFI_STA);
+    // If not currently connected, stop any background connection/auto-reconnect
+    // attempt; otherwise ESP-IDF esp_wifi_scan_start() returns ESP_ERR_WIFI_STATE
+    // ("sta is connecting, scan are not allowed") and scanNetworks() returns -2.
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.disconnect(false, false);
+      delay(120);
+    }
+    WiFi.scanDelete();
     int n = WiFi.scanNetworks(false, false);
+    if (n < 0) {
+      lakatosDevLogf("Wi-Fi scan returned %d; resetting STA and retrying...", n);
+      WiFi.disconnect(true, false);
+      delay(200);
+      WiFi.mode(WIFI_STA);
+      delay(120);
+      n = WiFi.scanNetworks(false, false);
+    }
     count = 0;
-    for (int i = 0; i < n && count < 5; i++) {
+    for (int i = 0; i < n && count < kMaxWifiList; i++) {
       String s = WiFi.SSID(i);
       if (s.length() == 0) continue;
       bool dup = false;
       for (int j = 0; j < count; j++) {
-        if (ssids[j] == s) dup = true;
+        if (ssids[j] == s) {
+          dup = true;
+          break;
+        }
       }
       if (!dup) {
         ssids[count] = s;
@@ -587,9 +608,34 @@ static bool runWifiConfigModal() {
       }
     }
     WiFi.scanDelete();
+    page = 0;
+    lakatosDevLogf("Wi-Fi scan: raw=%d unique=%d", n, count);
+    for (int i = 0; i < count; i++) {
+      lakatosDevLogf("  [%d] '%s' (%ld dBm)", i, ssids[i].c_str(), (long)rssis[i]);
+    }
+  };
+
+  auto resumeSavedWifiIfDisconnected = [&]() {
+    if (WiFi.status() == WL_CONNECTED) return;
+    prefs.begin("cyd_wifi", true);
+    String ssid = prefs.getString("ssid", "");
+    String pass = prefs.getString("pass", "");
+    prefs.end();
+    if (ssid.length() > 0) {
+      WiFi.mode(WIFI_STA);
+      WiFi.setSleep(false);
+      if (pass.length() > 0) {
+        WiFi.begin(ssid.c_str(), pass.c_str());
+      } else {
+        WiFi.begin(ssid.c_str());
+      }
+    }
   };
 
   auto drawWifiList = [&]() {
+    int totalPages = (count > 0) ? ((count + 4) / 5) : 1;
+    if (page >= totalPages) page = 0;
+
     LakatosTftGuard tftLock;
     tft.fillScreen(0x0841);
     tft.fillRect(0, 0, LAKATOS_SCREEN_W, 25, TFT_NAVY);
@@ -600,7 +646,15 @@ static bool runWifiConfigModal() {
     tft.drawString("HOME", 31, 12, 2);
 
     tft.setTextColor(TFT_WHITE, TFT_NAVY);
-    tft.drawString("WI-FI NETWORKS", 155, 12, 2);
+    if (totalPages > 1) {
+      tft.drawString("WI-FI " + String(page + 1) + "/" + String(totalPages), 122, 12, 2);
+      tft.fillRoundRect(188, 2, 62, 20, 4, 0x2945);
+      tft.drawRoundRect(188, 2, 62, 20, 4, TFT_CYAN);
+      tft.setTextColor(TFT_CYAN, 0x2945);
+      tft.drawString("PAGE >", 219, 12, 1);
+    } else {
+      tft.drawString("WI-FI NETWORKS", 155, 12, 2);
+    }
 
     tft.fillRoundRect(254, 2, 64, 20, 4, 0x2945);
     tft.drawRoundRect(254, 2, 64, 20, 4, TFT_YELLOW);
@@ -611,13 +665,18 @@ static bool runWifiConfigModal() {
     if (WiFi.status() == WL_CONNECTED) {
       tft.setTextColor(TFT_GREEN, 0x0841);
       tft.drawString("Connected: " + WiFi.SSID() + " (" + WiFi.localIP().toString() + ")", 6, 36, 1);
+    } else if (count > 0) {
+      tft.setTextColor(TFT_ORANGE, 0x0841);
+      tft.drawString("Found " + String(count) + " networks - tap to connect:", 6, 36, 1);
     } else {
       tft.setTextColor(TFT_ORANGE, 0x0841);
-      tft.drawString("Not connected - tap a network below:", 6, 36, 1);
+      tft.drawString("No networks found - tap RESCAN:", 6, 36, 1);
     }
 
-    for (int i = 0; i < count; i++) {
-      int ry = 48 + i * 36;
+    int startIdx = page * 5;
+    for (int row = 0; row < 5 && (startIdx + row) < count; row++) {
+      int i = startIdx + row;
+      int ry = 48 + row * 36;
       tft.fillRoundRect(6, ry, 308, 32, 5, 0x18E3);
       tft.drawRoundRect(6, ry, 308, 32, 5, TFT_CYAN);
       tft.setTextDatum(ML_DATUM);
@@ -642,14 +701,22 @@ static bool runWifiConfigModal() {
       if (!wasDown && (now - lastRel > 100)) {
         wasDown = true;
         if (t.y <= 25) {
-          if (t.x <= 62) return true;
-          if (t.x >= 250) {
+          if (t.x <= 62) {
+            resumeSavedWifiIfDisconnected();
+            return true;
+          }
+          if (t.x >= 186 && t.x < 252 && count > 5) {
+            int totalPages = (count + 4) / 5;
+            page = (page + 1) % totalPages;
+            drawWifiList();
+          } else if (t.x >= 252) {
             scanNow();
             drawWifiList();
           }
         } else if (t.y >= 48) {
-          int idx = (t.y - 48) / 36;
-          if (idx >= 0 && idx < count) {
+          int row = (t.y - 48) / 36;
+          int idx = page * 5 + row;
+          if (row >= 0 && row < 5 && idx >= 0 && idx < count) {
             char passBuf[64] = "";
             String title = "PW: " + ssids[idx].substring(0, 14);
             if (lakatosPromptKeyboard(title.c_str(), passBuf, sizeof(passBuf), false, false) == 1) {
@@ -664,9 +731,14 @@ static bool runWifiConfigModal() {
                 tft.setTextColor(TFT_YELLOW, 0x0841);
                 tft.drawString("Connecting to " + ssids[idx] + "...", 160, 120, 2);
               }
-              WiFi.disconnect();
+              WiFi.disconnect(false, false);
+              delay(100);
               WiFi.setSleep(false);
-              WiFi.begin(ssids[idx].c_str(), passBuf);
+              if (strlen(passBuf) > 0) {
+                WiFi.begin(ssids[idx].c_str(), passBuf);
+              } else {
+                WiFi.begin(ssids[idx].c_str());
+              }
               uint32_t startMs = millis();
               while (WiFi.status() != WL_CONNECTED && (millis() - startMs < 9000)) {
                 delay(200);
