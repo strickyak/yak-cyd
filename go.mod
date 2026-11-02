@@ -1,4 +1,4 @@
-module github.com/strickyak/yak-cyd/tools/lcode
+module github.com/strickyak/yak-cyd
 
 go 1.22
 

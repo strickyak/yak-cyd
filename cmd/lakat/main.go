@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/strickyak/yak-cyd/tools/lcode/pkg/lcode"
+	"github.com/strickyak/yak-cyd/pkg/lakat"
 )
 
 func usage() {
@@ -37,23 +37,23 @@ func (t *tapFlag) Set(v string) error {
 	return nil
 }
 
-func parseTapSpec(s string) (lcode.TouchEvent, error) {
+func parseTapSpec(s string) (lakat.TouchEvent, error) {
 	if idx := strings.IndexByte(s, '@'); idx >= 0 {
 		s = s[:idx]
 	}
 	parts := strings.Split(s, ",")
 	if len(parts) != 2 {
-		return lcode.TouchEvent{}, fmt.Errorf("invalid --tap %q (expected x,y)", s)
+		return lakat.TouchEvent{}, fmt.Errorf("invalid --tap %q (expected x,y)", s)
 	}
 	x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil {
-		return lcode.TouchEvent{}, err
+		return lakat.TouchEvent{}, err
 	}
 	y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil {
-		return lcode.TouchEvent{}, err
+		return lakat.TouchEvent{}, err
 	}
-	return lcode.TouchEvent{Touched: true, X: x, Y: y}, nil
+	return lakat.TouchEvent{Touched: true, X: x, Y: y}, nil
 }
 
 func writeSeedHeader(headerPath, varName, title string, lappBytes []byte) error {
@@ -112,7 +112,7 @@ func cmdCompile(args []string) {
 	}
 
 	if *emitAsm {
-		asmText, err := lcode.CompileToAsm(sources...)
+		asmText, err := lakat.CompileToAsm(sources...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lakat compile error: %v\n", err)
 			os.Exit(1)
@@ -132,7 +132,7 @@ func cmdCompile(args []string) {
 		return
 	}
 
-	lappBytes, _, err := lcode.CompileToLapp(appTitle, sources...)
+	lappBytes, _, err := lakat.CompileToLapp(appTitle, sources...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat compile error: %v\n", err)
 		os.Exit(1)
@@ -184,7 +184,7 @@ func cmdAsm(args []string) {
 		base := filepath.Base(inFile)
 		appTitle = strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	lappBytes, err := lcode.AssembleLapp(string(b), appTitle)
+	lappBytes, err := lakat.AssembleLapp(string(b), appTitle)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat asm error: %v\n", err)
 		os.Exit(1)
@@ -216,7 +216,7 @@ func cmdDis(args []string) {
 		fmt.Fprintf(os.Stderr, "lakat dis: %v\n", err)
 		os.Exit(1)
 	}
-	txt, err := lcode.Disassemble(b)
+	txt, err := lakat.Disassemble(b)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat dis: %v\n", err)
 		os.Exit(1)
@@ -243,7 +243,7 @@ func cmdRun(args []string) {
 		fmt.Fprintf(os.Stderr, "lakat run: %v\n", err)
 		os.Exit(1)
 	}
-	vm, err := lcode.NewVM(b)
+	vm, err := lakat.NewVM(b)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat run: %v\n", err)
 		os.Exit(1)

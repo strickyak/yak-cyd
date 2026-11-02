@@ -1,17 +1,17 @@
 PIO ?= .venv/bin/python -m platformio
 PYTHON ?= python3
-LAKAT ?= ./bin/lakat
+LAKAT ?= ./build/lakat
 
-.PHONY: all lakatos os build-lakatos lakat-tool lcode-tool apps demo1 demo2 build-demo1 build-demo2 monitor clean
+.PHONY: all push lakatos build-lakatos lakat apps demo1 demo2 build-demo1 build-demo2 monitor clean
 
 all:
 	@echo "================================================================"
 	@echo "  Yak-CYD Makefile Targets"
 	@echo "================================================================"
+	@echo "  make push           Build and push: lakatos & apps"
 	@echo "  make lakatos        Build LCode .lapp apps, compile & upload Lakatos OS"
-	@echo "  make os             Alias for 'make lakatos'"
 	@echo "  make build-lakatos  Build LCode .lapp apps & compile Lakatos OS"
-	@echo "  make lakat-tool     Build ./bin/lakat Go compiler/asm/dis/emulator/uploader/tether"
+	@echo "  make lakat          Build ./build/lakat (compiler, asm, dis, emulator, uploader, tether)"
 	@echo "  make apps           Compile LCode .lgolf apps into build/apps/*.lapp"
 	@echo "  make demo1          Compile and upload demo1 (src/demo1/) to CYD"
 	@echo "  make demo2          Compile and upload demo2 (src/demo2/) to CYD"
@@ -21,21 +21,20 @@ all:
 	@echo "  make clean          Clean PlatformIO and .lapp build artifacts"
 	@echo "================================================================"
 
-lakat-tool:
-	mkdir -p bin
-	cd tools/lcode && GOWORK=off go build -o ../../bin/lakat ./cmd/lakat
+push: lakatos apps
+	TODO
 
-lcode-tool: lakat-tool
+lakat:
+	mkdir -p build
+	GOWORK=off go build -o build/lakat ./cmd/lakat
 
-apps: lakat-tool
+apps: lakat
 	mkdir -p build/apps
 	$(LAKAT) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
 	$(LAKAT) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload
-
-os: lakatos
 
 build-lakatos: apps
 	$(PIO) run -e lakatos
@@ -57,4 +56,4 @@ monitor:
 
 clean:
 	$(PIO) run -t clean
-	rm -rf build/apps
+	rm -rf build/apps build/lakat

@@ -1,4 +1,4 @@
-package lcode
+package lakat
 
 import (
 	"encoding/binary"

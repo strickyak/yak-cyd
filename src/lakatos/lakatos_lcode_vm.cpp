@@ -9,7 +9,7 @@
 #include <string.h>
 
 // ---------------------------------------------------------------------------
-// LCode 32-Bit Bytecode Opcodes & Syscall IDs (matching tools/lcode/pkg/lcode)
+// LCode 32-Bit Bytecode Opcodes & Syscall IDs (matching pkg/lakat)
 // ---------------------------------------------------------------------------
 namespace {
 
