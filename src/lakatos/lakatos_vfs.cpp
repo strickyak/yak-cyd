@@ -458,7 +458,8 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
     }
     size_t total = 0;
     uint32_t startMs = millis();
-    while ((http.connected() || (stream && stream->available() > 0)) &&
+    while (!lakatosShouldExitApp() &&
+           (http.connected() || (stream && stream->available() > 0)) &&
            total < toRead && (millis() - startMs < 8000)) {
       size_t avail = stream ? stream->available() : 0;
       if (avail > 0) {
@@ -687,7 +688,8 @@ int lakatosHttpGet(const char* url, void* buf, size_t maxLen) {
   WiFiClient* stream = http.getStreamPtr();
   size_t total = 0;
   uint32_t startMs = millis();
-  while ((http.connected() || (stream && stream->available() > 0)) &&
+  while (!lakatosShouldExitApp() &&
+         (http.connected() || (stream && stream->available() > 0)) &&
          total < maxLen &&
          (contentLen < 0 || total < (size_t)contentLen) &&
          (millis() - startMs < 4000)) {
@@ -918,6 +920,7 @@ int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
     bool onCore0 = (xPortGetCoreID() == 0);
     while (total < len &&
            !(onCore0 && gPrefetchCancelReq) &&
+           !(!onCore0 && lakatosShouldExitApp()) &&
            (s->httpPtr->connected() || s->stream->available() > 0) &&
            (millis() - startMs < 5000)) {
       size_t avail = s->stream->available();

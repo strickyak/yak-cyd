@@ -170,8 +170,9 @@ const (
 	SysYield   = byte(0x01) // ( -- )
 	SysMillis  = byte(0x02) // ( -- ms)
 	SysMicros  = byte(0x03) // ( -- us)
-	SysDelayMs = byte(0x04) // (ms -- )
-	SysRand    = byte(0x05) // (max -- r)
+	SysDelayMs       = byte(0x04) // (ms -- )
+	SysRand          = byte(0x05) // (max -- r)
+	SysSetCornerExit = byte(0x06) // (enable -- )
 
 	// Identity, Config & Time (0x08 .. 0x0F)
 	SysGetAirport       = byte(0x08) // ( -- strSlice)
@@ -407,6 +408,7 @@ var SyscallByName = map[string]byte{
 	"SYS_MICROS":             SysMicros,
 	"SYS_DELAY_MS":           SysDelayMs,
 	"SYS_RAND":               SysRand,
+	"SYS_SET_CORNER_EXIT":    SysSetCornerExit,
 	"SYS_GET_AIRPORT":        SysGetAirport,
 	"SYS_GET_AIRPORT_INFO":   SysGetAirportInfo,
 	"SYS_GET_DEVICE_NAME":    SysGetDeviceName,

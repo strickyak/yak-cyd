@@ -1437,6 +1437,11 @@ func (vm *VM) execSyscall(sysId byte) error {
 		} else {
 			vm.push(uint32(rand.Intn(int(mx))))
 		}
+	case SysSetCornerExit:
+		_, err := vm.pop()
+		if err != nil {
+			return err
+		}
 
 	case SysGetAirport:
 		vm.pushScratchString(vm.AirportCode)

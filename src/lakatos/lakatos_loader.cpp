@@ -604,7 +604,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   gAppRunning = false;
   lakatosPrefetchFree();
   cleanupAppHeap();
-  tft.setTextDatum(TL_DATUM);
+  lakatosEndAppSession();
 
   if (outExitCode) *outExitCode = gAppLastExitCode;
   Serial.printf("[Lakatos] App '%s' exited with code %d, returning to Lakatos OS.\r\n",

@@ -436,8 +436,14 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
   uint32_t lastRel = millis();
 
   while (true) {
+    if (lakatosShouldExitApp()) {
+      return -1;
+    }
     updateLakatosConfigBackground();
     LakatosTouchSample t = lakatosReadTouch();
+    if (lakatosShouldExitApp()) {
+      return -1;
+    }
     uint32_t now = millis();
 
     if (t.touched) {

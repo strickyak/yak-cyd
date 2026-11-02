@@ -55,6 +55,16 @@ void lakatosUpdateRgbLed();
 int  lakatosReadLdrRaw();
 float lakatosReadCpuTempC();
 
+// App lifecycle & Core 0 top-left 10x10 corner exit / timeout mechanism
+void lakatosBeginAppSession();
+void lakatosEndAppSession();
+void lakatosSetCornerExitEnabled(bool en);
+bool lakatosGetCornerExitEnabled();
+bool lakatosIsCornerExitActive();
+void lakatosSetAppTimeoutMs(uint32_t timeoutMs);
+void lakatosRequestAppExit();
+bool lakatosShouldExitApp();
+
 // ---------------------------------------------------------------------------
 // Configuration, Calibration & Stylus Keyboard (implemented in lakatos_config.cpp)
 // ---------------------------------------------------------------------------

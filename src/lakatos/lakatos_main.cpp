@@ -69,6 +69,49 @@ static volatile bool gTouchClickConsumed = false;
 static uint32_t gLatchedTouchMs = 0;
 static LakatosTouchSample gLatchedTouch = {false, 0, 0, 0, 0, 0};
 
+// App lifecycle & Core 0 top-left 10x10 corner exit / timeout state
+static constexpr uint16_t kDarkBrownExitColor = 0x5962;  // Dark brown RGB565 (R=88, G=44, B=16)
+static volatile bool     gLCodeAppRunning   = false;
+static volatile bool     gCornerExitEnabled = true;
+static volatile bool     gPleaseExitApp     = false;
+static volatile uint32_t gAppDeadlineMs     = 0;
+
+void lakatosBeginAppSession() {
+  gPleaseExitApp     = false;
+  gCornerExitEnabled = true;
+  gLCodeAppRunning   = true;
+}
+
+void lakatosSetCornerExitEnabled(bool en) {
+  gCornerExitEnabled = en;
+}
+
+bool lakatosGetCornerExitEnabled() {
+  return gCornerExitEnabled;
+}
+
+bool lakatosIsCornerExitActive() {
+  return gLCodeAppRunning && gCornerExitEnabled;
+}
+
+void lakatosSetAppTimeoutMs(uint32_t timeoutMs) {
+  gAppDeadlineMs = (timeoutMs > 0) ? (millis() + timeoutMs) : 0;
+}
+
+void lakatosRequestAppExit() {
+  gPleaseExitApp = true;
+}
+
+bool lakatosShouldExitApp() {
+  if (gPleaseExitApp) return true;
+  uint32_t dl = gAppDeadlineMs;
+  if (dl != 0 && (int32_t)(millis() - dl) >= 0) {
+    gPleaseExitApp = true;
+    return true;
+  }
+  return false;
+}
+
 #include <stdarg.h>
 
 void lakatosDevLogf(const char* fmt, ...) {
@@ -192,10 +235,15 @@ static LakatosTouchSample readTouchHardwareUnlocked() {
   return out;
 }
 
+static inline bool isTopLeftExitCorner(int x, int y) {
+  return x >= 0 && x < 10 && y >= 0 && y < 10;
+}
+
 LakatosTouchSample lakatosReadTouch() {
   if (digitalRead(XPT2046_IRQ) == HIGH) {
     return {false, 0, 0, 0, 0, 0};
   }
+  bool triggeredCornerExit = false;
   if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
   LakatosTouchSample out = readTouchHardwareUnlocked();
   if (out.touched) {
@@ -203,8 +251,17 @@ LakatosTouchSample lakatosReadTouch() {
     gTouchPressConsumed = true;
     gHasLatchedTouch = false;
     gLastTouchDownMs = millis();
+    if (lakatosIsCornerExitActive() && isTopLeftExitCorner(out.x, out.y)) {
+      gPleaseExitApp = true;
+      gTouchClickConsumed = true;
+      triggeredCornerExit = true;
+    }
   }
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+  if (triggeredCornerExit) {
+    lakatosDevLogf("Corner Exit: (%d,%d)", out.x, out.y);
+    return {false, 0, 0, 0, 0, 0};
+  }
   if (out.touched) {
     onTouchDeliveredToAppOrUi(out.x, out.y);
   }
@@ -213,6 +270,10 @@ LakatosTouchSample lakatosReadTouch() {
 
 void lakatosPollTouchLatch() {
   uint32_t now = millis();
+
+  if (gLCodeAppRunning && gAppDeadlineMs != 0 && (int32_t)(now - gAppDeadlineMs) >= 0) {
+    gPleaseExitApp = true;
+  }
 
   // 1. Check if an active white/yellow spot has reached its blank deadline
   if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
@@ -276,11 +337,21 @@ void lakatosPollTouchLatch() {
   if (gTouchMutex) {
     if (xSemaphoreTake(gTouchMutex, 0) != pdTRUE) return;
   }
+  bool triggeredCornerExit = false;
   LakatosTouchSample s = readTouchHardwareUnlocked();
   if (s.touched) {
     uint32_t tNow = millis();
     gLastTouchDownMs = tNow;
-    if (!gTouchPenDown) {
+    if (lakatosIsCornerExitActive() && isTopLeftExitCorner(s.x, s.y)) {
+      if (!gPleaseExitApp) {
+        triggeredCornerExit = true;
+      }
+      gPleaseExitApp = true;
+      gTouchPenDown = true;
+      gTouchPressConsumed = true;
+      gTouchClickConsumed = true;
+      gHasLatchedTouch = false;
+    } else if (!gTouchPenDown) {
       // New physical press started: latch it in case Core 1 misses the live window
       gTouchPenDown = true;
       gTouchPressConsumed = false;
@@ -293,7 +364,7 @@ void lakatosPollTouchLatch() {
       gLatchedTouch = s;
       gLatchedTouchMs = tNow;
     }
-    if (lakatosGetTouchSpotEnabled()) {
+    if (!gPleaseExitApp && lakatosGetTouchSpotEnabled()) {
       bool moved = (abs(s.x - gSpotX) + abs(s.y - gSpotY) >= 8);
       if (gSpotState == SPOT_NONE || moved) {
         if ((gSpotState == SPOT_WHITE || gSpotState == SPOT_YELLOW) &&
@@ -313,6 +384,10 @@ void lakatosPollTouchLatch() {
     }
   }
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+
+  if (triggeredCornerExit) {
+    lakatosDevLogf("Core0 Corner Exit: (%d,%d)", s.x, s.y);
+  }
 
   // 3. Draw white spot on Core 0 outside gTouchMutex while holding gTftMutex
   if (gSpotPendingWhite && gSpotState == SPOT_WHITE && lakatosTftTryLock(1)) {
@@ -353,6 +428,34 @@ void lakatosWaitTouchRelease() {
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 }
 
+void lakatosEndAppSession() {
+  gLCodeAppRunning   = false;
+  gPleaseExitApp     = false;
+  gCornerExitEnabled = true;
+  gAppDeadlineMs     = 0;
+
+  // Ensure on-board RGB LED is turned off when app exits
+  lakatosSetRgbLed(false, false, false, 0);
+
+  // Clear any pending Core 0 touch spot or stray latched touch
+  if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+  gSpotState = SPOT_NONE;
+  gSpotPendingWhite = false;
+  gSpotPendingBlankOld = false;
+  gHasLatchedTouch = false;
+  gTouchPressConsumed = true;
+  gTouchClickConsumed = true;
+  if (gTouchMutex) xSemaphoreGive(gTouchMutex);
+
+  // Acknowledge app exit by painting the entire screen dark brown for 100ms
+  {
+    LakatosTftGuard tftGuard;
+    tft.setTextDatum(TL_DATUM);
+    tft.fillScreen(kDarkBrownExitColor);
+    delay(100);
+  }
+}
+
 LakatosTouchSample lakatosReadTouchLatched() {
   LakatosTouchSample live = lakatosReadTouch();
   if (live.touched) {
@@ -365,6 +468,11 @@ LakatosTouchSample lakatosReadTouchLatched() {
     LakatosTouchSample latched = gLatchedTouch;
     gHasLatchedTouch = false;
     gTouchPressConsumed = true;
+    if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
+      gPleaseExitApp = true;
+      gTouchClickConsumed = true;
+      valid = false;
+    }
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (valid) {
       onTouchDeliveredToAppOrUi(latched.x, latched.y);
@@ -419,7 +527,11 @@ LakatosTouchSample lakatosReadClick() {
     LakatosTouchSample latched = gLatchedTouch;
     gHasLatchedTouch = false;
     gTouchPressConsumed = true;
-    if (valid) {
+    if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
+      gPleaseExitApp = true;
+      gTouchClickConsumed = true;
+      valid = false;
+    } else if (valid) {
       gTouchClickConsumed = true;
     }
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);

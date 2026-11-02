@@ -3133,6 +3133,9 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "os_rand", "rand":
 		c.emitOp("SYSCALL", "SYS_RAND")
 		return ScalarInt, nil
+	case "os_set_corner_exit", "set_corner_exit":
+		c.emitOp("SYSCALL", "SYS_SET_CORNER_EXIT")
+		return VoidType, nil
 
 	// Identity, Airport & Time
 	case "os_get_airport", "get_airport":

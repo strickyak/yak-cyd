@@ -157,6 +157,7 @@ enum LCodeSyscall : uint8_t {
   SysMicros          = 0x03,
   SysDelayMs         = 0x04,
   SysRand            = 0x05,
+  SysSetCornerExit   = 0x06,
 
   SysGetAirport      = 0x08,
   SysGetAirportInfo  = 0x09,
@@ -526,9 +527,18 @@ struct LCodeVM {
         return true;
       }
       case SysYield: {
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+          return true;
+        }
         updateLakatosConfigBackground();
         lakatosUpdateRgbLed();
         yield();
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+        }
         return true;
       }
       case SysMillis:
@@ -540,10 +550,19 @@ struct LCodeVM {
         if (!pop(ms)) return false;
         uint32_t start = millis();
         while ((uint32_t)(millis() - start) < ms) {
+          if (lakatosShouldExitApp()) {
+            exitCode = 0;
+            running = 0;
+            return true;
+          }
           updateLakatosConfigBackground();
           lakatosUpdateRgbLed();
           uint32_t rem = ms - (uint32_t)(millis() - start);
           delay(rem > 5 ? 5 : rem);
+        }
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
         }
         return true;
       }
@@ -551,6 +570,12 @@ struct LCodeVM {
         uint32_t mx = 0;
         if (!pop(mx)) return false;
         return push(mx <= 1 ? 0 : (uint32_t)random(mx));
+      }
+      case SysSetCornerExit: {
+        uint32_t en = 0;
+        if (!pop(en)) return false;
+        lakatosSetCornerExitEnabled(en != 0);
+        return true;
       }
 
       // Identity, Config & Time
@@ -891,18 +916,30 @@ struct LCodeVM {
       // Touch, Keyboard, LED & Sensors
       case SysReadTouch: {
         LakatosTouchSample ts = lakatosReadTouchLatched();
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+        }
         return push(ts.touched ? 1 : 0) &&
                push((uint32_t)ts.x) &&
                push((uint32_t)ts.y);
       }
       case SysReadClick: {
         LakatosTouchSample ts = lakatosReadClick();
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+        }
         return push(ts.touched ? 1 : 0) &&
                push((uint32_t)ts.x) &&
                push((uint32_t)ts.y);
       }
       case SysReadTouchRaw: {
         LakatosTouchSample ts = lakatosReadTouchLatched();
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+        }
         return push(ts.touched ? 1 : 0) &&
                push((uint32_t)ts.rawX) &&
                push((uint32_t)ts.rawY) &&
@@ -917,6 +954,10 @@ struct LCodeVM {
         int res = lakatosPromptKeyboard(titleBuf, (char*)(mem + bufAddr),
                                         maxLen, allowCtrlC != 0, false);
         tft.setTextDatum(TL_DATUM);
+        if (lakatosShouldExitApp()) {
+          exitCode = 0;
+          running = 0;
+        }
         return push((uint32_t)(int32_t)res);
       }
       case SysSetRgbLed: {
@@ -1019,8 +1060,10 @@ struct LCodeVM {
         return push((uint32_t)(int32_t)got);
       }
       case SysSerialAvail:
+        lakatosPollSerialFuse();
         return push((uint32_t)Serial.available());
       case SysSerialRead:
+        lakatosPollSerialFuse();
         return push((uint32_t)(int32_t)Serial.read());
       case SysSerialWrite: {
         uint32_t ln = 0, bufAddr = 0;
@@ -1420,9 +1463,16 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
   }
 
+  lakatosBeginAppSession();
+
   uint32_t stepCounter = 0;
   while (vm->running) {
     if (__builtin_expect((++stepCounter & 0x1FFFu) == 0, 0)) {
+      if (lakatosShouldExitApp()) {
+        vm->exitCode = 0;
+        vm->running  = 0;
+        break;
+      }
       yield();
     }
     if (__builtin_expect(vm->pc < 0 || (uint32_t)vm->pc >= vm->codeSize, 0)) {
@@ -2163,14 +2213,11 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   }
 
   if (outExitCode) *outExitCode = vm->exitCode;
-  {
-    LakatosTftGuard tftGuard;
-    tft.setTextDatum(TL_DATUM);
-  }
 
   lakatosPrefetchFree();
   if (vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);
   heap_caps_free(vm);
+  lakatosEndAppSession();
   return !hadErr;
 }
