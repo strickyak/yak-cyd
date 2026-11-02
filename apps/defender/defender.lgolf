@@ -1,0 +1,687 @@
+// Defender for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Controls:
+//   - Top-Left HOME button (x <= 64, y < 25): Exit to Lakatos OS
+//   - Top-Right NEW button (x >= 256, y < 25): Start new game
+//   - Bottom Control Bar (y >= 214): [UP] [DOWN] [FLIP] [THRUST] [FIRE] [BOMB]
+//   - Direct Viewport Touch: Left/Right of center thrusts & faces ship, vertical sets altitude, tap fires laser
+package main
+
+const (
+	TOP_BAR_H = 24
+	BOT_BAR_Y = 214
+	VIEW_TOP  = 26
+	VIEW_BOT  = 212
+
+	WORLD_W      = 1024 // Wraparound planet width (power of 2)
+	WORLD_MASK   = 1023
+	TERR_POSTS   = 32   // 32 terrain vertices spaced by 32 world units
+	HUMANOID_CNT = 6
+	ENEMY_CNT    = 8
+	LASER_CNT    = 3
+
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	BTN_NEW  = 0x03EF
+	RADAR_BG = 0x0008
+)
+
+var (
+	score    int
+	wave     int
+	lives    int
+	bombs    int
+	gameOver bool
+
+	// Player ship in world coordinates
+	camX      int
+	shipWX    int
+	shipY     int
+	shipDir   int // 1 = right, -1 = left
+	shipVX    int
+	prevShipX int
+	prevShipY int
+	prevDir   int
+	fireCD    int
+
+	// Mountain terrain heights (screen Y in 168..206)
+	terrY [TERR_POSTS]int
+
+	// Humanoids on planet surface: 0=dead, 1=walking, 2=abducted by enemy idx
+	humState  [HUMANOID_CNT]byte
+	humWX     [HUMANOID_CNT]int
+	humY      [HUMANOID_CNT]int
+	humCaptor [HUMANOID_CNT]int
+	prevHumSX [HUMANOID_CNT]int
+	prevHumSY [HUMANOID_CNT]int
+
+	// Enemies: 0=dead, 1=Lander, 2=Abducting Lander, 3=Mutant
+	enState  [ENEMY_CNT]byte
+	enWX     [ENEMY_CNT]int
+	enY      [ENEMY_CNT]int
+	enVX     [ENEMY_CNT]int
+	enVY     [ENEMY_CNT]int
+	enTarget [ENEMY_CNT]int
+	prevEnSX [ENEMY_CNT]int
+	prevEnSY [ENEMY_CNT]int
+	aliveEnemies int
+
+	// Horizontal laser bolts
+	lazActive [LASER_CNT]byte
+	lazSX     [LASER_CNT]int
+	lazY      [LASER_CNT]int
+	lazDir    [LASER_CNT]int
+	prevLazSX [LASER_CNT]int
+
+	touchHeld bool
+)
+
+func wrapWorld(wx int) int {
+	return wx & WORLD_MASK
+}
+
+// Signed shortest offset from camX to wx on the 1024-unit ring
+func worldToScreenX(wx int) int {
+	d := (wx - camX) & WORLD_MASK
+	if d >= 512 {
+		d -= 1024
+	}
+	return d
+}
+
+func terrainHeightAt(wx int) int {
+	w := wrapWorld(wx)
+	idx := (w >> 5) & 31
+	nxt := (idx + 1) & 31
+	rem := w & 31
+	y0 := terrY[idx]
+	y1 := terrY[nxt]
+	return y0 + ((y1-y0)*rem)/32
+}
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	// Top-right NEW button
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NEW)
+	tft_draw_string("NEW", 275, 4, 2)
+
+	updateHUD()
+}
+
+func updateHUD() {
+	tft_fill_rect(62, 2, 50, 20, BAR_BG)
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_int(score, 64, 4, 2)
+
+	tft_fill_rect(210, 2, 48, 20, BAR_BG)
+	tft_set_text_color(GREEN, BAR_BG)
+	tft_draw_string("L", 212, 4, 2)
+	tft_draw_int(lives, 222, 4, 2)
+	tft_set_text_color(ORANGE, BAR_BG)
+	tft_draw_string("B", 236, 4, 2)
+	tft_draw_int(bombs, 246, 4, 2)
+}
+
+func updateRadarScanner() {
+	// Radar box at x=114..206 (92 px wide), y=2..21 (19 px tall)
+	tft_fill_rect(114, 2, 92, 19, RADAR_BG)
+	tft_draw_rect(114, 2, 92, 19, CYAN)
+
+	// Player blip
+	px := 116 + ((wrapWorld(shipWX) * 88) >> 10)
+	py := 4 + ((shipY - VIEW_TOP) * 14 / (VIEW_BOT - VIEW_TOP))
+	tft_fill_rect(px-1, py-1, 3, 3, WHITE)
+
+	// Humanoid blips
+	for i := 0; i < HUMANOID_CNT; i++ {
+		if humState[i] != 0 {
+			hx := 116 + ((wrapWorld(humWX[i]) * 88) >> 10)
+			tft_fill_rect(hx, 17, 2, 2, MAGENTA)
+		}
+	}
+
+	// Enemy blips
+	for i := 0; i < ENEMY_CNT; i++ {
+		if enState[i] != 0 {
+			ex := 116 + ((wrapWorld(enWX[i]) * 88) >> 10)
+			ey := 4 + ((enY[i] - VIEW_TOP) * 14 / (VIEW_BOT - VIEW_TOP))
+			clr := GREEN
+			if enState[i] == 3 {
+				clr = RED
+			} else if enState[i] == 2 {
+				clr = YELLOW
+			}
+			tft_fill_rect(ex, ey, 2, 2, clr)
+		}
+	}
+}
+
+func drawBottomControls() {
+	tft_fill_rect(0, BOT_BAR_Y, SCREEN_W, SCREEN_H-BOT_BAR_Y, BAR_BG)
+	tft_draw_fast_hline(0, BOT_BAR_Y, SCREEN_W, DARKCYAN)
+
+	// 6 buttons across 320px (~51px each)
+	tft_fill_round_rect(3, BOT_BAR_Y+3, 49, 20, 3, 0x18E3)
+	tft_draw_round_rect(3, BOT_BAR_Y+3, 49, 20, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("UP", 18, BOT_BAR_Y+5, 2)
+
+	tft_fill_round_rect(55, BOT_BAR_Y+3, 51, 20, 3, 0x18E3)
+	tft_draw_round_rect(55, BOT_BAR_Y+3, 51, 20, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("DOWN", 63, BOT_BAR_Y+5, 2)
+
+	tft_fill_round_rect(109, BOT_BAR_Y+3, 50, 20, 3, 0x2945)
+	tft_draw_round_rect(109, BOT_BAR_Y+3, 50, 20, 3, YELLOW)
+	tft_set_text_color(YELLOW, 0x2945)
+	tft_draw_string("FLIP", 119, BOT_BAR_Y+5, 2)
+
+	tft_fill_round_rect(162, BOT_BAR_Y+3, 54, 20, 3, 0x03E0)
+	tft_draw_round_rect(162, BOT_BAR_Y+3, 54, 20, 3, GREEN)
+	tft_set_text_color(WHITE, 0x03E0)
+	tft_draw_string("THRST", 168, BOT_BAR_Y+5, 2)
+
+	tft_fill_round_rect(219, BOT_BAR_Y+3, 48, 20, 3, 0x7800)
+	tft_draw_round_rect(219, BOT_BAR_Y+3, 48, 20, 3, RED)
+	tft_set_text_color(YELLOW, 0x7800)
+	tft_draw_string("FIRE", 227, BOT_BAR_Y+5, 2)
+
+	tft_fill_round_rect(270, BOT_BAR_Y+3, 47, 20, 3, 0x4008)
+	tft_draw_round_rect(270, BOT_BAR_Y+3, 47, 20, 3, MAGENTA)
+	tft_set_text_color(WHITE, 0x4008)
+	tft_draw_string("BOMB", 275, BOT_BAR_Y+5, 2)
+}
+
+func initTerrain() {
+	for i := 0; i < TERR_POSTS; i++ {
+		if (i & 3) == 0 {
+			terrY[i] = 172
+		} else if (i & 3) == 1 {
+			terrY[i] = 188
+		} else if (i & 3) == 2 {
+			terrY[i] = 202
+		} else {
+			terrY[i] = 184
+		}
+	}
+}
+
+func drawTerrain(erase bool) {
+	clr := ORANGE
+	if erase {
+		clr = BLACK
+	}
+	basePost := (camX >> 5) & 31
+	rem := camX & 31
+	for i := 0; i < 11; i++ {
+		p0 := (basePost + i) & 31
+		p1 := (p0 + 1) & 31
+		x0 := i*32 - rem
+		x1 := x0 + 32
+		y0 := terrY[p0]
+		y1 := terrY[p1]
+		if x1 >= 0 && x0 < SCREEN_W {
+			cx0 := x0
+			cy0 := y0
+			cx1 := x1
+			cy1 := y1
+			if cx0 < 0 {
+				cx0 = 0
+			}
+			if cx1 >= SCREEN_W {
+				cx1 = SCREEN_W - 1
+			}
+			tft_draw_line(cx0, cy0, cx1, cy1, clr)
+		}
+	}
+}
+
+func drawShip(sx int, sy int, dir int, erase bool) {
+	if erase {
+		tft_fill_rect(sx-12, sy-5, 24, 11, BLACK)
+		return
+	}
+	if dir > 0 {
+		tft_fill_triangle(sx+10, sy, sx-8, sy-4, sx-8, sy+4, WHITE)
+		tft_fill_rect(sx-4, sy-2, 6, 3, CYAN)
+		tft_fill_rect(sx-11, sy-1, 3, 3, ORANGE)
+	} else {
+		tft_fill_triangle(sx-10, sy, sx+8, sy-4, sx+8, sy+4, WHITE)
+		tft_fill_rect(sx-2, sy-2, 6, 3, CYAN)
+		tft_fill_rect(sx+8, sy-1, 3, 3, ORANGE)
+	}
+}
+
+func initWave() {
+	tft_fill_rect(0, VIEW_TOP, SCREEN_W, BOT_BAR_Y-VIEW_TOP, BLACK)
+	aliveEnemies = ENEMY_CNT
+	for i := 0; i < ENEMY_CNT; i++ {
+		enState[i] = 1
+		enWX[i] = (i*128 + 90) & WORLD_MASK
+		enY[i] = 40 + (i&3)*16
+		if (i & 1) == 0 {
+			enVX[i] = 2
+		} else {
+			enVX[i] = -2
+		}
+		enVY[i] = 1
+		enTarget[i] = i % HUMANOID_CNT
+		prevEnSX[i] = -100
+	}
+	for i := 0; i < LASER_CNT; i++ {
+		lazActive[i] = 0
+	}
+	prevShipX = -100
+	drawTerrain(false)
+	updateHUD()
+	updateRadarScanner()
+}
+
+func startNewGame() {
+	score = 0
+	wave = 1
+	lives = 3
+	bombs = 3
+	gameOver = false
+
+	shipWX = 160
+	shipY = 110
+	shipDir = 1
+	shipVX = 3
+	camX = 60
+
+	initTerrain()
+	for i := 0; i < HUMANOID_CNT; i++ {
+		humState[i] = 1
+		humWX[i] = i * 168
+		humY[i] = terrainHeightAt(humWX[i]) - 6
+		humCaptor[i] = -1
+		prevHumSX[i] = -100
+	}
+
+	tft_fill_screen(BLACK)
+	drawHeader()
+	drawBottomControls()
+	initWave()
+}
+
+func fireLaser() {
+	if fireCD > 0 || gameOver {
+		return
+	}
+	for i := 0; i < LASER_CNT; i++ {
+		if lazActive[i] == 0 {
+			lazActive[i] = 1
+			shipSX := worldToScreenX(shipWX)
+			lazSX[i] = shipSX + shipDir*12
+			lazY[i] = shipY
+			lazDir[i] = shipDir
+			prevLazSX[i] = -100
+			fireCD = 5
+			return
+		}
+	}
+}
+
+func triggerSmartBomb() {
+	if bombs <= 0 || gameOver {
+		return
+	}
+	bombs--
+	os_set_rgb_led(1, 1, 1, 180)
+	for i := 0; i < ENEMY_CNT; i++ {
+		if enState[i] != 0 {
+			sx := worldToScreenX(enWX[i])
+			if sx >= 0 && sx < SCREEN_W {
+				tft_fill_rect(sx-6, enY[i]-5, 12, 10, BLACK)
+				enState[i] = 0
+				prevEnSX[i] = -100
+				aliveEnemies--
+				score += 100
+			}
+		}
+	}
+	updateHUD()
+}
+
+func stepWorld() {
+	// Erase previous terrain before updating camX
+	drawTerrain(true)
+
+	// Move player horizontally
+	shipWX = wrapWorld(shipWX + shipVX)
+	if shipDir > 0 {
+		camX = wrapWorld(shipWX - 90)
+	} else {
+		camX = wrapWorld(shipWX - 230)
+	}
+
+	// Redraw terrain at new camera offset
+	drawTerrain(false)
+
+	// Render player ship
+	if prevShipX >= 0 {
+		drawShip(prevShipX, prevShipY, prevDir, true)
+	}
+	shipSX := worldToScreenX(shipWX)
+	drawShip(shipSX, shipY, shipDir, false)
+	prevShipX = shipSX
+	prevShipY = shipY
+	prevDir = shipDir
+
+	// Update and render Humanoids
+	for i := 0; i < HUMANOID_CNT; i++ {
+		if prevHumSX[i] >= 0 && prevHumSX[i] < SCREEN_W {
+			tft_fill_rect(prevHumSX[i]-2, prevHumSY[i]-4, 5, 8, BLACK)
+		}
+		if humState[i] == 0 {
+			prevHumSX[i] = -100
+			continue
+		}
+		if humState[i] == 1 {
+			humY[i] = terrainHeightAt(humWX[i]) - 6
+		} else if humState[i] == 2 {
+			cap := humCaptor[i]
+			if cap >= 0 && enState[cap] == 2 {
+				humWX[i] = enWX[cap]
+				humY[i] = enY[cap] + 8
+			} else {
+				humState[i] = 1
+			}
+		}
+		hsx := worldToScreenX(humWX[i])
+		if hsx >= 4 && hsx < SCREEN_W-4 {
+			tft_fill_rect(hsx-1, humY[i]-3, 3, 3, PINK)
+			tft_fill_rect(hsx-1, humY[i], 3, 4, MAGENTA)
+			prevHumSX[i] = hsx
+			prevHumSY[i] = humY[i]
+		} else {
+			prevHumSX[i] = -100
+		}
+	}
+
+	// Update and render Enemies
+	for i := 0; i < ENEMY_CNT; i++ {
+		if prevEnSX[i] >= 0 && prevEnSX[i] < SCREEN_W {
+			tft_fill_rect(prevEnSX[i]-6, prevEnSY[i]-5, 12, 10, BLACK)
+		}
+		if enState[i] == 0 {
+			prevEnSX[i] = -100
+			continue
+		}
+
+		if enState[i] == 1 {
+			// Lander seeking humanoid
+			enWX[i] = wrapWorld(enWX[i] + enVX[i])
+			enY[i] += enVY[i]
+			if enY[i] < 36 {
+				enVY[i] = 1
+			} else if enY[i] > 162 {
+				enVY[i] = -1
+			}
+			tHum := enTarget[i]
+			if humState[tHum] == 1 {
+				d := (humWX[tHum] - enWX[i]) & WORLD_MASK
+				if d < 12 || d > 1012 {
+					enVY[i] = 1
+					if enY[i] >= humY[tHum]-8 {
+						enState[i] = 2
+						humState[tHum] = 2
+						humCaptor[tHum] = i
+					}
+				}
+			}
+		} else if enState[i] == 2 {
+			// Ascending with abducted humanoid
+			enY[i] -= 1
+			if enY[i] <= 34 {
+				// Mutates at top of screen!
+				enState[i] = 3
+				tHum := enTarget[i]
+				humState[tHum] = 0
+				os_set_rgb_led(1, 0, 1, 100)
+			}
+		} else {
+			// Mutant chases player aggressively
+			if worldToScreenX(enWX[i]) < shipSX {
+				enWX[i] = wrapWorld(enWX[i] + 3)
+			} else {
+				enWX[i] = wrapWorld(enWX[i] - 3)
+			}
+			if enY[i] < shipY {
+				enY[i] += 2
+			} else if enY[i] > shipY {
+				enY[i] -= 2
+			}
+		}
+
+		esx := worldToScreenX(enWX[i])
+		if esx >= 6 && esx < SCREEN_W-6 {
+			// Check collision with player ship
+			dx := esx - shipSX
+			dy := enY[i] - shipY
+			if dx >= -12 && dx <= 12 && dy >= -7 && dy <= 7 {
+				enState[i] = 0
+				aliveEnemies--
+				lives--
+				os_set_rgb_led(1, 0, 0, 200)
+				updateHUD()
+				if lives <= 0 {
+					gameOver = true
+					tft_fill_round_rect(80, 96, 160, 44, 5, MAROON)
+					tft_draw_round_rect(80, 96, 160, 44, 5, YELLOW)
+					tft_set_text_color(YELLOW, MAROON)
+					tft_draw_string("GAME OVER", 112, 102, 2)
+					tft_set_text_color(WHITE, MAROON)
+					tft_draw_string("Tap to play again", 104, 122, 1)
+					return
+				}
+				prevEnSX[i] = -100
+				continue
+			}
+
+			clr := GREEN
+			if enState[i] == 2 {
+				clr = YELLOW
+			} else if enState[i] == 3 {
+				clr = RED
+			}
+			tft_fill_rect(esx-5, enY[i]-4, 10, 6, clr)
+			tft_fill_rect(esx-3, enY[i]+2, 2, 3, YELLOW)
+			tft_fill_rect(esx+2, enY[i]+2, 2, 3, YELLOW)
+			prevEnSX[i] = esx
+			prevEnSY[i] = enY[i]
+		} else {
+			prevEnSX[i] = -100
+		}
+	}
+
+	// Step and render laser bolts
+	for l := 0; l < LASER_CNT; l++ {
+		if prevLazSX[l] >= 0 {
+			tft_draw_fast_hline(prevLazSX[l], lazY[l], 22, BLACK)
+			prevLazSX[l] = -100
+		}
+		if lazActive[l] == 0 {
+			continue
+		}
+		lazSX[l] += lazDir[l] * 18
+		if lazSX[l] < 4 || lazSX[l] > SCREEN_W-26 {
+			lazActive[l] = 0
+			continue
+		}
+		hit := false
+		for i := 0; i < ENEMY_CNT; i++ {
+			if enState[i] == 0 {
+				continue
+			}
+			esx := worldToScreenX(enWX[i])
+			if esx >= lazSX[l]-6 && esx <= lazSX[l]+26 {
+				dy := enY[i] - lazY[l]
+				if dy >= -7 && dy <= 7 {
+					if prevEnSX[i] >= 0 && prevEnSX[i] < SCREEN_W {
+						tft_fill_rect(prevEnSX[i]-6, prevEnSY[i]-5, 12, 10, BLACK)
+					}
+					if enState[i] == 2 {
+						tHum := enTarget[i]
+						humState[tHum] = 1
+					}
+					enState[i] = 0
+					prevEnSX[i] = -100
+					aliveEnemies--
+					score += 150
+					os_set_rgb_led(0, 1, 0, 50)
+					updateHUD()
+					hit = true
+					break
+				}
+			}
+		}
+		if hit {
+			lazActive[l] = 0
+		} else {
+			tft_draw_fast_hline(lazSX[l], lazY[l], 22, CYAN)
+			prevLazSX[l] = lazSX[l]
+		}
+	}
+
+	updateRadarScanner()
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+		if ch == 'w' || ch == 'W' {
+			if shipY > VIEW_TOP+10 {
+				shipY -= 8
+			}
+		} else if ch == 's' || ch == 'S' {
+			if shipY < VIEW_BOT-16 {
+				shipY += 8
+			}
+		} else if ch == 'a' || ch == 'A' {
+			shipDir = -1
+			shipVX = -5
+		} else if ch == 'd' || ch == 'D' {
+			shipDir = 1
+			shipVX = 5
+		} else if ch == ' ' {
+			fireLaser()
+		} else if ch == 'b' || ch == 'B' {
+			triggerSmartBomb()
+		}
+	}
+
+	touched, tx, ty := os_read_touch()
+	if !touched {
+		touchHeld = false
+		if shipVX > 2 {
+			shipVX = 2
+		} else if shipVX < -2 {
+			shipVX = -2
+		}
+		return false
+	}
+
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 && !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	if gameOver {
+		if !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	isNew := !touchHeld
+	touchHeld = true
+
+	if ty >= BOT_BAR_Y {
+		if tx < 54 {
+			if shipY > VIEW_TOP+10 {
+				shipY -= 4
+			}
+		} else if tx < 108 {
+			if shipY < VIEW_BOT-16 {
+				shipY += 4
+			}
+		} else if tx < 160 {
+			if isNew {
+				shipDir = -shipDir
+				shipVX = shipDir * 3
+			}
+		} else if tx < 218 {
+			shipVX = shipDir * 6
+		} else if tx < 268 {
+			fireLaser()
+		} else if isNew {
+			triggerSmartBomb()
+		}
+		return false
+	}
+
+	// Direct playfield touch
+	if tx < 100 {
+		shipDir = -1
+		shipVX = -5
+	} else if tx > 220 {
+		shipDir = 1
+		shipVX = 5
+	}
+	if ty < shipY-8 && shipY > VIEW_TOP+10 {
+		shipY -= 3
+	} else if ty > shipY+8 && shipY < VIEW_BOT-16 {
+		shipY += 3
+	}
+	fireLaser()
+	return false
+}
+
+func main() {
+	startNewGame()
+	stepWorld()
+
+	for {
+		if handleInput() {
+			return
+		}
+		if fireCD > 0 {
+			fireCD--
+		}
+		if !gameOver {
+			stepWorld()
+			if aliveEnemies <= 0 {
+				wave++
+				score += 300
+				initWave()
+			}
+		}
+		os_delay_ms(25)
+	}
+}

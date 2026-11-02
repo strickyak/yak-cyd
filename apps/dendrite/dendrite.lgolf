@@ -1,0 +1,333 @@
+// Dendritic Crystal Growth (DLA) Demo for Lakatos OS (320x240 Landscape)
+// Autonomous 45-second Diffusion-Limited Aggregation simulation on a 156x98
+// lattice (2x2 px per cell). Brownian walkers diffuse and stick to growing
+// dendritic crystal trees, colored by crystallization epoch.
+
+const DEMO_DURATION_MS = 45000
+
+const GW = 156
+const GH = 98
+const GN = 15288
+const OX = 4
+const OY = 26
+
+const COL_BG       = 0x0000
+const COL_BAR      = 0x1084
+const COL_HOME_BG  = 0xA800
+const COL_WHITE    = 0xFFFF
+const COL_CYAN     = 0x07FF
+const COL_SKY      = 0x3DFF
+const COL_GREEN    = 0x07E0
+const COL_LIME     = 0xAFE5
+const COL_YELLOW   = 0xFFE0
+const COL_ORANGE   = 0xFC00
+const COL_MAGENTA  = 0xF81F
+const COL_GRAY     = 0x8410
+
+var grid [15288]byte
+var seed_x [3]int
+var seed_y [3]int
+var seed_rad [3]int
+
+var particle_count int
+var max_radius int
+var rng_state int
+var start_ms int
+var last_sec int
+
+// Direction offsets for 8-way neighborhood and 4-way random walk
+var dx8 [8]int
+var dy8 [8]int
+
+func rand_next() int {
+	rng_state = rng_state * 1103515245 + 12345
+	return (rng_state >> 16) & 0x7FFF
+}
+
+func epoch_color(rad int, count int) int {
+	v := rad + (count / 120)
+	if v < 5 {
+		return COL_WHITE
+	} else if v < 11 {
+		return COL_CYAN
+	} else if v < 17 {
+		return COL_SKY
+	} else if v < 23 {
+		return COL_GREEN
+	} else if v < 29 {
+		return COL_LIME
+	} else if v < 35 {
+		return COL_YELLOW
+	} else if v < 42 {
+		return COL_ORANGE
+	}
+	return COL_MAGENTA
+}
+
+func plot_cell(x int, y int, col int) {
+	tft_fill_rect(OX+x*2, OY+y*2, 2, 2, col)
+}
+
+func place_crystal(x int, y int, col int) {
+	if x < 1 || x >= GW-1 || y < 1 || y >= GH-1 {
+		return
+	}
+	idx := y*GW + x
+	if grid[idx] == 0 {
+		grid[idx] = 1
+		particle_count = particle_count + 1
+		plot_cell(x, y, col)
+	}
+}
+
+var first_init int
+
+func init_simulation() {
+	if first_init != 0 {
+		for i := 0; i < GN; i = i + 1 {
+			grid[i] = 0
+		}
+	}
+	first_init = 1
+
+	tft_fill_rect(OX-1, OY-1, GW*2+2, GH*2+2, COL_BG)
+	tft_draw_rect(OX-1, OY-1, GW*2+2, GH*2+2, COL_BAR)
+
+	particle_count = 0
+	max_radius = 3
+
+	// Three nucleation seeds across the landscape viewport
+	seed_x[0] = 34
+	seed_y[0] = 49
+	seed_rad[0] = 3
+
+	seed_x[1] = 78
+	seed_y[1] = 49
+	seed_rad[1] = 3
+
+	seed_x[2] = 122
+	seed_y[2] = 49
+	seed_rad[2] = 3
+
+	for s := 0; s < 3; s = s + 1 {
+		sx := seed_x[s]
+		sy := seed_y[s]
+		place_crystal(sx, sy, COL_WHITE)
+		place_crystal(sx-1, sy, COL_WHITE)
+		place_crystal(sx+1, sy, COL_WHITE)
+		place_crystal(sx, sy-1, COL_WHITE)
+		place_crystal(sx, sy+1, COL_WHITE)
+		place_crystal(sx-2, sy-2, COL_CYAN)
+		place_crystal(sx+2, sy-2, COL_CYAN)
+		place_crystal(sx-2, sy+2, COL_CYAN)
+		place_crystal(sx+2, sy+2, COL_CYAN)
+	}
+
+	// Pre-grow initial dendritic buds so crystal branches appear immediately
+	for w := 0; w < 36; w = w + 1 {
+		diffuse_one_walker(w % 3)
+	}
+}
+
+// Check if (x, y) is adjacent to any existing crystal site (8-connected)
+func has_crystal_neighbor(x int, y int) int {
+	base := y*GW + x
+	// Orthogonal neighbors
+	if grid[base-1] != 0 || grid[base+1] != 0 || grid[base-GW] != 0 || grid[base+GW] != 0 {
+		return 1
+	}
+	// Diagonal neighbors
+	if grid[base-GW-1] != 0 || grid[base-GW+1] != 0 || grid[base+GW-1] != 0 || grid[base+GW+1] != 0 {
+		return 1
+	}
+	return 0
+}
+
+// Spawn and diffuse one walker around seed s until it sticks or wanders too far
+func diffuse_one_walker(s int) {
+	sx := seed_x[s]
+	sy := seed_y[s]
+	sr := seed_rad[s]
+	r_launch := sr + 3
+	if r_launch > 44 {
+		r_launch = 44
+	}
+	r_kill := r_launch + 6
+
+	// Pick a random point on the launch perimeter around seed s
+	ang := float32(rand_next()%360) * 0.01745329
+	wx := sx + int(cos(ang)*float32(r_launch))
+	wy := sy + int(sin(ang)*float32(r_launch))
+
+	if wx < 2 {
+		wx = 2
+	}
+	if wx > GW-3 {
+		wx = GW - 3
+	}
+	if wy < 2 {
+		wy = 2
+	}
+	if wy > GH-3 {
+		wy = GH - 3
+	}
+
+	if grid[wy*GW+wx] != 0 {
+		return
+	}
+
+	for step := 0; step < 64; step = step + 1 {
+		if has_crystal_neighbor(wx, wy) != 0 {
+			// Compute distance to nearest seed for coloring & radius tracking
+			dx := wx - sx
+			dy := wy - sy
+			dist := int(sqrt(float32(dx*dx + dy*dy)))
+			if dist > seed_rad[s] && dist < 46 {
+				seed_rad[s] = dist
+			}
+			if dist > max_radius && dist < 46 {
+				max_radius = dist
+			}
+			col := epoch_color(dist, particle_count)
+			place_crystal(wx, wy, col)
+			return
+		}
+
+		// 8-direction Brownian step with slight inward bias when outside sr
+		r := rand_next()
+		if (r & 3) == 0 {
+			if wx > sx {
+				wx = wx - 1
+			} else if wx < sx {
+				wx = wx + 1
+			}
+			if wy > sy {
+				wy = wy - 1
+			} else if wy < sy {
+				wy = wy + 1
+			}
+		} else {
+			d := (r >> 2) & 7
+			wx = wx + dx8[d]
+			wy = wy + dy8[d]
+		}
+
+		if wx < 2 || wx >= GW-2 || wy < 2 || wy >= GH-2 {
+			return
+		}
+		if grid[wy*GW+wx] != 0 {
+			return
+		}
+		adx := abs(wx - sx)
+		ady := abs(wy - sy)
+		if adx > r_kill || ady > r_kill {
+			return
+		}
+	}
+}
+
+func draw_header(rem_sec int) {
+	tft_fill_round_rect(2, 2, 58, 20, 3, COL_HOME_BG)
+	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
+	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+
+	tft_draw_string(66, 8, "DENDRITIC GROWTH (DLA)", COL_YELLOW, COL_BAR, 1)
+
+	tft_draw_string(208, 8, "N:", COL_GRAY, COL_BAR, 1)
+	tft_fill_rect(220, 6, 48, 12, COL_BAR)
+	tft_draw_int(220, 8, particle_count, COL_GREEN, COL_BAR, 1)
+
+	tft_fill_rect(280, 6, 36, 12, COL_BAR)
+	tft_draw_int(284, 8, rem_sec, COL_CYAN, COL_BAR, 1)
+	tft_draw_string(304, 8, "s", COL_CYAN, COL_BAR, 1)
+}
+
+func draw_footer() {
+	tft_fill_rect(0, 225, 320, 15, COL_BAR)
+	tft_draw_string(8, 229, "DIFFUSION-LIMITED AGGREGATION", COL_CYAN, COL_BAR, 1)
+	tft_draw_string(204, 229, "RAD:", COL_GRAY, COL_BAR, 1)
+	tft_fill_rect(230, 228, 30, 10, COL_BAR)
+	tft_draw_int(230, 229, max_radius, COL_YELLOW, COL_BAR, 1)
+	tft_draw_string(264, 229, "/45", COL_GRAY, COL_BAR, 1)
+}
+
+func check_exit() {
+	touched, tx, ty := os_read_touch()
+	if touched && tx <= 64 && ty < 25 {
+		os_exit(0)
+	}
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+		}
+	}
+}
+
+func main() {
+	rng_state = os_millis() ^ 0x6C078965
+	if rng_state == 0 {
+		rng_state = 2718281
+	}
+
+	dx8[0] = 1
+	dy8[0] = 0
+	dx8[1] = -1
+	dy8[1] = 0
+	dx8[2] = 0
+	dy8[2] = 1
+	dx8[3] = 0
+	dy8[3] = -1
+	dx8[4] = 1
+	dy8[4] = 1
+	dx8[5] = -1
+	dy8[5] = 1
+	dx8[6] = 1
+	dy8[6] = -1
+	dx8[7] = -1
+	dy8[7] = -1
+
+	tft_fill_rect(0, 0, 320, 240, COL_BG)
+	tft_fill_rect(0, 0, 320, 24, COL_BAR)
+
+	init_simulation()
+
+	start_ms = os_millis()
+	last_sec = -1
+	last_hud_ms := 0
+
+	draw_header(45)
+	draw_footer()
+
+	for {
+		now := os_millis()
+		elapsed := now - start_ms
+		if elapsed >= DEMO_DURATION_MS {
+			os_exit(0)
+		}
+
+		// Diffuse a batch of walkers across the 3 nucleation seeds
+		for w := 0; w < 12; w = w + 1 {
+			diffuse_one_walker(w % 3)
+		}
+
+		// If the crystal forest reaches saturation (~2400 particles), pause briefly and regrow
+		if particle_count >= 2400 {
+			draw_header(last_sec)
+			draw_footer()
+			os_delay_ms(1200)
+			init_simulation()
+		}
+
+		rem_sec := (DEMO_DURATION_MS - elapsed + 999) / 1000
+		if rem_sec != last_sec || now-last_hud_ms >= 350 {
+			last_sec = rem_sec
+			last_hud_ms = now
+			draw_header(rem_sec)
+			draw_footer()
+		}
+
+		check_exit()
+		os_delay_ms(10)
+	}
+}

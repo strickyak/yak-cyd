@@ -3248,6 +3248,28 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		c.emitOp("SYSCALL", "SYS_TFT_DRAW_CSTR")
 		return ScalarInt, nil
 	case "tft_draw_int", "os_tft_draw_int":
+		if len(argTypes) == 6 {
+			// 6-arg convenience form: tft_draw_int(x, y, val, fg, bg, font)
+			fontTmp := c.allocTemp(ScalarInt)
+			bgTmp := c.allocTemp(ScalarInt)
+			fgTmp := c.allocTemp(ScalarInt)
+			valTmp := c.allocTemp(ScalarInt)
+			yTmp := c.allocTemp(ScalarInt)
+			xTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(fontTmp)
+			c.emitStoreVar(bgTmp)
+			c.emitStoreVar(fgTmp)
+			c.emitStoreVar(valTmp)
+			c.emitStoreVar(yTmp)
+			c.emitStoreVar(xTmp)
+			c.emitLoadVar(fgTmp)
+			c.emitLoadVar(bgTmp)
+			c.emitOp("SYSCALL", "SYS_TFT_SET_TEXT_COLOR")
+			c.emitLoadVar(valTmp)
+			c.emitLoadVar(xTmp)
+			c.emitLoadVar(yTmp)
+			c.emitLoadVar(fontTmp)
+		}
 		c.emitOp("SYSCALL", "SYS_TFT_DRAW_INT")
 		return ScalarInt, nil
 	case "tft_draw_float", "os_tft_draw_float":

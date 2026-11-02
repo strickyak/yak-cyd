@@ -1,0 +1,410 @@
+// Rubik's Cube (Solved to Scrambled) Demo for Lakatos OS (320x240 Landscape)
+// Autonomous 45-second demo: starts from a solved 3x3x3 Rubik's Cube and
+// applies quarter-turn face rotations (U, D, F, B, L, R and primes), showing
+// both a large 3D isometric projection and a 6-face unfolded net.
+
+const DEMO_DURATION_MS = 45000
+
+const COL_BG       = 0x0000
+const COL_BAR      = 0x1084
+const COL_HOME_BG  = 0xA800
+const COL_WHITE    = 0xFFFF
+const COL_YELLOW   = 0xFFE0
+const COL_RED      = 0xF800
+const COL_ORANGE   = 0xFC00
+const COL_GREEN    = 0x07E0
+const COL_BLUE     = 0x031F
+const COL_BLACK    = 0x0000
+const COL_GRAY     = 0x8410
+const COL_DARK     = 0x2104
+const COL_CYAN     = 0x07FF
+
+// 6 faces * 9 stickers = 54 stickers
+// Faces: 0=U (White), 1=D (Yellow), 2=F (Red), 3=B (Orange), 4=L (Green), 5=R (Blue)
+var cube [54]byte
+var rng_state int
+var start_ms int
+var last_sec int
+var move_count int
+var last_move_face int
+var last_move_ccw int
+var phase int // 0 = initial solved hold, 1 = scrambling, 2 = scrambled hold
+var next_step_ms int
+
+func rand_next() int {
+	rng_state = rng_state * 1103515245 + 12345
+	return (rng_state >> 16) & 0x7FFF
+}
+
+func face_color(c int) int {
+	if c == 0 {
+		return COL_WHITE
+	} else if c == 1 {
+		return COL_YELLOW
+	} else if c == 2 {
+		return COL_RED
+	} else if c == 3 {
+		return COL_ORANGE
+	} else if c == 4 {
+		return COL_GREEN
+	}
+	return COL_BLUE
+}
+
+func init_cube() {
+	for f := 0; f < 6; f = f + 1 {
+		for i := 0; i < 9; i = i + 1 {
+			cube[f*9+i] = byte(f)
+		}
+	}
+	move_count = 0
+	last_move_face = -1
+	last_move_ccw = 0
+}
+
+func rotate_face_stickers_cw(f int) {
+	base := f * 9
+	// Corners: 0 -> 2 -> 8 -> 6 -> 0
+	t := cube[base+6]
+	cube[base+6] = cube[base+8]
+	cube[base+8] = cube[base+2]
+	cube[base+2] = cube[base+0]
+	cube[base+0] = t
+	// Edges: 1 -> 5 -> 7 -> 3 -> 1
+	t = cube[base+3]
+	cube[base+3] = cube[base+7]
+	cube[base+7] = cube[base+5]
+	cube[base+5] = cube[base+1]
+	cube[base+1] = t
+}
+
+func cycle4(a int, b int, c int, d int) {
+	// Shifts a -> b -> c -> d -> a
+	t := cube[d]
+	cube[d] = cube[c]
+	cube[c] = cube[b]
+	cube[b] = cube[a]
+	cube[a] = t
+}
+
+func rotate_cw(f int) {
+	rotate_face_stickers_cw(f)
+	if f == 0 {
+		// U CW: F(0,1,2) -> L(0,1,2) -> B(0,1,2) -> R(0,1,2) -> F(0,1,2)
+		cycle4(2*9+0, 4*9+0, 3*9+0, 5*9+0)
+		cycle4(2*9+1, 4*9+1, 3*9+1, 5*9+1)
+		cycle4(2*9+2, 4*9+2, 3*9+2, 5*9+2)
+	} else if f == 1 {
+		// D CW: F(6,7,8) -> R(6,7,8) -> B(6,7,8) -> L(6,7,8) -> F(6,7,8)
+		cycle4(2*9+6, 5*9+6, 3*9+6, 4*9+6)
+		cycle4(2*9+7, 5*9+7, 3*9+7, 4*9+7)
+		cycle4(2*9+8, 5*9+8, 3*9+8, 4*9+8)
+	} else if f == 2 {
+		// F CW: U(6,7,8) -> R(0,3,6) -> D(2,1,0) -> L(8,5,2) -> U(6,7,8)
+		cycle4(0*9+6, 5*9+0, 1*9+2, 4*9+8)
+		cycle4(0*9+7, 5*9+3, 1*9+1, 4*9+5)
+		cycle4(0*9+8, 5*9+6, 1*9+0, 4*9+2)
+	} else if f == 3 {
+		// B CW: U(2,1,0) -> L(0,3,6) -> D(6,7,8) -> R(8,5,2) -> U(2,1,0)
+		cycle4(0*9+2, 4*9+0, 1*9+6, 5*9+8)
+		cycle4(0*9+1, 4*9+3, 1*9+7, 5*9+5)
+		cycle4(0*9+0, 4*9+6, 1*9+8, 5*9+2)
+	} else if f == 4 {
+		// L CW: U(0,3,6) -> F(0,3,6) -> D(0,3,6) -> B(8,5,2) -> U(0,3,6)
+		cycle4(0*9+0, 2*9+0, 1*9+0, 3*9+8)
+		cycle4(0*9+3, 2*9+3, 1*9+3, 3*9+5)
+		cycle4(0*9+6, 2*9+6, 1*9+6, 3*9+2)
+	} else if f == 5 {
+		// R CW: U(8,5,2) -> B(0,3,6) -> D(8,5,2) -> F(8,5,2) -> U(8,5,2)
+		cycle4(0*9+8, 3*9+0, 1*9+8, 2*9+8)
+		cycle4(0*9+5, 3*9+3, 1*9+5, 2*9+5)
+		cycle4(0*9+2, 3*9+6, 1*9+2, 2*9+2)
+	}
+}
+
+func apply_move(f int, ccw int) {
+	if ccw != 0 {
+		rotate_cw(f)
+		rotate_cw(f)
+		rotate_cw(f)
+	} else {
+		rotate_cw(f)
+	}
+	last_move_face = f
+	last_move_ccw = ccw
+	move_count = move_count + 1
+}
+
+// Draw a filled quadrilateral (x0,y0)-(x1,y1)-(x2,y2)-(x3,y3) with black outline
+func draw_quad(x0 int, y0 int, x1 int, y1 int, x2 int, y2 int, x3 int, y3 int, col int) {
+	tft_fill_triangle(x0, y0, x1, y1, x2, y2, col)
+	tft_fill_triangle(x0, y0, x2, y2, x3, y3, col)
+	tft_draw_line(x0, y0, x1, y1, COL_BLACK)
+	tft_draw_line(x1, y1, x2, y2, COL_BLACK)
+	tft_draw_line(x2, y2, x3, y3, COL_BLACK)
+	tft_draw_line(x3, y3, x0, y0, COL_BLACK)
+}
+
+// Render 3D Isometric Cube centered at (cx, cy)
+// Shows U (top), F (front-left), R (front-right)
+// Isometric vectors:
+//   u_right = (+22, +11)
+//   u_front = (-22, +11)
+//   v_down  = (  0, +24)
+func draw_iso_cube() {
+	cx := 92
+	cy := 102
+
+	// Draw black backing hexagon so gaps look like dark cube plastic
+	// Top-back apex: (cx, cy - 66)
+	// Left-top: (cx - 66, cy - 33)
+	// Right-top: (cx + 66, cy - 33)
+	// Center: (cx, cy)
+	// Left-bottom: (cx - 66, cy + 39)
+	// Right-bottom: (cx + 66, cy + 39)
+	// Bottom apex: (cx, cy + 72)
+
+	// 1. Top Face (U = face 0): r=0..2 goes back-to-front (-22,+11), c=0..2 goes left-to-right (+22,+11)
+	top_x := cx
+	top_y := cy - 66
+	for r := 0; r < 3; r = r + 1 {
+		for c := 0; c < 3; c = c + 1 {
+			col := face_color(int(cube[0*9+r*3+c]))
+			x0 := top_x + c*22 - r*22
+			y0 := top_y + c*11 + r*11
+			x1 := x0 + 22
+			y1 := y0 + 11
+			x2 := x0
+			y2 := y0 + 22
+			x3 := x0 - 22
+			y3 := y0 + 11
+			draw_quad(x0, y0, x1, y1, x2, y2, x3, y3, col)
+		}
+	}
+
+	// 2. Front-Left Face (F = face 2): top-left is (cx-66, cy-33)
+	// c=0..2 goes (+22, +11), r=0..2 goes (0, +24)
+	fl_x := cx - 66
+	fl_y := cy - 33
+	for r := 0; r < 3; r = r + 1 {
+		for c := 0; c < 3; c = c + 1 {
+			col := face_color(int(cube[2*9+r*3+c]))
+			x0 := fl_x + c*22
+			y0 := fl_y + c*11 + r*24
+			x1 := x0 + 22
+			y1 := y0 + 11
+			x2 := x1
+			y2 := y1 + 24
+			x3 := x0
+			y3 := y0 + 24
+			draw_quad(x0, y0, x1, y1, x2, y2, x3, y3, col)
+		}
+	}
+
+	// 3. Front-Right Face (R = face 5): top-left is (cx, cy)
+	// c=0..2 goes (+22, -11), r=0..2 goes (0, +24)
+	fr_x := cx
+	fr_y := cy
+	for r := 0; r < 3; r = r + 1 {
+		for c := 0; c < 3; c = c + 1 {
+			col := face_color(int(cube[5*9+r*3+c]))
+			x0 := fr_x + c*22
+			y0 := fr_y - c*11 + r*24
+			x1 := x0 + 22
+			y1 := y0 - 11
+			x2 := x1
+			y2 := y1 + 24
+			x3 := x0
+			y3 := y0 + 24
+			draw_quad(x0, y0, x1, y1, x2, y2, x3, y3, col)
+		}
+	}
+
+	// Outer crisp wireframe highlight
+	tft_draw_line(cx, cy-66, cx+66, cy-33, COL_GRAY)
+	tft_draw_line(cx, cy-66, cx-66, cy-33, COL_GRAY)
+	tft_draw_line(cx-66, cy-33, cx, cy, COL_GRAY)
+	tft_draw_line(cx+66, cy-33, cx, cy, COL_GRAY)
+	tft_draw_line(cx-66, cy-33, cx-66, cy+39, COL_GRAY)
+	tft_draw_line(cx+66, cy-33, cx+66, cy+39, COL_GRAY)
+	tft_draw_line(cx, cy, cx, cy+72, COL_GRAY)
+	tft_draw_line(cx-66, cy+39, cx, cy+72, COL_GRAY)
+	tft_draw_line(cx+66, cy+39, cx, cy+72, COL_GRAY)
+}
+
+func draw_net_face(f int, bx int, by int) {
+	// Highlight border if this face was the last move
+	bcol := COL_DARK
+	if f == last_move_face {
+		bcol = COL_CYAN
+	}
+	tft_fill_rect(bx-2, by-2, 34, 34, bcol)
+	for r := 0; r < 3; r = r + 1 {
+		for c := 0; c < 3; c = c + 1 {
+			col := face_color(int(cube[f*9+r*3+c]))
+			tft_fill_rect(bx+c*10, by+r*10, 9, 9, col)
+		}
+	}
+}
+
+// Draw 6-face unfolded net on right side (x = 178..316)
+// Layout:
+//       [U]
+//   [L] [F] [R] [B]
+//       [D]
+func draw_unfolded_net() {
+	nx := 180
+	ny := 42
+	// U (0) above F
+	draw_net_face(0, nx+34, ny)
+	// L (4), F (2), R (5), B (3) middle row
+	draw_net_face(4, nx, ny+34)
+	draw_net_face(2, nx+34, ny+34)
+	draw_net_face(5, nx+68, ny+34)
+	draw_net_face(3, nx+102, ny+34)
+	// D (1) below F
+	draw_net_face(1, nx+34, ny+68)
+}
+
+func draw_move_name(f int, ccw int, x int, y int) {
+	if f == 0 {
+		tft_draw_string(x, y, "U", COL_CYAN, COL_DARK, 2)
+	} else if f == 1 {
+		tft_draw_string(x, y, "D", COL_CYAN, COL_DARK, 2)
+	} else if f == 2 {
+		tft_draw_string(x, y, "F", COL_CYAN, COL_DARK, 2)
+	} else if f == 3 {
+		tft_draw_string(x, y, "B", COL_CYAN, COL_DARK, 2)
+	} else if f == 4 {
+		tft_draw_string(x, y, "L", COL_CYAN, COL_DARK, 2)
+	} else if f == 5 {
+		tft_draw_string(x, y, "R", COL_CYAN, COL_DARK, 2)
+	}
+	if ccw != 0 {
+		tft_draw_string(x+12, y, "'", COL_CYAN, COL_DARK, 2)
+	} else {
+		tft_draw_string(x+12, y, " ", COL_CYAN, COL_DARK, 2)
+	}
+}
+
+func draw_status_panel() {
+	tft_fill_round_rect(178, 152, 134, 78, 4, COL_DARK)
+	tft_draw_round_rect(178, 152, 134, 78, 4, COL_GRAY)
+
+	if phase == 0 {
+		tft_draw_string(186, 160, "STATE: SOLVED   ", COL_GREEN, COL_DARK, 1)
+	} else if phase == 1 {
+		tft_draw_string(186, 160, "SCRAMBLING CUBE ", COL_YELLOW, COL_DARK, 1)
+	} else {
+		tft_draw_string(186, 160, "STATE: SCRAMBLED", COL_ORANGE, COL_DARK, 1)
+	}
+
+	tft_draw_string(186, 178, "MOVES:", COL_WHITE, COL_DARK, 1)
+	tft_fill_rect(228, 178, 36, 10, COL_DARK)
+	tft_draw_int(228, 178, move_count, COL_CYAN, COL_DARK, 1)
+
+	tft_draw_string(186, 198, "TURN:", COL_WHITE, COL_DARK, 1)
+	tft_fill_rect(228, 194, 40, 20, COL_DARK)
+	if last_move_face >= 0 {
+		draw_move_name(last_move_face, last_move_ccw, 232, 194)
+	} else {
+		tft_draw_string(232, 198, "NONE", COL_GRAY, COL_DARK, 1)
+	}
+
+	// Bottom caption under 3D cube
+	tft_fill_rect(16, 196, 150, 30, COL_BG)
+	tft_draw_string(22, 198, "3D ISOMETRIC (U/F/R)", COL_GRAY, COL_BG, 1)
+	tft_draw_string(22, 212, "6-FACE UNFOLDED NET", COL_GRAY, COL_BG, 1)
+}
+
+func draw_header(rem_sec int) {
+	tft_fill_rect(0, 0, 320, 24, COL_BAR)
+	tft_fill_round_rect(2, 2, 58, 20, 3, COL_HOME_BG)
+	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
+	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+
+	tft_draw_string(70, 8, "RUBIK DEMO: SOLVED->SCRAMBLED", COL_YELLOW, COL_BAR, 1)
+
+	tft_fill_rect(280, 6, 36, 12, COL_BAR)
+	tft_draw_int(284, 8, rem_sec, COL_CYAN, COL_BAR, 1)
+	tft_draw_string(304, 8, "s", COL_CYAN, COL_BAR, 1)
+}
+
+func check_exit() {
+	touched, tx, ty := os_read_touch()
+	if touched && tx <= 64 && ty < 25 {
+		os_exit(0)
+	}
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+		}
+	}
+}
+
+func main() {
+	rng_state = os_millis() ^ 0x5A3C9E11
+	if rng_state == 0 {
+		rng_state = 314159
+	}
+
+	tft_fill_rect(0, 0, 320, 240, COL_BG)
+	init_cube()
+
+	start_ms = os_millis()
+	last_sec = -1
+	phase = 0
+	next_step_ms = start_ms + 3500
+
+	draw_header(45)
+	draw_iso_cube()
+	draw_unfolded_net()
+	draw_status_panel()
+
+	for {
+		now := os_millis()
+		elapsed := now - start_ms
+		if elapsed >= DEMO_DURATION_MS {
+			os_exit(0)
+		}
+
+		rem_sec := (DEMO_DURATION_MS - elapsed + 999) / 1000
+		if rem_sec != last_sec {
+			last_sec = rem_sec
+			draw_header(rem_sec)
+		}
+
+		check_exit()
+
+		if now >= next_step_ms {
+			if phase == 0 {
+				phase = 1
+			}
+			if phase == 1 {
+				// Pick a random face different from the immediately previous face
+				// so we never undo our just-performed move
+				f := rand_next() % 6
+				if f == last_move_face {
+					f = (f + 1 + (rand_next() % 5)) % 6
+				}
+				ccw := rand_next() & 1
+				apply_move(f, ccw)
+
+				draw_iso_cube()
+				draw_unfolded_net()
+				draw_status_panel()
+
+				if move_count >= 38 {
+					phase = 2
+					draw_status_panel()
+					next_step_ms = now + 10000
+				} else {
+					next_step_ms = now + 900
+				}
+			}
+		}
+
+		os_delay_ms(20)
+	}
+}

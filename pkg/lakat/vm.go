@@ -1598,9 +1598,7 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		vm.tftDrawLine(int(int32(x0)), int(int32(y0)), int(int32(x1)), int(int32(y1)), uint16(c))
-		vm.tftDrawLine(int(int32(x1)), int(int32(y1)), int(int32(x2)), int(int32(y2)), uint16(c))
-		vm.tftDrawLine(int(int32(x2)), int(int32(y2)), int(int32(x0)), int(int32(y0)), uint16(c))
+		vm.tftFillTriangle(int(int32(x0)), int(int32(y0)), int(int32(x1)), int(int32(y1)), int(int32(x2)), int(int32(y2)), uint16(c))
 	case SysTftDrawChar:
 		sz, _ := vm.pop()
 		bg, _ := vm.pop()
@@ -2319,6 +2317,57 @@ func (vm *VM) tftCircle(cx, cy, r int, c uint16, fill bool) {
 				}
 			}
 		}
+	}
+}
+
+func (vm *VM) tftFillTriangle(x0, y0, x1, y1, x2, y2 int, c uint16) {
+	if y0 > y1 {
+		x0, y0, x1, y1 = x1, y1, x0, y0
+	}
+	if y1 > y2 {
+		x1, y1, x2, y2 = x2, y2, x1, y1
+	}
+	if y0 > y1 {
+		x0, y0, x1, y1 = x1, y1, x0, y0
+	}
+	if y0 == y2 {
+		minX, maxX := x0, x0
+		if x1 < minX {
+			minX = x1
+		}
+		if x2 < minX {
+			minX = x2
+		}
+		if x1 > maxX {
+			maxX = x1
+		}
+		if x2 > maxX {
+			maxX = x2
+		}
+		vm.tftFillRect(minX, y0, maxX-minX+1, 1, c)
+		return
+	}
+	totalH := y2 - y0
+	for y := y0; y <= y2; y++ {
+		secondHalf := y > y1 || y1 == y0
+		segH := y1 - y0
+		if secondHalf {
+			segH = y2 - y1
+		}
+		if segH == 0 {
+			continue
+		}
+		ax := x0 + (x2-x0)*(y-y0)/totalH
+		var bx int
+		if secondHalf {
+			bx = x1 + (x2-x1)*(y-y1)/segH
+		} else {
+			bx = x0 + (x1-x0)*(y-y0)/segH
+		}
+		if ax > bx {
+			ax, bx = bx, ax
+		}
+		vm.tftFillRect(ax, y, bx-ax+1, 1, c)
 	}
 }
 

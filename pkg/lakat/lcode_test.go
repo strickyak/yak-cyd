@@ -568,3 +568,60 @@ func main() {
 		t.Fatalf("expected 2 total HTTP hits after stale refresh, got %d", hits)
 	}
 }
+
+func TestAllEightNewAppsCompileAndRun(t *testing.T) {
+	apps := []struct {
+		name  string
+		path  string
+		title string
+		demo  bool
+	}{
+		{"tetris", "../../apps/tetris/tetris.lgolf", "Tetris", false},
+		{"galaga", "../../apps/galaga/galaga.lgolf", "Galaga", false},
+		{"defender", "../../apps/defender/defender.lgolf", "Defender", false},
+		{"bounce", "../../apps/bounce/bounce.lgolf", "Bouncing Ball", true},
+		{"rubik", "../../apps/rubik/rubik.lgolf", "Rubik's Cube", true},
+		{"ising", "../../apps/ising/ising.lgolf", "Ising Spin", true},
+		{"puzzle15", "../../apps/puzzle15/puzzle15.lgolf", "15-Puzzle", true},
+		{"dendrite", "../../apps/dendrite/dendrite.lgolf", "Dendrite DLA", true},
+	}
+
+	for _, tc := range apps {
+		t.Run(tc.name, func(t *testing.T) {
+			srcBytes, err := os.ReadFile(tc.path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", tc.path, err)
+			}
+			lapp, asmText, err := CompileToLapp(tc.title, string(srcBytes))
+			if err != nil {
+				t.Fatalf("CompileToLapp(%s): %v\nASM:\n%s", tc.name, err, asmText)
+			}
+			vm, err := NewVM(lapp)
+			if err != nil {
+				t.Fatalf("NewVM(%s): %v", tc.name, err)
+			}
+			vm.MaxInstructions = 400000
+			vm.TouchQueue = append(vm.TouchQueue, TouchEvent{Touched: true, X: 30, Y: 12})
+			if _, err := vm.Run(); err != nil {
+				t.Fatalf("VM Run(%s): %v", tc.name, err)
+			}
+			if vm.Running {
+				t.Fatalf("%s did not exit on HOME tap (30,12) within 400k steps", tc.name)
+			}
+			if vm.ExitCode != 0 {
+				t.Fatalf("%s exited with non-zero code %d", tc.name, vm.ExitCode)
+			}
+			litPixels := 0
+			for y := 25; y < 240; y++ {
+				for x := 0; x < 320; x++ {
+					if vm.Screen[y][x] != 0 {
+						litPixels++
+					}
+				}
+			}
+			if litPixels < 100 {
+				t.Fatalf("%s rendered too few pixels below header: %d", tc.name, litPixels)
+			}
+		})
+	}
+}

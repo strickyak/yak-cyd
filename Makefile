@@ -38,6 +38,14 @@ apps: lakat
 	$(LAKAT) compile -title "Mandelbrot" -o build/apps/mandelbrot.lapp apps/mandelbrot/mandelbrot.lgolf
 	$(LAKAT) compile -title "Pix-2" -o build/apps/pix-2.lapp apps/pix-2/pix-2.lgolf
 	$(LAKAT) compile -title "NOAA Weather" -o build/apps/weather.lapp apps/weather/weather.lgolf
+	$(LAKAT) compile -title "Tetris" -o build/apps/tetris.lapp apps/tetris/tetris.lgolf
+	$(LAKAT) compile -title "Galaga" -o build/apps/galaga.lapp apps/galaga/galaga.lgolf
+	$(LAKAT) compile -title "Defender" -o build/apps/defender.lapp apps/defender/defender.lgolf
+	$(LAKAT) compile -title "Bouncing Ball" -o build/apps/bounce.lapp apps/bounce/bounce.lgolf
+	$(LAKAT) compile -title "Rubik's Cube" -o build/apps/rubik.lapp apps/rubik/rubik.lgolf
+	$(LAKAT) compile -title "Ising Spin" -o build/apps/ising.lapp apps/ising/ising.lgolf
+	$(LAKAT) compile -title "15-Puzzle" -o build/apps/puzzle15.lapp apps/puzzle15/puzzle15.lgolf
+	$(LAKAT) compile -title "Dendrite DLA" -o build/apps/dendrite.lapp apps/dendrite/dendrite.lgolf
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload

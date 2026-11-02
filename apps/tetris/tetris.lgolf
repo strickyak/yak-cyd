@@ -1,0 +1,754 @@
+// Tetris for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Controls:
+//   - Top-Left HOME button (x <= 64, y < 25): Exit to Lakatos OS
+//   - Top-Right NEW button (x >= 256, y < 25): Start new game
+//   - Bottom Touch Bar (y >= 214): [< LEFT] [ROTATE] [DROP] [RIGHT >]
+//   - Playfield Touch (25 <= y < 214): Left third moves left, center rotates, right third moves right
+//   - Serial Keyboard: 'a'/Left, 'd'/Right, 'w'/Rotate, 's'/Soft drop, Space/Hard drop, 'q'/Quit
+package main
+
+const (
+	TOP_BAR_H = 24
+	BAR_BG    = 0x10A2
+	BTN_HOME  = 0x2945
+	BTN_NEW   = 0x03EF
+	PANEL_BG  = 0x0861
+	WELL_BG   = 0x0000
+	GRID_CLR  = 0x1082
+
+	COLS       = 10
+	ROWS       = 20
+	CELL_COUNT = 200 // ROWS * COLS
+	CELL_SZ    = 9
+	BOARD_X    = 115
+	BOARD_Y    = 28
+	BOARD_W    = 90  // COLS * CELL_SZ
+	BOARD_H    = 180 // ROWS * CELL_SZ
+
+	BOT_BAR_Y = 214
+)
+
+var (
+	board     [CELL_COUNT]byte
+	prevBoard [CELL_COUNT]byte
+	dispBoard [CELL_COUNT]byte
+
+	score    int
+	lines    int
+	level    int
+	gameOver bool
+
+	curType int // 1..7 (I, O, T, S, Z, J, L)
+	curRot  int // 0..3
+	curX    int
+	curY    int
+	nextType int
+
+	dropTimer int
+	dropDelay int
+
+	touchHeld  bool
+	holdFrames int
+	lastTouchX int
+	lastTouchY int
+)
+
+func pieceColor(t int) int {
+	if t == 1 {
+		return CYAN // I
+	}
+	if t == 2 {
+		return YELLOW // O
+	}
+	if t == 3 {
+		return MAGENTA // T
+	}
+	if t == 4 {
+		return GREEN // S
+	}
+	if t == 5 {
+		return RED // Z
+	}
+	if t == 6 {
+		return BLUE // J
+	}
+	if t == 7 {
+		return ORANGE // L
+	}
+	if t == 8 {
+		return 0x2124 // Ghost outline cell
+	}
+	return WELL_BG
+}
+
+func pieceHighlight(t int) int {
+	if t == 1 {
+		return WHITE
+	}
+	if t == 2 {
+		return WHITE
+	}
+	if t == 3 {
+		return PINK
+	}
+	if t == 4 {
+		return GREENYELLOW
+	}
+	if t == 5 {
+		return ORANGE
+	}
+	if t == 6 {
+		return CYAN
+	}
+	if t == 7 {
+		return YELLOW
+	}
+	return DARKGREY
+}
+
+// Returns the X offset (0..3) of block idx (0..3) for piece t (1..7) at rotation rot (0..3).
+func getPieceCellDX(t int, rot int, idx int) int {
+	// Base coordinates in a 4x4 or 3x3 box before rotation
+	bx := 0
+	by := 0
+	if t == 1 {
+		// I piece in 4x4 (row 1)
+		bx = idx
+		by = 1
+		if rot == 0 {
+			return bx
+		}
+		if rot == 1 {
+			return 2
+		}
+		if rot == 2 {
+			return 3 - bx
+		}
+		return 1
+	}
+	if t == 2 {
+		// O piece (2x2 at col 1..2, row 0..1)
+		if idx == 0 || idx == 2 {
+			return 1
+		}
+		return 2
+	}
+	if t == 3 {
+		// T piece in 3x3: (1,0), (0,1), (1,1), (2,1)
+		if idx == 0 {
+			bx = 1
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	} else if t == 4 {
+		// S piece in 3x3: (1,0), (2,0), (0,1), (1,1)
+		if idx == 0 {
+			bx = 1
+			by = 0
+		} else if idx == 1 {
+			bx = 2
+			by = 0
+		} else if idx == 2 {
+			bx = 0
+			by = 1
+		} else {
+			bx = 1
+			by = 1
+		}
+	} else if t == 5 {
+		// Z piece in 3x3: (0,0), (1,0), (1,1), (2,1)
+		if idx == 0 {
+			bx = 0
+			by = 0
+		} else if idx == 1 {
+			bx = 1
+			by = 0
+		} else if idx == 2 {
+			bx = 1
+			by = 1
+		} else {
+			bx = 2
+			by = 1
+		}
+	} else if t == 6 {
+		// J piece in 3x3: (0,0), (0,1), (1,1), (2,1)
+		if idx == 0 {
+			bx = 0
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	} else {
+		// L piece in 3x3: (2,0), (0,1), (1,1), (2,1)
+		if idx == 0 {
+			bx = 2
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	}
+
+	// Rotate (bx, by) inside 3x3 around (1,1)
+	if rot == 0 {
+		return bx
+	}
+	if rot == 1 {
+		return 2 - by
+	}
+	if rot == 2 {
+		return 2 - bx
+	}
+	return by
+}
+
+func getPieceCellDY(t int, rot int, idx int) int {
+	bx := 0
+	by := 0
+	if t == 1 {
+		by = idx
+		if rot == 0 {
+			return 1
+		}
+		if rot == 1 {
+			return by
+		}
+		if rot == 2 {
+			return 2
+		}
+		return 3 - by
+	}
+	if t == 2 {
+		if idx < 2 {
+			return 0
+		}
+		return 1
+	}
+	if t == 3 {
+		if idx == 0 {
+			bx = 1
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	} else if t == 4 {
+		if idx == 0 {
+			bx = 1
+			by = 0
+		} else if idx == 1 {
+			bx = 2
+			by = 0
+		} else if idx == 2 {
+			bx = 0
+			by = 1
+		} else {
+			bx = 1
+			by = 1
+		}
+	} else if t == 5 {
+		if idx == 0 {
+			bx = 0
+			by = 0
+		} else if idx == 1 {
+			bx = 1
+			by = 0
+		} else if idx == 2 {
+			bx = 1
+			by = 1
+		} else {
+			bx = 2
+			by = 1
+		}
+	} else if t == 6 {
+		if idx == 0 {
+			bx = 0
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	} else {
+		if idx == 0 {
+			bx = 2
+			by = 0
+		} else {
+			bx = idx - 1
+			by = 1
+		}
+	}
+
+	if rot == 0 {
+		return by
+	}
+	if rot == 1 {
+		return bx
+	}
+	if rot == 2 {
+		return 2 - by
+	}
+	return 2 - bx
+}
+
+func canPlace(t int, rot int, px int, py int) bool {
+	for i := 0; i < 4; i++ {
+		cx := px + getPieceCellDX(t, rot, i)
+		cy := py + getPieceCellDY(t, rot, i)
+		if cx < 0 || cx >= COLS || cy >= ROWS {
+			return false
+		}
+		if cy >= 0 {
+			if board[cy*COLS+cx] != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func drawCell(col int, row int, val int) {
+	sx := BOARD_X + col*CELL_SZ
+	sy := BOARD_Y + row*CELL_SZ
+	if val == 0 {
+		tft_fill_rect(sx, sy, CELL_SZ, CELL_SZ, WELL_BG)
+		tft_draw_rect(sx, sy, CELL_SZ, CELL_SZ, GRID_CLR)
+		return
+	}
+	if val == 8 {
+		// Ghost piece marker
+		tft_fill_rect(sx, sy, CELL_SZ, CELL_SZ, WELL_BG)
+		tft_draw_rect(sx+1, sy+1, CELL_SZ-2, CELL_SZ-2, DARKGREY)
+		return
+	}
+	clr := pieceColor(val)
+	hi := pieceHighlight(val)
+	tft_fill_rect(sx, sy, CELL_SZ-1, CELL_SZ-1, clr)
+	tft_draw_fast_hline(sx, sy, CELL_SZ-1, hi)
+	tft_draw_fast_vline(sx, sy, CELL_SZ-1, hi)
+}
+
+func renderBoardIncremental() {
+	for idx := 0; idx < CELL_COUNT; idx++ {
+		dispBoard[idx] = board[idx]
+	}
+
+	if !gameOver && curType >= 1 && curType <= 7 {
+		// Compute ghost Y
+		gy := curY
+		for canPlace(curType, curRot, curX, gy+1) {
+			gy++
+		}
+		if gy > curY {
+			for i := 0; i < 4; i++ {
+				gx := curX + getPieceCellDX(curType, curRot, i)
+				gr := gy + getPieceCellDY(curType, curRot, i)
+				if gr >= 0 && gr < ROWS && gx >= 0 && gx < COLS {
+					if dispBoard[gr*COLS+gx] == 0 {
+						dispBoard[gr*COLS+gx] = 8
+					}
+				}
+			}
+		}
+
+		// Overlay active piece
+		for i := 0; i < 4; i++ {
+			cx := curX + getPieceCellDX(curType, curRot, i)
+			cy := curY + getPieceCellDY(curType, curRot, i)
+			if cy >= 0 && cy < ROWS && cx >= 0 && cx < COLS {
+				dispBoard[cy*COLS+cx] = byte(curType)
+			}
+		}
+	}
+
+	for r := 0; r < ROWS; r++ {
+		for c := 0; c < COLS; c++ {
+			idx := r*COLS + c
+			v := int(dispBoard[idx])
+			if v != int(prevBoard[idx]) {
+				prevBoard[idx] = byte(v)
+				drawCell(c, r, v)
+			}
+		}
+	}
+}
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("TETRIS", 132, 4, 2)
+
+	// Top-right NEW button
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NEW)
+	tft_draw_string("NEW", 275, 4, 2)
+}
+
+func drawBottomControls() {
+	tft_fill_rect(0, BOT_BAR_Y, SCREEN_W, SCREEN_H-BOT_BAR_Y, BAR_BG)
+	tft_draw_fast_hline(0, BOT_BAR_Y, SCREEN_W, DARKCYAN)
+
+	// [< LEFT] (x=4..78)
+	tft_fill_round_rect(4, BOT_BAR_Y+3, 74, 20, 4, 0x18E3)
+	tft_draw_round_rect(4, BOT_BAR_Y+3, 74, 20, 4, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("< LEFT", 16, BOT_BAR_Y+5, 2)
+
+	// [ROTATE] (x=84..158)
+	tft_fill_round_rect(84, BOT_BAR_Y+3, 74, 20, 4, 0x2945)
+	tft_draw_round_rect(84, BOT_BAR_Y+3, 74, 20, 4, YELLOW)
+	tft_set_text_color(YELLOW, 0x2945)
+	tft_draw_string("ROTATE", 96, BOT_BAR_Y+5, 2)
+
+	// [DROP] (x=162..236)
+	tft_fill_round_rect(162, BOT_BAR_Y+3, 74, 20, 4, 0x3800)
+	tft_draw_round_rect(162, BOT_BAR_Y+3, 74, 20, 4, ORANGE)
+	tft_set_text_color(ORANGE, 0x3800)
+	tft_draw_string("DROP", 181, BOT_BAR_Y+5, 2)
+
+	// [RIGHT >] (x=242..316)
+	tft_fill_round_rect(242, BOT_BAR_Y+3, 74, 20, 4, 0x18E3)
+	tft_draw_round_rect(242, BOT_BAR_Y+3, 74, 20, 4, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("RIGHT >", 252, BOT_BAR_Y+5, 2)
+}
+
+func updateSidePanels() {
+	// Left stats panel (x=8..104, y=32..204)
+	tft_fill_round_rect(8, 32, 96, 172, 5, PANEL_BG)
+	tft_draw_round_rect(8, 32, 96, 172, 5, DARKCYAN)
+
+	tft_set_text_color(CYAN, PANEL_BG)
+	tft_draw_string("SCORE", 18, 40, 2)
+	tft_set_text_color(YELLOW, PANEL_BG)
+	tft_draw_int(score, 18, 58, 2)
+
+	tft_set_text_color(CYAN, PANEL_BG)
+	tft_draw_string("LINES", 18, 92, 2)
+	tft_set_text_color(GREEN, PANEL_BG)
+	tft_draw_int(lines, 18, 110, 2)
+
+	tft_set_text_color(CYAN, PANEL_BG)
+	tft_draw_string("LEVEL", 18, 144, 2)
+	tft_set_text_color(WHITE, PANEL_BG)
+	tft_draw_int(level, 18, 162, 2)
+
+	// Right NEXT panel (x=216..312, y=32..120)
+	tft_fill_round_rect(216, 32, 96, 92, 5, PANEL_BG)
+	tft_draw_round_rect(216, 32, 96, 92, 5, DARKCYAN)
+	tft_set_text_color(CYAN, PANEL_BG)
+	tft_draw_string("NEXT", 246, 38, 2)
+
+	tft_fill_rect(236, 60, 56, 48, WELL_BG)
+	tft_draw_rect(235, 59, 58, 50, GRID_CLR)
+	if nextType >= 1 && nextType <= 7 {
+		clr := pieceColor(nextType)
+		hi := pieceHighlight(nextType)
+		for i := 0; i < 4; i++ {
+			nx := 246 + getPieceCellDX(nextType, 0, i)*10
+			ny := 68 + getPieceCellDY(nextType, 0, i)*10
+			tft_fill_rect(nx, ny, 9, 9, clr)
+			tft_draw_fast_hline(nx, ny, 9, hi)
+			tft_draw_fast_vline(nx, ny, 9, hi)
+		}
+	}
+
+	// Right tips box (x=216..312, y=130..204)
+	tft_fill_round_rect(216, 130, 96, 74, 5, PANEL_BG)
+	tft_draw_round_rect(216, 130, 96, 74, 5, DARKGREY)
+	tft_set_text_color(LIGHTGREY, PANEL_BG)
+	tft_draw_string("TAP BOARD:", 224, 136, 1)
+	tft_draw_string("Mid: Rotate", 224, 152, 1)
+	tft_draw_string("L/R: Slide", 224, 166, 1)
+	tft_draw_string("Bot: Drop", 224, 180, 1)
+}
+
+func spawnPiece() {
+	curType = nextType
+	nextType = 1 + os_rand(7)
+	curRot = 0
+	curX = 3
+	curY = 0
+	updateSidePanels()
+
+	if !canPlace(curType, curRot, curX, curY) {
+		gameOver = true
+		os_set_rgb_led(1, 0, 0, 300)
+		tft_fill_round_rect(BOARD_X+6, 94, BOARD_W-12, 46, 4, MAROON)
+		tft_draw_round_rect(BOARD_X+6, 94, BOARD_W-12, 46, 4, YELLOW)
+		tft_set_text_color(YELLOW, MAROON)
+		tft_draw_string("GAME OVER", BOARD_X+11, 100, 2)
+		tft_set_text_color(WHITE, MAROON)
+		tft_draw_string("Tap to play", BOARD_X+13, 120, 1)
+	}
+}
+
+func lockAndClearLines() {
+	for i := 0; i < 4; i++ {
+		cx := curX + getPieceCellDX(curType, curRot, i)
+		cy := curY + getPieceCellDY(curType, curRot, i)
+		if cy >= 0 && cy < ROWS && cx >= 0 && cx < COLS {
+			board[cy*COLS+cx] = byte(curType)
+		}
+	}
+
+	cleared := 0
+	for r := ROWS - 1; r >= 0; r-- {
+		full := true
+		for c := 0; c < COLS; c++ {
+			if board[r*COLS+c] == 0 {
+				full = false
+				break
+			}
+		}
+		if full {
+			cleared++
+			// Flash cleared row white briefly
+			tft_fill_rect(BOARD_X, BOARD_Y+r*CELL_SZ, BOARD_W, CELL_SZ, WHITE)
+			for rr := r; rr > 0; rr-- {
+				for cc := 0; cc < COLS; cc++ {
+					board[rr*COLS+cc] = board[(rr-1)*COLS+cc]
+				}
+			}
+			for cc := 0; cc < COLS; cc++ {
+				board[cc] = 0
+			}
+			r++ // Re-check shifted row
+		}
+	}
+
+	if cleared > 0 {
+		os_set_rgb_led(0, 1, 1, 120)
+		os_delay_ms(45)
+		memset(&prevBoard, 255, CELL_COUNT)
+		if cleared == 1 {
+			score += 40 * level
+		} else if cleared == 2 {
+			score += 100 * level
+		} else if cleared == 3 {
+			score += 300 * level
+		} else {
+			score += 1200 * level
+		}
+		lines += cleared
+		level = 1 + (lines / 10)
+		dropDelay = 22 - (level-1)*2
+		if dropDelay < 4 {
+			dropDelay = 4
+		}
+	}
+
+	spawnPiece()
+}
+
+func tryRotate() {
+	if gameOver {
+		return
+	}
+	nr := (curRot + 1) & 3
+	if canPlace(curType, nr, curX, curY) {
+		curRot = nr
+		return
+	}
+	// Simple wall kicks
+	if canPlace(curType, nr, curX-1, curY) {
+		curX--
+		curRot = nr
+		return
+	}
+	if canPlace(curType, nr, curX+1, curY) {
+		curX++
+		curRot = nr
+		return
+	}
+	if canPlace(curType, nr, curX-2, curY) {
+		curX -= 2
+		curRot = nr
+		return
+	}
+}
+
+func hardDrop() {
+	if gameOver {
+		return
+	}
+	dropped := 0
+	for canPlace(curType, curRot, curX, curY+1) {
+		curY++
+		dropped++
+	}
+	score += dropped * 2
+	lockAndClearLines()
+	renderBoardIncremental()
+}
+
+func startNewGame() {
+	memset(&board, 0, CELL_COUNT)
+	memset(&prevBoard, 255, CELL_COUNT)
+	score = 0
+	lines = 0
+	level = 1
+	dropDelay = 20
+	dropTimer = 0
+	gameOver = false
+
+	tft_fill_screen( BLACK)
+	drawHeader()
+	drawBottomControls()
+
+	// Draw well border
+	tft_draw_rect(BOARD_X-2, BOARD_Y-2, BOARD_W+4, BOARD_H+4, CYAN)
+	tft_draw_rect(BOARD_X-1, BOARD_Y-1, BOARD_W+2, BOARD_H+2, WHITE)
+
+	nextType = 1 + os_rand(7)
+	spawnPiece()
+	renderBoardIncremental()
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+		if !gameOver {
+			if ch == 'a' || ch == 'A' {
+				if canPlace(curType, curRot, curX-1, curY) {
+					curX--
+				}
+			} else if ch == 'd' || ch == 'D' {
+				if canPlace(curType, curRot, curX+1, curY) {
+					curX++
+				}
+			} else if ch == 'w' || ch == 'W' {
+				tryRotate()
+			} else if ch == 's' || ch == 'S' {
+				if canPlace(curType, curRot, curX, curY+1) {
+					curY++
+					score++
+				}
+			} else if ch == ' ' {
+				hardDrop()
+			}
+		} else if ch == 'n' || ch == 'N' || ch == ' ' {
+			startNewGame()
+		}
+	}
+
+	touched, tx, ty := os_read_touch()
+	if !touched {
+		touchHeld = false
+		holdFrames = 0
+		return false
+	}
+
+	// Top header bar
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 && !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	if gameOver {
+		if !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	isNewPress := !touchHeld
+	touchHeld = true
+	holdFrames++
+
+	// Allow initial tap, then auto-repeat horizontal/soft-drop every 4 frames after holding 8 frames
+	allowRepeat := isNewPress || (holdFrames >= 8 && (holdFrames&3) == 0)
+
+	if ty >= BOT_BAR_Y {
+		if tx < 80 {
+			if allowRepeat && canPlace(curType, curRot, curX-1, curY) {
+				curX--
+			}
+		} else if tx < 160 {
+			if isNewPress {
+				tryRotate()
+			}
+		} else if tx < 240 {
+			if isNewPress {
+				hardDrop()
+			}
+		} else {
+			if allowRepeat && canPlace(curType, curRot, curX+1, curY) {
+				curX++
+			}
+		}
+		return false
+	}
+
+	// Playfield direct touch
+	if tx < BOARD_X {
+		if allowRepeat && canPlace(curType, curRot, curX-1, curY) {
+			curX--
+		}
+	} else if tx > BOARD_X+BOARD_W {
+		if allowRepeat && canPlace(curType, curRot, curX+1, curY) {
+			curX++
+		}
+	} else {
+		if ty > 160 {
+			if allowRepeat && canPlace(curType, curRot, curX, curY+1) {
+				curY++
+				score++
+			}
+		} else if isNewPress {
+			tryRotate()
+		}
+	}
+	return false
+}
+
+func main() {
+	startNewGame()
+
+	for {
+		if handleInput() {
+			return
+		}
+
+		if !gameOver {
+			dropTimer++
+			if dropTimer >= dropDelay {
+				dropTimer = 0
+				if canPlace(curType, curRot, curX, curY+1) {
+					curY++
+				} else {
+					lockAndClearLines()
+				}
+			}
+			renderBoardIncremental()
+		}
+
+		os_delay_ms(22)
+	}
+}

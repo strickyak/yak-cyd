@@ -1,0 +1,314 @@
+// Bouncing Ball Autonomous Demo for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display
+// Autonomous demo: Runs for 45 seconds showcasing a 3D checkered Boing-style
+// sphere and multi-ball elastic gravity collisions, then exits cleanly.
+package main
+
+const (
+	TOP_BAR_H        = 24
+	DEMO_DURATION_MS = 45000
+
+	ARENA_LEFT   = 8
+	ARENA_RIGHT  = 311
+	ARENA_TOP    = 28
+	ARENA_BOTTOM = 228
+
+	BALL_CNT = 6
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	GRID_CLR = 0x2805
+)
+
+var (
+	startMs     int
+	lastSecLeft int
+
+	// Ball 0 is the large checkered hero ball; Balls 1..5 are satellite physics balls
+	bx    [BALL_CNT]float32
+	by    [BALL_CNT]float32
+	vx    [BALL_CNT]float32
+	vy    [BALL_CNT]float32
+	rad   [BALL_CNT]int
+	bClr  [BALL_CNT]int
+	bHi   [BALL_CNT]int
+	prevX [BALL_CNT]int
+	prevY [BALL_CNT]int
+
+	boingPhase int
+	bounces    int
+)
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("BOUNCING BALL DEMO", 70, 4, 2)
+}
+
+func updateTimerHUD(secLeft int) {
+	if secLeft != lastSecLeft {
+		lastSecLeft = secLeft
+		tft_fill_rect(246, 2, 72, 20, BAR_BG)
+		tft_set_text_color(CYAN, BAR_BG)
+		w := tft_draw_int(secLeft, 268, 4, 2)
+		tft_draw_string("s", 270+w, 4, 2)
+	}
+}
+
+func drawBackdropGrid() {
+	// Retro perspective grid lines in background
+	for y := 48; y <= ARENA_BOTTOM; y += 30 {
+		tft_draw_fast_hline(ARENA_LEFT, y, ARENA_RIGHT-ARENA_LEFT, GRID_CLR)
+	}
+	for x := 32; x < ARENA_RIGHT; x += 40 {
+		tft_draw_fast_vline(x, ARENA_TOP, ARENA_BOTTOM-ARENA_TOP, GRID_CLR)
+	}
+	tft_draw_rect(ARENA_LEFT-1, ARENA_TOP-1, ARENA_RIGHT-ARENA_LEFT+2, ARENA_BOTTOM-ARENA_TOP+2, MAGENTA)
+}
+
+func drawBoingBall(cx int, cy int, r int, erase bool) {
+	if erase {
+		tft_fill_circle(cx+5, cy+4, r, BLACK)
+		tft_fill_circle(cx, cy, r+1, BLACK)
+		return
+	}
+	// Drop shadow
+	tft_fill_circle(cx+5, cy+4, r-1, 0x1082)
+
+	// Main sphere base
+	tft_fill_circle(cx, cy, r, RED)
+
+	// Animated red/white checkered facets across latitude/longitude bands
+	p := (boingPhase >> 1) & 7
+	for row := -2; row <= 2; row++ {
+		ry := cy + row*6
+		halfW := r - abs(row)*3
+		for col := -2; col <= 1; col++ {
+			if ((row + col + p) & 1) == 0 {
+				rx := cx + col*6 + (p & 3) - 2
+				if rx >= cx-halfW+2 && rx+5 <= cx+halfW-1 {
+					tft_fill_rect(rx, ry-2, 5, 5, WHITE)
+				}
+			}
+		}
+	}
+	tft_draw_circle(cx, cy, r, WHITE)
+}
+
+func drawSmallBall(idx int, cx int, cy int, erase bool) {
+	r := rad[idx]
+	if erase {
+		tft_fill_circle(cx, cy, r+1, BLACK)
+		return
+	}
+	tft_fill_circle(cx, cy, r, bClr[idx])
+	tft_fill_circle(cx-r/3, cy-r/3, 2, bHi[idx])
+}
+
+func initBalls() {
+	// Hero Boing ball
+	bx[0] = 90.0
+	by[0] = 80.0
+	vx[0] = 2.8
+	vy[0] = -1.5
+	rad[0] = 20
+	bClr[0] = RED
+	bHi[0] = WHITE
+
+	// Satellite elastic balls
+	bx[1] = 210.0
+	by[1] = 70.0
+	vx[1] = -2.4
+	vy[1] = 1.0
+	rad[1] = 11
+	bClr[1] = CYAN
+	bHi[1] = WHITE
+
+	bx[2] = 150.0
+	by[2] = 120.0
+	vx[2] = 2.1
+	vy[2] = -2.8
+	rad[2] = 10
+	bClr[2] = YELLOW
+	bHi[2] = WHITE
+
+	bx[3] = 260.0
+	by[3] = 100.0
+	vx[3] = -3.0
+	vy[3] = -1.2
+	rad[3] = 9
+	bClr[3] = GREEN
+	bHi[3] = GREENYELLOW
+
+	bx[4] = 60.0
+	by[4] = 150.0
+	vx[4] = 3.2
+	vy[4] = -3.5
+	rad[4] = 8
+	bClr[4] = MAGENTA
+	bHi[4] = PINK
+
+	bx[5] = 180.0
+	by[5] = 60.0
+	vx[5] = -1.9
+	vy[5] = 2.2
+	rad[5] = 9
+	bClr[5] = ORANGE
+	bHi[5] = YELLOW
+
+	for i := 0; i < BALL_CNT; i++ {
+		prevX[i] = -100
+		prevY[i] = -100
+	}
+}
+
+func stepPhysics() {
+	boingPhase++
+
+	for i := 0; i < BALL_CNT; i++ {
+		// Gravity
+		vy[i] += 0.22
+		bx[i] += vx[i]
+		by[i] += vy[i]
+
+		r := float32(rad[i])
+		minX := float32(ARENA_LEFT + 2) + r
+		maxX := float32(ARENA_RIGHT - 6) - r
+		minY := float32(ARENA_TOP + 2) + r
+		maxY := float32(ARENA_BOTTOM - 5) - r
+
+		if bx[i] < minX {
+			bx[i] = minX
+			vx[i] = -vx[i]
+		} else if bx[i] > maxX {
+			bx[i] = maxX
+			vx[i] = -vx[i]
+		}
+
+		if by[i] < minY {
+			by[i] = minY
+			vy[i] = -vy[i] * 0.95
+		} else if by[i] > maxY {
+			by[i] = maxY
+			// Keep energetic bounce
+			vy[i] = -vy[i] * 0.98
+			if i == 0 && vy[0] > -6.2 {
+				vy[0] = -6.8
+				os_set_rgb_led(1, 0, 0, 35)
+			} else if vy[i] > -4.8 {
+				vy[i] = -5.4 - float32(os_rand(20))*0.08
+			}
+			bounces++
+		}
+	}
+
+	// Elastic pair collisions
+	for i := 0; i < BALL_CNT; i++ {
+		for j := i + 1; j < BALL_CNT; j++ {
+			dx := bx[j] - bx[i]
+			dy := by[j] - by[i]
+			minDist := float32(rad[i] + rad[j])
+			d2 := dx*dx + dy*dy
+			if d2 < minDist*minDist && d2 > 1.0 {
+				dist := sqrt(d2)
+				nx := dx / dist
+				ny := dy / dist
+				overlap := 0.5 * (minDist - dist)
+				bx[i] -= nx * overlap
+				by[i] -= ny * overlap
+				bx[j] += nx * overlap
+				by[j] += ny * overlap
+
+				rvx := vx[j] - vx[i]
+				rvy := vy[j] - vy[i]
+				velAlongNormal := rvx*nx + rvy*ny
+				if velAlongNormal < 0.0 {
+					imp := -1.85 * velAlongNormal * 0.5
+					vx[i] -= imp * nx
+					vy[i] -= imp * ny
+					vx[j] += imp * nx
+					vy[j] += imp * ny
+				}
+			}
+		}
+	}
+}
+
+func renderScene() {
+	for i := 0; i < BALL_CNT; i++ {
+		if prevX[i] >= 0 {
+			if i == 0 {
+				drawBoingBall(prevX[i], prevY[i], rad[0], true)
+			} else {
+				drawSmallBall(i, prevX[i], prevY[i], true)
+			}
+		}
+	}
+
+	drawBackdropGrid()
+
+	for i := BALL_CNT - 1; i >= 0; i-- {
+		ix := int(bx[i])
+		iy := int(by[i])
+		if i == 0 {
+			drawBoingBall(ix, iy, rad[0], false)
+		} else {
+			drawSmallBall(i, ix, iy, false)
+		}
+		prevX[i] = ix
+		prevY[i] = iy
+	}
+}
+
+func checkExitInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+	}
+	touched, tx, ty := os_read_touch()
+	if touched && ty < 25 && tx <= 64 {
+		os_exit(0)
+		return true
+	}
+	return false
+}
+
+func main() {
+	tft_fill_screen(BLACK)
+	drawHeader()
+	initBalls()
+	drawBackdropGrid()
+
+	startMs = os_millis()
+	lastSecLeft = -1
+	updateTimerHUD(45)
+	stepPhysics()
+	renderScene()
+
+	for {
+		if checkExitInput() {
+			return
+		}
+		elapsed := os_millis() - startMs
+		if elapsed >= DEMO_DURATION_MS {
+			os_exit(0)
+			return
+		}
+		secLeft := (DEMO_DURATION_MS - elapsed + 999) / 1000
+		updateTimerHUD(secLeft)
+
+		stepPhysics()
+		renderScene()
+		os_delay_ms(22)
+	}
+}

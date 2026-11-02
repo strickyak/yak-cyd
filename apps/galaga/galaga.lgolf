@@ -1,0 +1,668 @@
+// Galaga for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Controls:
+//   - Top-Left HOME button (x <= 64, y < 25): Exit to Lakatos OS
+//   - Top-Right NEW button (x >= 256, y < 25): Start new game
+//   - Bottom Zone (y >= 198): Steer fighter left/right
+//   - Vast Middle (25 <= y < 198): Fire twin laser torpedoes
+package main
+
+const (
+	TOP_BAR_H      = 24
+	BOTTOM_TOUCH_Y = 198
+	TRACK_Y        = 220
+
+	SHIP_Y     = 202
+	SHIP_W     = 16
+	SHIP_H     = 12
+	SHIP_MIN_X = 16
+	SHIP_MAX_X = 304
+	SHIP_SPEED = 4
+
+	ENEMY_ROWS  = 3
+	ENEMY_COLS  = 8
+	ENEMY_COUNT = 24 // 8 Boss Galagas (row 0), 8 Red Butterflies (row 1), 8 Cyan Bees (row 2)
+	ENEMY_W     = 14
+	ENEMY_H     = 10
+
+	MAX_PSHOTS = 4
+	MAX_ESHOTS = 4
+	MAX_STARS  = 14
+
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	BTN_NEW  = 0x03EF
+	TRACK_BG = 0x0861
+	TRACK_FG = 0x39E7
+)
+
+var (
+	score    int
+	stage    int
+	lives    int
+	gameOver bool
+
+	shipX     int
+	prevShipX int
+	targetX   int
+	prevTgtX  int
+	fireCD    int
+
+	// Enemy state: 0=dead, 1=in formation, 2=diving
+	eState [ENEMY_COUNT]byte
+	eHP    [ENEMY_COUNT]byte
+	eX     [ENEMY_COUNT]int
+	eY     [ENEMY_COUNT]int
+	prevEX [ENEMY_COUNT]int
+	prevEY [ENEMY_COUNT]int
+	eVX    [ENEMY_COUNT]int
+	eVY    [ENEMY_COUNT]int
+	aliveCount int
+
+	formX     int
+	formDX    int
+	animTick  int
+	diveTimer int
+
+	// Twin player shots
+	pActive [MAX_PSHOTS]byte
+	pX      [MAX_PSHOTS]int
+	pY      [MAX_PSHOTS]int
+
+	// Enemy dive bombs
+	eShotActive [MAX_ESHOTS]byte
+	eShotX      [MAX_ESHOTS]int
+	eShotY      [MAX_ESHOTS]int
+	eShotVX     [MAX_ESHOTS]int
+
+	// Scrolling background stars
+	starX   [MAX_STARS]int
+	starY   [MAX_STARS]int
+	starSpd [MAX_STARS]int
+	starClr [MAX_STARS]int
+
+	touchHeld  bool
+	lastTouchX int
+	lastTouchY int
+)
+
+func clamp(v int, lo int, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	// Top-right NEW button
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NEW)
+	tft_draw_string("NEW", 275, 4, 2)
+
+	updateHUD()
+}
+
+func updateHUD() {
+	tft_fill_rect(64, 2, 192, 20, BAR_BG)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("S:", 66, 4, 2)
+	tft_draw_int(score, 84, 4, 2)
+
+	tft_set_text_color(CYAN, BAR_BG)
+	tft_draw_string("W:", 148, 4, 2)
+	tft_draw_int(stage, 168, 4, 2)
+
+	tft_set_text_color(WHITE, BAR_BG)
+	tft_draw_string("L:", 198, 4, 2)
+	for i := 0; i < 3; i++ {
+		lx := 216 + i*13
+		if i < lives {
+			tft_fill_triangle(lx+4, 6, lx, 16, lx+8, 16, WHITE)
+			tft_fill_rect(lx+2, 12, 5, 4, RED)
+		} else {
+			tft_fill_rect(lx, 6, 10, 12, BAR_BG)
+		}
+	}
+}
+
+func drawBottomTrack() {
+	tft_fill_rect(0, TRACK_Y, SCREEN_W, SCREEN_H-TRACK_Y, TRACK_BG)
+	tft_draw_fast_hline(0, TRACK_Y, SCREEN_W, DARKCYAN)
+
+	tft_fill_round_rect(4, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(4, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("< LEFT", 8, TRACK_Y+2, 2)
+
+	tft_fill_round_rect(260, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(260, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("RIGHT >", 263, TRACK_Y+2, 2)
+
+	tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+}
+
+func updateTrackMarkers() {
+	if prevTgtX != targetX || prevShipX != shipX {
+		tft_fill_rect(66, TRACK_Y+6, 188, 9, TRACK_BG)
+		tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+
+		tx := clamp(targetX, 68, 252)
+		tft_fill_rect(tx-2, TRACK_Y+7, 5, 7, YELLOW)
+
+		sx := clamp(shipX, 68, 252)
+		tft_fill_rect(sx-3, TRACK_Y+8, 7, 5, WHITE)
+		prevTgtX = targetX
+	}
+}
+
+func drawShipAt(cx int, erase bool) {
+	x0 := cx - 8
+	if erase {
+		tft_fill_rect(x0-1, SHIP_Y-1, 18, 14, BLACK)
+		return
+	}
+	// Galaga white starfighter with red/blue wing accents
+	tft_fill_rect(cx-2, SHIP_Y, 5, 11, WHITE)
+	tft_fill_rect(cx-7, SHIP_Y+5, 15, 5, WHITE)
+	tft_fill_rect(cx-7, SHIP_Y+3, 2, 8, RED)
+	tft_fill_rect(cx+6, SHIP_Y+3, 2, 8, RED)
+	tft_fill_rect(cx-4, SHIP_Y+4, 2, 3, BLUE)
+	tft_fill_rect(cx+3, SHIP_Y+4, 2, 3, BLUE)
+}
+
+func renderShip() {
+	if prevShipX != shipX {
+		if prevShipX > 0 {
+			drawShipAt(prevShipX, true)
+		}
+		drawShipAt(shipX, false)
+		updateTrackMarkers()
+		prevShipX = shipX
+	}
+}
+
+func drawEnemyAt(idx int, x int, y int, erase bool) {
+	if y < TOP_BAR_H+2 || y > TRACK_Y-12 {
+		return
+	}
+	if erase {
+		tft_fill_rect(x-8, y-6, 16, 12, BLACK)
+		return
+	}
+	row := idx / ENEMY_COLS
+	wing := (animTick >> 3) & 1
+	if row == 0 {
+		// Boss Galaga (Green when HP=2, Blue when damaged HP=1)
+		bodyClr := GREEN
+		wingClr := YELLOW
+		if eHP[idx] == 1 {
+			bodyClr = CYAN
+			wingClr = MAGENTA
+		}
+		tft_fill_rect(x-6, y-3, 12, 7, bodyClr)
+		tft_fill_rect(x-3, y-5, 6, 10, wingClr)
+		if wing == 0 {
+			tft_fill_rect(x-7, y-5, 3, 4, RED)
+			tft_fill_rect(x+4, y-5, 3, 4, RED)
+		} else {
+			tft_fill_rect(x-7, y+1, 3, 4, RED)
+			tft_fill_rect(x+4, y+1, 3, 4, RED)
+		}
+	} else if row == 1 {
+		// Red/White Butterfly
+		tft_fill_rect(x-6, y-3, 12, 6, RED)
+		tft_fill_rect(x-2, y-5, 4, 9, WHITE)
+		if wing == 0 {
+			tft_fill_rect(x-7, y-4, 2, 8, ORANGE)
+			tft_fill_rect(x+5, y-4, 2, 8, ORANGE)
+		}
+	} else {
+		// Yellow/Cyan Bee
+		tft_fill_rect(x-5, y-3, 10, 6, CYAN)
+		tft_fill_rect(x-2, y-4, 4, 8, YELLOW)
+		if wing == 1 {
+			tft_fill_rect(x-6, y-2, 2, 5, WHITE)
+			tft_fill_rect(x+4, y-2, 2, 5, WHITE)
+		}
+	}
+}
+
+func homeXFor(idx int) int {
+	col := idx % ENEMY_COLS
+	return formX + col*28
+}
+
+func homeYFor(idx int) int {
+	row := idx / ENEMY_COLS
+	return 44 + row*18
+}
+
+func initStars() {
+	for i := 0; i < MAX_STARS; i++ {
+		starX[i] = 8 + os_rand(304)
+		starY[i] = TOP_BAR_H + 4 + os_rand(TRACK_Y-TOP_BAR_H-8)
+		starSpd[i] = 1 + (i & 1)
+		if (i % 3) == 0 {
+			starClr[i] = CYAN
+		} else if (i % 3) == 1 {
+			starClr[i] = YELLOW
+		} else {
+			starClr[i] = DARKGREY
+		}
+	}
+}
+
+func stepStars() {
+	for i := 0; i < MAX_STARS; i++ {
+		tft_fill_rect(starX[i], starY[i], 1, 2, BLACK)
+		starY[i] += starSpd[i]
+		if starY[i] >= TRACK_Y-3 {
+			starY[i] = TOP_BAR_H + 3
+			starX[i] = 8 + os_rand(304)
+		}
+		tft_fill_rect(starX[i], starY[i], 1, 2, starClr[i])
+	}
+}
+
+func initWave() {
+	tft_fill_rect(0, TOP_BAR_H+1, SCREEN_W, TRACK_Y-TOP_BAR_H-1, BLACK)
+	formX = 52
+	formDX = 1
+	aliveCount = ENEMY_COUNT
+	diveTimer = 35
+
+	for i := 0; i < ENEMY_COUNT; i++ {
+		eState[i] = 1
+		if i < ENEMY_COLS {
+			eHP[i] = 2
+		} else {
+			eHP[i] = 1
+		}
+		eX[i] = homeXFor(i)
+		eY[i] = homeYFor(i)
+		prevEX[i] = -1
+		prevEY[i] = -1
+	}
+
+	for i := 0; i < MAX_PSHOTS; i++ {
+		pActive[i] = 0
+	}
+	for i := 0; i < MAX_ESHOTS; i++ {
+		eShotActive[i] = 0
+	}
+
+	prevShipX = -1
+	renderShip()
+	updateHUD()
+}
+
+func startNewGame() {
+	score = 0
+	stage = 1
+	lives = 3
+	gameOver = false
+	shipX = 160
+	targetX = 160
+	prevTgtX = -1
+
+	tft_fill_screen(BLACK)
+	drawHeader()
+	drawBottomTrack()
+	initStars()
+	initWave()
+}
+
+func firePlayerTorpedo() {
+	if fireCD > 0 || gameOver {
+		return
+	}
+	for i := 0; i < MAX_PSHOTS; i++ {
+		if pActive[i] == 0 {
+			pActive[i] = 1
+			pX[i] = shipX
+			pY[i] = SHIP_Y - 4
+			fireCD = 7
+			return
+		}
+	}
+}
+
+func spawnEnemyShot(x int, y int) {
+	for i := 0; i < MAX_ESHOTS; i++ {
+		if eShotActive[i] == 0 {
+			eShotActive[i] = 1
+			eShotX[i] = x
+			eShotY[i] = y
+			if shipX < x-20 {
+				eShotVX[i] = -1
+			} else if shipX > x+20 {
+				eShotVX[i] = 1
+			} else {
+				eShotVX[i] = 0
+			}
+			return
+		}
+	}
+}
+
+func launchDiveBomber() {
+	start := os_rand(ENEMY_COUNT)
+	for k := 0; k < ENEMY_COUNT; k++ {
+		idx := (start + k) % ENEMY_COUNT
+		if eState[idx] == 1 {
+			eState[idx] = 2
+			if shipX < eX[idx] {
+				eVX[idx] = -2
+			} else {
+				eVX[idx] = 2
+			}
+			eVY[idx] = 2 + (stage / 2)
+			if eVY[idx] > 4 {
+				eVY[idx] = 4
+			}
+			spawnEnemyShot(eX[idx], eY[idx]+6)
+			return
+		}
+	}
+}
+
+func triggerPlayerHit() {
+	os_set_rgb_led(1, 0, 0, 220)
+	tft_fill_circle(shipX, SHIP_Y+5, 9, ORANGE)
+	tft_fill_circle(shipX, SHIP_Y+5, 5, YELLOW)
+	os_delay_ms(160)
+	tft_fill_circle(shipX, SHIP_Y+5, 10, BLACK)
+
+	lives--
+	updateHUD()
+	if lives <= 0 {
+		gameOver = true
+		tft_fill_round_rect(80, 96, 160, 44, 5, MAROON)
+		tft_draw_round_rect(80, 96, 160, 44, 5, YELLOW)
+		tft_set_text_color(YELLOW, MAROON)
+		tft_draw_string("GAME OVER", 112, 102, 2)
+		tft_set_text_color(WHITE, MAROON)
+		tft_draw_string("Tap to play again", 104, 122, 1)
+		return
+	}
+	prevShipX = -1
+	renderShip()
+}
+
+func stepEnemiesAndShots() {
+	animTick++
+
+	// Step formation sway
+	formX += formDX
+	if formX < 26 {
+		formX = 26
+		formDX = 1
+	} else if formX > 96 {
+		formX = 96
+		formDX = -1
+	}
+
+	diveTimer--
+	if diveTimer <= 0 {
+		launchDiveBomber()
+		diveTimer = 42 - stage*4
+		if diveTimer < 16 {
+			diveTimer = 16
+		}
+	}
+
+	// Update enemies
+	for i := 0; i < ENEMY_COUNT; i++ {
+		if eState[i] == 0 {
+			continue
+		}
+		if prevEX[i] > 0 {
+			drawEnemyAt(i, prevEX[i], prevEY[i], true)
+		}
+
+		if eState[i] == 1 {
+			eX[i] = homeXFor(i)
+			eY[i] = homeYFor(i)
+		} else if eState[i] == 2 {
+			// Swooping dive trajectory
+			eX[i] += eVX[i]
+			eY[i] += eVY[i]
+			if (animTick & 7) == 0 {
+				if shipX < eX[i] && eVX[i] > -3 {
+					eVX[i]--
+				} else if shipX > eX[i] && eVX[i] < 3 {
+					eVX[i]++
+				}
+			}
+			if eX[i] < 16 {
+				eX[i] = 16
+				eVX[i] = -eVX[i]
+			} else if eX[i] > 304 {
+				eX[i] = 304
+				eVX[i] = -eVX[i]
+			}
+			if eY[i] == 110 || eY[i] == 146 {
+				spawnEnemyShot(eX[i], eY[i]+6)
+			}
+			// Check collision with player ship
+			if eY[i] >= SHIP_Y-6 && eY[i] <= SHIP_Y+12 {
+				dx := eX[i] - shipX
+				if dx >= -12 && dx <= 12 {
+					eState[i] = 0
+					aliveCount--
+					triggerPlayerHit()
+					if gameOver {
+						return
+					}
+					continue
+				}
+			}
+			if eY[i] >= TRACK_Y-14 {
+				// Return to formation top
+				eState[i] = 1
+				eX[i] = homeXFor(i)
+				eY[i] = homeYFor(i)
+			}
+		}
+
+		drawEnemyAt(i, eX[i], eY[i], false)
+		prevEX[i] = eX[i]
+		prevEY[i] = eY[i]
+	}
+
+	// Step player shots
+	for s := 0; s < MAX_PSHOTS; s++ {
+		if pActive[s] == 0 {
+			continue
+		}
+		tft_fill_rect(pX[s]-4, pY[s], 2, 6, BLACK)
+		tft_fill_rect(pX[s]+3, pY[s], 2, 6, BLACK)
+		pY[s] -= 6
+		if pY[s] <= TOP_BAR_H+2 {
+			pActive[s] = 0
+			continue
+		}
+
+		hit := false
+		for i := 0; i < ENEMY_COUNT; i++ {
+			if eState[i] == 0 {
+				continue
+			}
+			dx := pX[s] - eX[i]
+			dy := pY[s] - eY[i]
+			if dx >= -10 && dx <= 10 && dy >= -7 && dy <= 7 {
+				hit = true
+				eHP[i]--
+				if eHP[i] == 0 {
+					drawEnemyAt(i, eX[i], eY[i], true)
+					if eState[i] == 2 {
+						score += 100
+					} else {
+						score += 50
+					}
+					eState[i] = 0
+					prevEX[i] = -1
+					aliveCount--
+					os_set_rgb_led(0, 1, 0, 50)
+				} else {
+					score += 25
+					drawEnemyAt(i, eX[i], eY[i], false)
+				}
+				updateHUD()
+				break
+			}
+		}
+		if hit {
+			pActive[s] = 0
+		} else {
+			tft_fill_rect(pX[s]-4, pY[s], 2, 6, YELLOW)
+			tft_fill_rect(pX[s]+3, pY[s], 2, 6, RED)
+		}
+	}
+
+	// Step enemy shots
+	for s := 0; s < MAX_ESHOTS; s++ {
+		if eShotActive[s] == 0 {
+			continue
+		}
+		tft_fill_rect(eShotX[s]-1, eShotY[s], 3, 5, BLACK)
+		eShotX[s] += eShotVX[s]
+		eShotY[s] += 4
+		if eShotY[s] >= TRACK_Y-6 || eShotX[s] < 4 || eShotX[s] > 316 {
+			eShotActive[s] = 0
+			continue
+		}
+		if eShotY[s] >= SHIP_Y-2 && eShotY[s] <= SHIP_Y+12 {
+			dx := eShotX[s] - shipX
+			if dx >= -9 && dx <= 9 {
+				eShotActive[s] = 0
+				triggerPlayerHit()
+				if gameOver {
+					return
+				}
+				continue
+			}
+		}
+		tft_fill_rect(eShotX[s]-1, eShotY[s], 3, 5, MAGENTA)
+	}
+}
+
+func stepShipMovement() {
+	if shipX < targetX {
+		shipX += SHIP_SPEED
+		if shipX > targetX {
+			shipX = targetX
+		}
+		renderShip()
+	} else if shipX > targetX {
+		shipX -= SHIP_SPEED
+		if shipX < targetX {
+			shipX = targetX
+		}
+		renderShip()
+	}
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+		if ch == 'a' || ch == 'A' {
+			targetX = clamp(shipX-24, SHIP_MIN_X, SHIP_MAX_X)
+		} else if ch == 'd' || ch == 'D' {
+			targetX = clamp(shipX+24, SHIP_MIN_X, SHIP_MAX_X)
+		} else if ch == ' ' {
+			firePlayerTorpedo()
+		}
+	}
+
+	touched, tx, ty := os_read_touch()
+	if !touched {
+		touchHeld = false
+		return false
+	}
+
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 && !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	if gameOver {
+		if !touchHeld {
+			touchHeld = true
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	if ty >= BOTTOM_TOUCH_Y {
+		if tx < 60 {
+			targetX = SHIP_MIN_X
+		} else if tx > 260 {
+			targetX = SHIP_MAX_X
+		} else {
+			targetX = clamp(tx, SHIP_MIN_X, SHIP_MAX_X)
+		}
+		updateTrackMarkers()
+		touchHeld = true
+		return false
+	}
+
+	firePlayerTorpedo()
+	touchHeld = true
+	return false
+}
+
+func main() {
+	startNewGame()
+	stepStars()
+	stepShipMovement()
+	stepEnemiesAndShots()
+
+	for {
+		if handleInput() {
+			return
+		}
+		if fireCD > 0 {
+			fireCD--
+		}
+		if !gameOver {
+			stepStars()
+			stepShipMovement()
+			stepEnemiesAndShots()
+			if aliveCount <= 0 {
+				stage++
+				score += 250
+				initWave()
+			}
+		}
+		os_delay_ms(22)
+	}
+}

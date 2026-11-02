@@ -1,0 +1,273 @@
+// 2D Ising Ferromagnetic Spin Model Demo for Lakatos OS (320x240 Landscape)
+// Autonomous 45-second Monte Carlo Metropolis simulation on a 64x40 periodic
+// lattice (5x5 px per spin), sweeping temperature T across the Onsager critical
+// temperature Tc = 2.269 to show paramagnetic disorder, critical fluctuations,
+// and ferromagnetic domain coarsening.
+
+const DEMO_DURATION_MS = 45000
+
+const GRID_W = 64
+const GRID_H = 40
+const GRID_N = 2560
+const CELL_SZ = 5
+const GRID_Y0 = 25
+
+const COL_BG       = 0x0000
+const COL_BAR      = 0x1084
+const COL_HOME_BG  = 0xA800
+const COL_SPIN_UP  = 0xFD20 // Warm gold/orange (+1 spin)
+const COL_SPIN_DN  = 0x0000 // Deep black (-1 spin)
+const COL_WHITE    = 0xFFFF
+const COL_YELLOW   = 0xFFE0
+const COL_CYAN     = 0x07FF
+const COL_GREEN    = 0x07E0
+const COL_RED      = 0xF800
+const COL_GRAY     = 0x8410
+
+var spins [2560]byte // 1 for +1, 0 for -1
+var rng_state int
+var start_ms int
+var last_sec int
+var mag_sum int // Sum of +1 spins (0..2560)
+var temp_x100 int
+var p4_thresh int // Boltzmann exp(-4/T) * 32768
+var p8_thresh int // Boltzmann exp(-8/T) * 32768
+
+func rand_next() int {
+	rng_state = rng_state * 1103515245 + 12345
+	return (rng_state >> 16) & 0x7FFF
+}
+
+// Compute Boltzmann thresholds for T = temp_x100 / 100.0
+// Using accurate rational Padé-style approximation for exp(-x):
+// For u = 2/T, exp(-2/T) ≈ 1 / (1 + u + u^2/2 + u^3/6)
+// Then exp(-4/T) = (exp(-2/T))^2, exp(-8/T) = (exp(-4/T))^2
+func update_boltzmann(t100 int) {
+	temp_x100 = t100
+	u := 200.0 / float32(t100)
+	denom := 1.0 + u + 0.5*u*u + 0.1666667*u*u*u + 0.0416667*u*u*u*u
+	e2 := 1.0 / denom
+	e4 := e2 * e2
+	e8 := e4 * e4
+	p4_thresh = int(e4 * 32768.0)
+	p8_thresh = int(e8 * 32768.0)
+}
+
+func draw_spin(x int, y int, s int) {
+	col := COL_SPIN_DN
+	if s != 0 {
+		col = COL_SPIN_UP
+	}
+	tft_fill_rect(x*CELL_SZ, GRID_Y0+y*CELL_SZ, CELL_SZ, CELL_SZ, col)
+}
+
+func init_lattice() {
+	mag_sum = 0
+	idx := 0
+	for y := 0; y < GRID_H; y = y + 1 {
+		for x := 0; x < GRID_W; x = x + 1 {
+			s := rand_next() & 1
+			spins[idx] = byte(s)
+			mag_sum = mag_sum + s
+			draw_spin(x, y, s)
+			idx = idx + 1
+		}
+	}
+}
+
+// Perform n_steps of Metropolis-Hastings updates
+func metropolis_sweep(n_steps int) {
+	for step := 0; step < n_steps; step = step + 1 {
+		r := rand_next()
+		x := r & 63
+		y := ((r >> 6) ^ (rand_next() & 63)) % GRID_H
+		idx := y*GRID_W + x
+
+		s := int(spins[idx])
+
+		// Periodic boundary neighbors
+		xl := x - 1
+		if xl < 0 {
+			xl = GRID_W - 1
+		}
+		xr := x + 1
+		if xr >= GRID_W {
+			xr = 0
+		}
+		yu := y - 1
+		if yu < 0 {
+			yu = GRID_H - 1
+		}
+		yd := y + 1
+		if yd >= GRID_H {
+			yd = 0
+		}
+
+		// Number of +1 neighbors (0..4)
+		nn_up := int(spins[yu*GRID_W+x]) + int(spins[yd*GRID_W+x]) + int(spins[y*GRID_W+xl]) + int(spins[y*GRID_W+xr])
+		// Number of neighbors matching spin s (0..4)
+		same := nn_up
+		if s == 0 {
+			same = 4 - nn_up
+		}
+
+		// dE = 2 * s_i * sum(s_j):
+		// same == 0 -> dE = -8 (flip!)
+		// same == 1 -> dE = -4 (flip!)
+		// same == 2 -> dE =  0 (flip!)
+		// same == 3 -> dE = +4 (flip with prob exp(-4/T))
+		// same == 4 -> dE = +8 (flip with prob exp(-8/T))
+		flip := 0
+		if same <= 2 {
+			flip = 1
+		} else if same == 3 {
+			if rand_next() < p4_thresh {
+				flip = 1
+			}
+		} else {
+			if rand_next() < p8_thresh {
+				flip = 1
+			}
+		}
+
+		if flip != 0 {
+			ns := 1 - s
+			spins[idx] = byte(ns)
+			if ns != 0 {
+				mag_sum = mag_sum + 1
+			} else {
+				mag_sum = mag_sum - 1
+			}
+			draw_spin(x, y, ns)
+		}
+	}
+}
+
+func draw_header(rem_sec int) {
+	tft_fill_rect(2, 2, 58, 20, COL_HOME_BG)
+	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
+	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+
+	tft_draw_string(66, 8, "ISING", COL_YELLOW, COL_BAR, 1)
+
+	// Temperature T = X.XX
+	tft_draw_string(104, 8, "T:", COL_WHITE, COL_BAR, 1)
+	t_int := temp_x100 / 100
+	t_frac := temp_x100 % 100
+	t_col := COL_CYAN
+	if temp_x100 > 245 {
+		t_col = COL_RED
+	} else if temp_x100 >= 210 {
+		t_col = COL_YELLOW
+	}
+	tft_fill_rect(116, 6, 42, 12, COL_BAR)
+	tft_draw_int(116, 8, t_int, t_col, COL_BAR, 1)
+	tft_draw_string(122, 8, ".", t_col, COL_BAR, 1)
+	if t_frac < 10 {
+		tft_draw_string(128, 8, "0", t_col, COL_BAR, 1)
+		tft_draw_int(134, 8, t_frac, t_col, COL_BAR, 1)
+	} else {
+		tft_draw_int(128, 8, t_frac, t_col, COL_BAR, 1)
+	}
+
+	// Magnetization M% = |2*mag_sum - 2560| * 100 / 2560
+	m_pct := (mag_sum*2 - GRID_N) * 100 / GRID_N
+	tft_draw_string(164, 8, "M:", COL_WHITE, COL_BAR, 1)
+	tft_fill_rect(178, 6, 46, 12, COL_BAR)
+	tft_draw_int(178, 8, m_pct, COL_GREEN, COL_BAR, 1)
+	tft_draw_string(206, 8, "%", COL_GREEN, COL_BAR, 1)
+
+	// Countdown timer
+	tft_fill_rect(280, 6, 36, 12, COL_BAR)
+	tft_draw_int(284, 8, rem_sec, COL_CYAN, COL_BAR, 1)
+	tft_draw_string(304, 8, "s", COL_CYAN, COL_BAR, 1)
+}
+
+func draw_footer() {
+	tft_fill_rect(0, 226, 320, 14, COL_BAR)
+	if temp_x100 > 250 {
+		tft_draw_string(8, 229, "PHASE: PARAMAGNETIC (T > Tc=2.27 DISORDERED)", COL_RED, COL_BAR, 1)
+	} else if temp_x100 >= 205 {
+		tft_draw_string(8, 229, "PHASE: CRITICAL POINT (Tc=2.27 SCALE-FREE)  ", COL_YELLOW, COL_BAR, 1)
+	} else {
+		tft_draw_string(8, 229, "PHASE: FERROMAGNETIC (T < Tc DOMAIN GROWTH) ", COL_CYAN, COL_BAR, 1)
+	}
+}
+
+// Compute temperature schedule over 45 seconds:
+// 0..6s:   Cool from T=3.50 down to Tc=2.27
+// 6..14s:  Hold near Critical Point T=2.27 -> 2.10
+// 14..26s: Quench into Ferromagnetic phase T=1.25 (domain growth)
+// 26..33s: Heat back across Tc to T=3.30 (thermal melting)
+// 33..45s: Second quench through Tc=2.27 down to T=1.10
+func schedule_temp(elapsed int) int {
+	if elapsed < 6000 {
+		return 350 - (elapsed*123)/6000
+	} else if elapsed < 14000 {
+		return 227 - ((elapsed-6000)*17)/8000
+	} else if elapsed < 26000 {
+		return 210 - ((elapsed-14000)*85)/12000
+	} else if elapsed < 33000 {
+		return 125 + ((elapsed-26000)*205)/7000
+	}
+	return 330 - ((elapsed-33000)*220)/12000
+}
+
+func check_exit() {
+	touched, tx, ty := os_read_touch()
+	if touched && tx <= 64 && ty < 25 {
+		os_exit(0)
+	}
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+		}
+	}
+}
+
+func main() {
+	rng_state = os_millis() ^ 0x9E3779B9
+	if rng_state == 0 {
+		rng_state = 1357911
+	}
+
+	tft_fill_rect(0, 0, 320, 240, COL_BG)
+	tft_fill_rect(0, 0, 320, 25, COL_BAR)
+
+	update_boltzmann(350)
+	init_lattice()
+
+	start_ms = os_millis()
+	last_sec = -1
+	last_hud_ms := 0
+
+	draw_header(45)
+	draw_footer()
+
+	for {
+		now := os_millis()
+		elapsed := now - start_ms
+		if elapsed >= DEMO_DURATION_MS {
+			os_exit(0)
+		}
+
+		check_exit()
+
+		t_new := schedule_temp(elapsed)
+		update_boltzmann(t_new)
+
+		// Perform 640 Monte Carlo trial flips per frame (~1/4 sweep per frame)
+		metropolis_sweep(640)
+
+		rem_sec := (DEMO_DURATION_MS - elapsed + 999) / 1000
+		if rem_sec != last_sec || now-last_hud_ms >= 350 {
+			last_sec = rem_sec
+			last_hud_ms = now
+			draw_header(rem_sec)
+			draw_footer()
+		}
+
+		os_delay_ms(15)
+	}
+}

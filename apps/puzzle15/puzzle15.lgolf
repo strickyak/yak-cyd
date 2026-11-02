@@ -1,0 +1,339 @@
+// 15-Puzzle Autonomous Demo for Lakatos OS (320x240 Landscape)
+// Autonomous 45-second sliding-tile puzzle demo: starts solved, performs
+// smooth animated scrambles, and solves the puzzle back to the canonical
+// 1..15 order while displaying Manhattan distance and tile metrics.
+
+const DEMO_DURATION_MS = 45000
+
+const BOARD_X = 14
+const BOARD_Y = 34
+const TILE_PITCH = 48
+const TILE_SZ = 44
+
+const COL_BG       = 0x0000
+const COL_BAR      = 0x1084
+const COL_HOME_BG  = 0xA800
+const COL_FRAME    = 0x3186
+const COL_WELL     = 0x0000
+const COL_TILE_HOME = 0x1485 // Teal-green when tile is in its solved spot
+const COL_TILE_ODD  = 0x8904 // Classic warm mahogany/red
+const COL_TILE_EVEN = 0x2230 // Classic royal navy
+const COL_WHITE    = 0xFFFF
+const COL_YELLOW   = 0xFFE0
+const COL_CYAN     = 0x07FF
+const COL_GREEN    = 0x07E0
+const COL_ORANGE   = 0xFC00
+const COL_GRAY     = 0x8410
+const COL_DARK     = 0x18C3
+
+var board [16]byte
+var blank_pos int
+var prev_blank int
+var history [40]byte
+var hist_len int
+
+var phase int // 0=SOLVED hold, 1=SCRAMBLING, 2=SCRAMBLED hold, 3=SOLVING
+var move_count int
+var rng_state int
+var start_ms int
+var last_sec int
+var next_action_ms int
+
+func rand_next() int {
+	rng_state = rng_state * 1103515245 + 12345
+	return (rng_state >> 16) & 0x7FFF
+}
+
+func init_solved() {
+	for i := 0; i < 15; i = i + 1 {
+		board[i] = byte(i + 1)
+	}
+	board[15] = 0
+	blank_pos = 15
+	prev_blank = -1
+	hist_len = 0
+	move_count = 0
+}
+
+func tile_color(val int, idx int) int {
+	if val == idx+1 {
+		return COL_TILE_HOME
+	}
+	if (val & 1) != 0 {
+		return COL_TILE_ODD
+	}
+	return COL_TILE_EVEN
+}
+
+func draw_single_tile_at(px int, py int, val int, idx int) {
+	if val == 0 {
+		tft_fill_rect(px, py, TILE_SZ, TILE_SZ, COL_WELL)
+		return
+	}
+	col := tile_color(val, idx)
+	tft_fill_round_rect(px, py, TILE_SZ, TILE_SZ, 5, col)
+	tft_draw_round_rect(px, py, TILE_SZ, TILE_SZ, 5, COL_WHITE)
+
+	// Center number (font size 2 is 12px wide per digit, 16px tall)
+	tx := px + 16
+	if val >= 10 {
+		tx = px + 10
+	}
+	ty := py + 14
+	tft_draw_int(tx, ty, val, COL_WHITE, col, 2)
+}
+
+func draw_board() {
+	tft_fill_round_rect(BOARD_X-4, BOARD_Y-4, TILE_PITCH*4+6, TILE_PITCH*4+6, 6, COL_FRAME)
+	tft_fill_rect(BOARD_X, BOARD_Y, TILE_PITCH*4-2, TILE_PITCH*4-2, COL_WELL)
+
+	for i := 0; i < 16; i = i + 1 {
+		r := i / 4
+		c := i % 4
+		px := BOARD_X + c*TILE_PITCH
+		py := BOARD_Y + r*TILE_PITCH
+		draw_single_tile_at(px, py, int(board[i]), i)
+	}
+}
+
+// Compute Manhattan distance heuristic and count of tiles in home position
+func count_manhattan() int {
+	dist := 0
+	for i := 0; i < 16; i = i + 1 {
+		v := int(board[i])
+		if v != 0 {
+			target := v - 1
+			r1 := i / 4
+			c1 := i % 4
+			r2 := target / 4
+			c2 := target % 4
+			dist = dist + abs(r1-r2) + abs(c1-c2)
+		}
+	}
+	return dist
+}
+
+func count_home() int {
+	h := 0
+	for i := 0; i < 15; i = i + 1 {
+		if int(board[i]) == i+1 {
+			h = h + 1
+		}
+	}
+	return h
+}
+
+// Animate sliding tile from src_idx into dst_idx (where dst_idx is currently blank)
+func slide_tile(src_idx int, dst_idx int) {
+	val := int(board[src_idx])
+	sr := src_idx / 4
+	sc := src_idx % 4
+	dr := dst_idx / 4
+	dc := dst_idx % 4
+
+	sx := BOARD_X + sc*TILE_PITCH
+	sy := BOARD_Y + sr*TILE_PITCH
+	dx := BOARD_X + dc*TILE_PITCH
+	dy := BOARD_Y + dr*TILE_PITCH
+
+	// 2 intermediate animation frames before final placement
+	for step := 1; step <= 2; step = step + 1 {
+		tft_fill_rect(sx, sy, TILE_SZ, TILE_SZ, COL_WELL)
+		tft_fill_rect(dx, dy, TILE_SZ, TILE_SZ, COL_WELL)
+		mx := sx + ((dx-sx)*step)/3
+		my := sy + ((dy-sy)*step)/3
+		draw_single_tile_at(mx, my, val, dst_idx)
+		os_delay_ms(18)
+	}
+
+	board[dst_idx] = byte(val)
+	board[src_idx] = 0
+	blank_pos = src_idx
+
+	tft_fill_rect(sx, sy, TILE_SZ, TILE_SZ, COL_WELL)
+	draw_single_tile_at(dx, dy, val, dst_idx)
+	move_count = move_count + 1
+}
+
+// Choose a valid random neighbor of blank_pos (excluding prev_blank)
+func pick_scramble_neighbor() int {
+	r := blank_pos / 4
+	c := blank_pos % 4
+	var cand [4]int
+	n := 0
+	if r > 0 {
+		p := (r-1)*4 + c
+		if p != prev_blank {
+			cand[n] = p
+			n = n + 1
+		}
+	}
+	if r < 3 {
+		p := (r+1)*4 + c
+		if p != prev_blank {
+			cand[n] = p
+			n = n + 1
+		}
+	}
+	if c > 0 {
+		p := r*4 + (c - 1)
+		if p != prev_blank {
+			cand[n] = p
+			n = n + 1
+		}
+	}
+	if c < 3 {
+		p := r*4 + (c + 1)
+		if p != prev_blank {
+			cand[n] = p
+			n = n + 1
+		}
+	}
+	return cand[rand_next()%n]
+}
+
+func draw_side_panel() {
+	px := 212
+	py := 34
+	tft_fill_round_rect(px, py, 102, 192, 5, COL_DARK)
+	tft_draw_round_rect(px, py, 102, 192, 5, COL_GRAY)
+
+	tft_draw_string(px+8, py+10, "PHASE:", COL_GRAY, COL_DARK, 1)
+	if phase == 0 {
+		tft_draw_string(px+8, py+22, "SOLVED!    ", COL_GREEN, COL_DARK, 1)
+	} else if phase == 1 {
+		tft_draw_string(px+8, py+22, "SCRAMBLING ", COL_YELLOW, COL_DARK, 1)
+	} else if phase == 2 {
+		tft_draw_string(px+8, py+22, "SCRAMBLED  ", COL_ORANGE, COL_DARK, 1)
+	} else {
+		tft_draw_string(px+8, py+22, "AI SOLVING ", COL_CYAN, COL_DARK, 1)
+	}
+
+	tft_draw_string(px+8, py+46, "MOVES:", COL_GRAY, COL_DARK, 1)
+	tft_fill_rect(px+8, py+58, 70, 16, COL_DARK)
+	tft_draw_int(px+8, py+58, move_count, COL_WHITE, COL_DARK, 2)
+
+	manh := count_manhattan()
+	tft_draw_string(px+8, py+86, "MANHATTAN:", COL_GRAY, COL_DARK, 1)
+	tft_fill_rect(px+8, py+98, 70, 16, COL_DARK)
+	tft_draw_int(px+8, py+98, manh, COL_YELLOW, COL_DARK, 2)
+
+	home := count_home()
+	tft_draw_string(px+8, py+126, "HOME TILES:", COL_GRAY, COL_DARK, 1)
+	tft_fill_rect(px+8, py+138, 80, 16, COL_DARK)
+	tft_draw_int(px+8, py+138, home, COL_GREEN, COL_DARK, 2)
+	tft_draw_string(px+40, py+144, "/15", COL_GRAY, COL_DARK, 1)
+
+	tft_draw_string(px+8, py+168, "DEPTH:", COL_GRAY, COL_DARK, 1)
+	tft_fill_rect(px+50, py+168, 40, 10, COL_DARK)
+	tft_draw_int(px+50, py+168, hist_len, COL_CYAN, COL_DARK, 1)
+}
+
+func draw_header(rem_sec int) {
+	tft_fill_rect(0, 0, 320, 24, COL_BAR)
+	tft_fill_round_rect(2, 2, 58, 20, 3, COL_HOME_BG)
+	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
+	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+
+	tft_draw_string(70, 8, "15-PUZZLE AUTONOMOUS DEMO", COL_YELLOW, COL_BAR, 1)
+
+	tft_fill_rect(280, 6, 36, 12, COL_BAR)
+	tft_draw_int(284, 8, rem_sec, COL_CYAN, COL_BAR, 1)
+	tft_draw_string(304, 8, "s", COL_CYAN, COL_BAR, 1)
+}
+
+func check_exit() {
+	touched, tx, ty := os_read_touch()
+	if touched && tx <= 64 && ty < 25 {
+		os_exit(0)
+	}
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+		}
+	}
+}
+
+func main() {
+	rng_state = os_millis() ^ 0x7F4A7C15
+	if rng_state == 0 {
+		rng_state = 9876543
+	}
+
+	tft_fill_rect(0, 0, 320, 240, COL_BG)
+	init_solved()
+
+	start_ms = os_millis()
+	last_sec = -1
+	phase = 0
+	next_action_ms = start_ms + 2200
+
+	draw_header(45)
+	draw_board()
+	draw_side_panel()
+
+	for {
+		now := os_millis()
+		elapsed := now - start_ms
+		if elapsed >= DEMO_DURATION_MS {
+			os_exit(0)
+		}
+
+		rem_sec := (DEMO_DURATION_MS - elapsed + 999) / 1000
+		if rem_sec != last_sec {
+			last_sec = rem_sec
+			draw_header(rem_sec)
+		}
+
+		check_exit()
+
+		if now >= next_action_ms {
+			if phase == 0 {
+				// Start scrambling
+				phase = 1
+				hist_len = 0
+				prev_blank = -1
+				draw_side_panel()
+				next_action_ms = now + 200
+			} else if phase == 1 {
+				// Scramble step (up to 28 moves)
+				history[hist_len] = byte(blank_pos)
+				hist_len = hist_len + 1
+				old_blank := blank_pos
+				nxt := pick_scramble_neighbor()
+				slide_tile(nxt, old_blank)
+				prev_blank = old_blank
+				draw_side_panel()
+
+				if hist_len >= 28 {
+					phase = 2
+					draw_side_panel()
+					next_action_ms = now + 1500
+				} else {
+					next_action_ms = now + 240
+				}
+			} else if phase == 2 {
+				// Switch to solving
+				phase = 3
+				draw_side_panel()
+				next_action_ms = now + 240
+			} else if phase == 3 {
+				// Undo recorded scramble path to solve
+				if hist_len > 0 {
+					hist_len = hist_len - 1
+					target_blank := int(history[hist_len])
+					slide_tile(target_blank, blank_pos)
+					draw_side_panel()
+					next_action_ms = now + 260
+				} else {
+					phase = 0
+					draw_side_panel()
+					next_action_ms = now + 2200
+				}
+			}
+		}
+
+		os_delay_ms(15)
+	}
+}
