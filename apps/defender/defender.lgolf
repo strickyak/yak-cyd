@@ -167,32 +167,6 @@ func drawBottomControls() {
 	tft_fill_rect(0, BOT_BAR_Y, SCREEN_W, SCREEN_H-BOT_BAR_Y, BAR_BG)
 	tft_draw_fast_hline(0, BOT_BAR_Y, SCREEN_W, DARKCYAN)
 
-	// 6 buttons across 320px (~51px each)
-	tft_fill_round_rect(3, BOT_BAR_Y+3, 49, 20, 3, 0x18E3)
-	tft_draw_round_rect(3, BOT_BAR_Y+3, 49, 20, 3, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("UP", 18, BOT_BAR_Y+5, 2)
-
-	tft_fill_round_rect(55, BOT_BAR_Y+3, 51, 20, 3, 0x18E3)
-	tft_draw_round_rect(55, BOT_BAR_Y+3, 51, 20, 3, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("DOWN", 63, BOT_BAR_Y+5, 2)
-
-	tft_fill_round_rect(109, BOT_BAR_Y+3, 50, 20, 3, 0x2945)
-	tft_draw_round_rect(109, BOT_BAR_Y+3, 50, 20, 3, YELLOW)
-	tft_set_text_color(YELLOW, 0x2945)
-	tft_draw_string("FLIP", 119, BOT_BAR_Y+5, 2)
-
-	tft_fill_round_rect(162, BOT_BAR_Y+3, 54, 20, 3, 0x03E0)
-	tft_draw_round_rect(162, BOT_BAR_Y+3, 54, 20, 3, GREEN)
-	tft_set_text_color(WHITE, 0x03E0)
-	tft_draw_string("THRST", 168, BOT_BAR_Y+5, 2)
-
-	tft_fill_round_rect(219, BOT_BAR_Y+3, 48, 20, 3, 0x7800)
-	tft_draw_round_rect(219, BOT_BAR_Y+3, 48, 20, 3, RED)
-	tft_set_text_color(YELLOW, 0x7800)
-	tft_draw_string("FIRE", 227, BOT_BAR_Y+5, 2)
-
 	tft_fill_round_rect(270, BOT_BAR_Y+3, 47, 20, 3, 0x4008)
 	tft_draw_round_rect(270, BOT_BAR_Y+3, 47, 20, 3, MAGENTA)
 	tft_set_text_color(WHITE, 0x4008)
@@ -617,24 +591,7 @@ func handleInput() bool {
 	touchHeld = true
 
 	if ty >= BOT_BAR_Y {
-		if tx < 54 {
-			if shipY > VIEW_TOP+10 {
-				shipY -= 4
-			}
-		} else if tx < 108 {
-			if shipY < VIEW_BOT-16 {
-				shipY += 4
-			}
-		} else if tx < 160 {
-			if isNew {
-				shipDir = -shipDir
-				shipVX = shipDir * 3
-			}
-		} else if tx < 218 {
-			shipVX = shipDir * 6
-		} else if tx < 268 {
-			fireLaser()
-		} else if isNew {
+		if tx >= 260 && isNew {
 			triggerSmartBomb()
 		}
 		return false

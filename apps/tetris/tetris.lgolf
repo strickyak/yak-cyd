@@ -22,13 +22,11 @@ const (
 	COLS       = 10
 	ROWS       = 20
 	CELL_COUNT = 200 // ROWS * COLS
-	CELL_SZ    = 9
-	BOARD_X    = 115
-	BOARD_Y    = 28
-	BOARD_W    = 90  // COLS * CELL_SZ
-	BOARD_H    = 180 // ROWS * CELL_SZ
-
-	BOT_BAR_Y = 214
+	CELL_SZ    = 10
+	BOARD_X    = 110
+	BOARD_Y    = 32
+	BOARD_W    = 100 // COLS * CELL_SZ
+	BOARD_H    = 200 // ROWS * CELL_SZ
 )
 
 var (
@@ -393,68 +391,39 @@ func drawHeader() {
 	tft_draw_string("NEW", 275, 4, 2)
 }
 
-func drawBottomControls() {
-	tft_fill_rect(0, BOT_BAR_Y, SCREEN_W, SCREEN_H-BOT_BAR_Y, BAR_BG)
-	tft_draw_fast_hline(0, BOT_BAR_Y, SCREEN_W, DARKCYAN)
-
-	// [< LEFT] (x=4..78)
-	tft_fill_round_rect(4, BOT_BAR_Y+3, 74, 20, 4, 0x18E3)
-	tft_draw_round_rect(4, BOT_BAR_Y+3, 74, 20, 4, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("< LEFT", 16, BOT_BAR_Y+5, 2)
-
-	// [ROTATE] (x=84..158)
-	tft_fill_round_rect(84, BOT_BAR_Y+3, 74, 20, 4, 0x2945)
-	tft_draw_round_rect(84, BOT_BAR_Y+3, 74, 20, 4, YELLOW)
-	tft_set_text_color(YELLOW, 0x2945)
-	tft_draw_string("ROTATE", 96, BOT_BAR_Y+5, 2)
-
-	// [DROP] (x=162..236)
-	tft_fill_round_rect(162, BOT_BAR_Y+3, 74, 20, 4, 0x3800)
-	tft_draw_round_rect(162, BOT_BAR_Y+3, 74, 20, 4, ORANGE)
-	tft_set_text_color(ORANGE, 0x3800)
-	tft_draw_string("DROP", 181, BOT_BAR_Y+5, 2)
-
-	// [RIGHT >] (x=242..316)
-	tft_fill_round_rect(242, BOT_BAR_Y+3, 74, 20, 4, 0x18E3)
-	tft_draw_round_rect(242, BOT_BAR_Y+3, 74, 20, 4, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("RIGHT >", 252, BOT_BAR_Y+5, 2)
-}
-
 func updateSidePanels() {
-	// Left stats panel (x=8..104, y=32..204)
-	tft_fill_round_rect(8, 32, 96, 172, 5, PANEL_BG)
-	tft_draw_round_rect(8, 32, 96, 172, 5, DARKCYAN)
+	// Left stats panel (x=6..102, y=32..232)
+	tft_fill_round_rect(6, 32, 96, 200, 5, PANEL_BG)
+	tft_draw_round_rect(6, 32, 96, 200, 5, DARKCYAN)
 
 	tft_set_text_color(CYAN, PANEL_BG)
-	tft_draw_string("SCORE", 18, 40, 2)
+	tft_draw_string("SCORE", 16, 44, 2)
 	tft_set_text_color(YELLOW, PANEL_BG)
-	tft_draw_int(score, 18, 58, 2)
+	tft_draw_int(score, 16, 64, 2)
 
 	tft_set_text_color(CYAN, PANEL_BG)
-	tft_draw_string("LINES", 18, 92, 2)
+	tft_draw_string("LINES", 16, 106, 2)
 	tft_set_text_color(GREEN, PANEL_BG)
-	tft_draw_int(lines, 18, 110, 2)
+	tft_draw_int(lines, 16, 126, 2)
 
 	tft_set_text_color(CYAN, PANEL_BG)
-	tft_draw_string("LEVEL", 18, 144, 2)
+	tft_draw_string("LEVEL", 16, 168, 2)
 	tft_set_text_color(WHITE, PANEL_BG)
-	tft_draw_int(level, 18, 162, 2)
+	tft_draw_int(level, 16, 188, 2)
 
-	// Right NEXT panel (x=216..312, y=32..120)
-	tft_fill_round_rect(216, 32, 96, 92, 5, PANEL_BG)
-	tft_draw_round_rect(216, 32, 96, 92, 5, DARKCYAN)
+	// Right NEXT panel (x=218..314, y=32..126)
+	tft_fill_round_rect(218, 32, 96, 94, 5, PANEL_BG)
+	tft_draw_round_rect(218, 32, 96, 94, 5, DARKCYAN)
 	tft_set_text_color(CYAN, PANEL_BG)
-	tft_draw_string("NEXT", 246, 38, 2)
+	tft_draw_string("NEXT", 248, 38, 2)
 
-	tft_fill_rect(236, 60, 56, 48, WELL_BG)
-	tft_draw_rect(235, 59, 58, 50, GRID_CLR)
+	tft_fill_rect(238, 60, 56, 48, WELL_BG)
+	tft_draw_rect(237, 59, 58, 50, GRID_CLR)
 	if nextType >= 1 && nextType <= 7 {
 		clr := pieceColor(nextType)
 		hi := pieceHighlight(nextType)
 		for i := 0; i < 4; i++ {
-			nx := 246 + getPieceCellDX(nextType, 0, i)*10
+			nx := 248 + getPieceCellDX(nextType, 0, i)*10
 			ny := 68 + getPieceCellDY(nextType, 0, i)*10
 			tft_fill_rect(nx, ny, 9, 9, clr)
 			tft_draw_fast_hline(nx, ny, 9, hi)
@@ -462,14 +431,14 @@ func updateSidePanels() {
 		}
 	}
 
-	// Right tips box (x=216..312, y=130..204)
-	tft_fill_round_rect(216, 130, 96, 74, 5, PANEL_BG)
-	tft_draw_round_rect(216, 130, 96, 74, 5, DARKGREY)
+	// Right tips box (x=218..314, y=134..232)
+	tft_fill_round_rect(218, 134, 96, 98, 5, PANEL_BG)
+	tft_draw_round_rect(218, 134, 96, 98, 5, DARKGREY)
 	tft_set_text_color(LIGHTGREY, PANEL_BG)
-	tft_draw_string("TAP BOARD:", 224, 136, 1)
-	tft_draw_string("Mid: Rotate", 224, 152, 1)
-	tft_draw_string("L/R: Slide", 224, 166, 1)
-	tft_draw_string("Bot: Drop", 224, 180, 1)
+	tft_draw_string("TOUCH:", 226, 144, 1)
+	tft_draw_string("Top/Mid: Rot", 226, 162, 1)
+	tft_draw_string("L/R: Slide", 226, 178, 1)
+	tft_draw_string("Bot: Drop", 226, 194, 1)
 }
 
 func spawnPiece() {
@@ -601,9 +570,8 @@ func startNewGame() {
 	dropTimer = 0
 	gameOver = false
 
-	tft_fill_screen( BLACK)
+	tft_fill_screen(BLACK)
 	drawHeader()
-	drawBottomControls()
 
 	// Draw well border
 	tft_draw_rect(BOARD_X-2, BOARD_Y-2, BOARD_W+4, BOARD_H+4, CYAN)
@@ -678,27 +646,6 @@ func handleInput() bool {
 	// Allow initial tap, then auto-repeat horizontal/soft-drop every 4 frames after holding 8 frames
 	allowRepeat := isNewPress || (holdFrames >= 8 && (holdFrames&3) == 0)
 
-	if ty >= BOT_BAR_Y {
-		if tx < 80 {
-			if allowRepeat && canPlace(curType, curRot, curX-1, curY) {
-				curX--
-			}
-		} else if tx < 160 {
-			if isNewPress {
-				tryRotate()
-			}
-		} else if tx < 240 {
-			if isNewPress {
-				hardDrop()
-			}
-		} else {
-			if allowRepeat && canPlace(curType, curRot, curX+1, curY) {
-				curX++
-			}
-		}
-		return false
-	}
-
 	// Playfield direct touch
 	if tx < BOARD_X {
 		if allowRepeat && canPlace(curType, curRot, curX-1, curY) {
@@ -709,7 +656,11 @@ func handleInput() bool {
 			curX++
 		}
 	} else {
-		if ty > 160 {
+		if ty > 205 {
+			if isNewPress {
+				hardDrop()
+			}
+		} else if ty > 165 {
 			if allowRepeat && canPlace(curType, curRot, curX, curY+1) {
 				curY++
 				score++

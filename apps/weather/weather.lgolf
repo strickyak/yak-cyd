@@ -854,31 +854,25 @@ func drawWeatherTable() {
 	tft_fill_rect(0, 213, SCREEN_W, 27, 0x1082)
 	tft_draw_fast_hline(0, 213, SCREEN_W, CYAN)
 
-	// [REFRESH NOAA] (x = 4..104)
-	tft_fill_round_rect(4, 216, 100, 21, 4, DARKGREEN)
-	tft_draw_round_rect(4, 216, 100, 21, 4, GREEN)
+	// [UNIT: F / C] (x = 8..136)
+	tft_fill_round_rect(8, 216, 128, 21, 4, BTN_HOME)
+	tft_draw_round_rect(8, 216, 128, 21, 4, CYAN)
 	tft_set_text_datum(MC_DATUM)
-	tft_set_text_color(WHITE, DARKGREEN)
-	tft_draw_string("REFRESH NOAA", 54, 226, 1)
-
-	// [UNIT: F / C] (x = 108..192)
-	tft_fill_round_rect(108, 216, 84, 21, 4, BTN_HOME)
-	tft_draw_round_rect(108, 216, 84, 21, 4, CYAN)
 	tft_set_text_color(CYAN, BTN_HOME)
 	if useCelsius {
-		tft_draw_string("UNIT: C -> F", 150, 226, 1)
+		tft_draw_string("UNIT: C -> F", 72, 226, 1)
 	} else {
-		tft_draw_string("UNIT: F -> C", 150, 226, 1)
+		tft_draw_string("UNIT: F -> C", 72, 226, 1)
 	}
 
-	// [STATION: <IATA>] (x = 196..316)
-	tft_fill_round_rect(196, 216, 120, 21, 4, BTN_NAV)
-	tft_draw_round_rect(196, 216, 120, 21, 4, YELLOW)
+	// [STATION: <IATA>] (x = 176..312)
+	tft_fill_round_rect(176, 216, 136, 21, 4, BTN_NAV)
+	tft_draw_round_rect(176, 216, 136, 21, 4, YELLOW)
 	tft_set_text_datum(TL_DATUM)
 	tft_set_text_color(YELLOW, BTN_NAV)
-	tft_draw_string("AIRPORT:", 204, 222, 1)
+	tft_draw_string("AIRPORT:", 192, 222, 1)
 	tft_set_text_color(WHITE, BTN_NAV)
-	tft_draw_cstr(stIcaoAddr(0), 258, 222, 1)
+	tft_draw_cstr(stIcaoAddr(0), 246, 222, 1)
 }
 
 // Word-wraps a C-string at srcAddr across up to maxLines lines starting at (x, yStart).
@@ -1319,26 +1313,20 @@ func handleInput() bool {
 
 		// Bottom toolbar (y >= 212)
 		if ty >= 212 {
-			if tx <= 106 {
-				fetchNoaaWeather()
-				return false
-			}
-			if tx >= 107 && tx <= 194 {
+			if tx < 160 {
 				useCelsius = !useCelsius
 				drawWeatherTable()
 				return false
 			}
-			if tx >= 195 {
-				copyCStrToAddr(int(&kbdBuf), 16, stCodeAddr(0))
-				res := os_prompt_keyboard("Airport IATA or ICAO", &kbdBuf[0], 8, true)
-				if res > 0 && peek1(int(&kbdBuf)) != 0 {
-					setCustomHomeStation(int(&kbdBuf))
-					fetchNoaaWeather()
-				} else {
-					drawWeatherTable()
-				}
-				return false
+			copyCStrToAddr(int(&kbdBuf), 16, stCodeAddr(0))
+			res := os_prompt_keyboard("Airport IATA or ICAO", &kbdBuf[0], 8, true)
+			if res > 0 && peek1(int(&kbdBuf)) != 0 {
+				setCustomHomeStation(int(&kbdBuf))
+				fetchNoaaWeather()
+			} else {
+				drawWeatherTable()
 			}
+			return false
 		}
 		return false
 	}

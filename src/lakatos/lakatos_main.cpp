@@ -72,6 +72,7 @@ static LakatosTouchSample gLatchedTouch = {false, 0, 0, 0, 0, 0};
 // App lifecycle & Core 0 top-left 10x10 corner exit / timeout state
 static constexpr uint16_t kDarkBrownExitColor = 0x5962;  // Dark brown RGB565 (R=88, G=44, B=16)
 static volatile bool     gLCodeAppRunning   = false;
+static volatile bool     gInConfigScreen    = false;
 static volatile bool     gCornerExitEnabled = true;
 static volatile bool     gPleaseExitApp     = false;
 static volatile uint32_t gAppDeadlineMs     = 0;
@@ -80,6 +81,11 @@ void lakatosBeginAppSession() {
   gPleaseExitApp     = false;
   gCornerExitEnabled = true;
   gLCodeAppRunning   = true;
+}
+
+void lakatosSetInConfigScreen(bool inCfg) {
+  gPleaseExitApp  = false;
+  gInConfigScreen = inCfg;
 }
 
 void lakatosSetCornerExitEnabled(bool en) {
@@ -1330,12 +1336,30 @@ static void handleFuseCommand(const String& line) {
 }
 
 void lakatosPollSerialFuse() {
-  while (Serial.available() > 0 && Serial.peek() == '@') {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.startsWith("@FUSE ")) {
-      handleFuseCommand(line);
+  while (Serial.available() > 0) {
+    int pk = Serial.peek();
+    if (pk == '\r' || pk == '\n') {
+      Serial.read();
+      continue;
     }
+    if (pk == '@') {
+      String line = Serial.readStringUntil('\n');
+      line.trim();
+      if (line.startsWith("@FUSE ")) {
+        handleFuseCommand(line);
+      }
+      continue;
+    }
+    if (pk == 'q' || pk == 'Q' || pk == 3) {
+      Serial.read();
+      gPleaseExitApp = true;
+      continue;
+    }
+    if (gInConfigScreen) {
+      Serial.read();
+      continue;
+    }
+    break;
   }
 }
 

@@ -701,6 +701,11 @@ static bool runWifiConfigModal() {
   bool wasDown = false;
   uint32_t lastRel = millis();
   while (true) {
+    updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      resumeSavedWifiIfDisconnected();
+      return true;
+    }
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
     if (t.touched) {
@@ -810,6 +815,10 @@ static bool runAirportSelectorModal() {
   bool wasDown = false;
   uint32_t lastRel = millis();
   while (true) {
+    updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      return true;
+    }
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
     if (t.touched) {
@@ -910,6 +919,7 @@ static bool runAboutModal() {
   uint32_t lastRel = millis();
   while (true) {
     updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) return true;
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
     if (t.touched) {
@@ -1052,6 +1062,7 @@ static void drawConfigScreen() {
 }
 
 void runLakatosConfigScreen(bool startInCalibration) {
+  lakatosSetInConfigScreen(true);
   if (startInCalibration) {
     runTouchCalibrationModal();
   }
@@ -1063,6 +1074,10 @@ void runLakatosConfigScreen(bool startInCalibration) {
 
   while (true) {
     updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      lakatosSetInConfigScreen(false);
+      return;
+    }
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
 
@@ -1079,10 +1094,14 @@ void runLakatosConfigScreen(bool startInCalibration) {
         wasDown = true;
         if (t.y <= 25 && t.x <= 62) {
           lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
+          lakatosSetInConfigScreen(false);
           return;  // HOME -> Exit Config back to YAK-CYD index page
         } else if (t.y <= 25 && t.x >= 254) {
           lakatosDevLogf("Button: CONFIG -> ABOUT (%d,%d)", t.x, t.y);
-          if (runAboutModal()) return;
+          if (runAboutModal()) {
+            lakatosSetInConfigScreen(false);
+            return;
+          }
           drawConfigScreen();
         } else if (t.y >= 28 && t.y <= 66 && t.x >= 238) {
           gAutoBright = !gAutoBright;
@@ -1123,10 +1142,16 @@ void runLakatosConfigScreen(bool startInCalibration) {
         } else if (t.y >= 172) {
           if (t.x <= 106) {
             lakatosDevLogf("Button: CONFIG -> AIRPORT (%d,%d)", t.x, t.y);
-            if (runAirportSelectorModal()) return;
+            if (runAirportSelectorModal()) {
+              lakatosSetInConfigScreen(false);
+              return;
+            }
           } else if (t.x <= 212) {
             lakatosDevLogf("Button: CONFIG -> WI-FI SETUP (%d,%d)", t.x, t.y);
-            if (runWifiConfigModal()) return;
+            if (runWifiConfigModal()) {
+              lakatosSetInConfigScreen(false);
+              return;
+            }
           } else if (t.y < 203) {
             bool nextDev = !lakatosGetDeveloperMode();
             lakatosSetDeveloperMode(nextDev);

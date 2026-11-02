@@ -141,34 +141,21 @@ func updateHUD() {
 func drawBottomTrack() {
 	tft_fill_rect(0, TRACK_Y, SCREEN_W, SCREEN_H-TRACK_Y, TRACK_BG)
 	tft_draw_fast_hline(0, TRACK_Y, SCREEN_W, DARKCYAN)
-
-	// Left & Right directional zones on the bottom touch bar
-	tft_fill_round_rect(4, TRACK_Y+2, 56, 16, 3, 0x18E3)
-	tft_draw_round_rect(4, TRACK_Y+2, 56, 16, 3, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("< LEFT", 8, TRACK_Y+2, 2)
-
-	tft_fill_round_rect(260, TRACK_Y+2, 56, 16, 3, 0x18E3)
-	tft_draw_round_rect(260, TRACK_Y+2, 56, 16, 3, CYAN)
-	tft_set_text_color(CYAN, 0x18E3)
-	tft_draw_string("RIGHT >", 263, TRACK_Y+2, 2)
-
-	// Center guide rail
-	tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+	tft_draw_fast_hline(12, TRACK_Y+10, 296, TRACK_FG)
 }
 
 func updateTrackMarkers() {
 	if prevTgtX != targetX || prevGunX != gunX {
 		// Redraw guide segment where old markers were
-		tft_fill_rect(66, TRACK_Y+6, 188, 9, TRACK_BG)
-		tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+		tft_fill_rect(12, TRACK_Y+6, 296, 9, TRACK_BG)
+		tft_draw_fast_hline(12, TRACK_Y+10, 296, TRACK_FG)
 
-		// Draw targetX marker if inside center rail
-		tx := clamp(targetX, 68, 252)
+		// Draw targetX marker
+		tx := clamp(targetX, GUN_MIN_X, GUN_MAX_X)
 		tft_fill_rect(tx-2, TRACK_Y+7, 5, 7, YELLOW)
 
 		// Draw gunX position marker
-		gx := clamp(gunX, 68, 252)
+		gx := clamp(gunX, GUN_MIN_X, GUN_MAX_X)
 		tft_fill_rect(gx-3, TRACK_Y+8, 7, 5, GREEN)
 
 		prevTgtX = targetX
