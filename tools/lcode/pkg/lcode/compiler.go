@@ -2114,19 +2114,37 @@ func (c *Compiler) compileComparison() (TypeDesc, error) {
 			c.emitOp("STR_CMP")
 			c.emitOp("PUSH_0")
 		}
+		unsignedCmp := (lt.Kind == "scalar" && (lt.ScalarType == "uint" || lt.ScalarType == "uint32" || lt.ScalarType == "word")) ||
+			(rt.Kind == "scalar" && (rt.ScalarType == "uint" || rt.ScalarType == "uint32" || rt.ScalarType == "word"))
 		switch op {
 		case "==":
 			c.emitOp("CMP_EQ")
 		case "!=":
 			c.emitOp("CMP_NE")
 		case "<":
-			c.emitOp("CMP_LT")
+			if unsignedCmp {
+				c.emitOp("UCMP_LT")
+			} else {
+				c.emitOp("CMP_LT")
+			}
 		case "<=":
-			c.emitOp("CMP_LE")
+			if unsignedCmp {
+				c.emitOp("UCMP_LE")
+			} else {
+				c.emitOp("CMP_LE")
+			}
 		case ">":
-			c.emitOp("CMP_GT")
+			if unsignedCmp {
+				c.emitOp("UCMP_GT")
+			} else {
+				c.emitOp("CMP_GT")
+			}
 		case ">=":
-			c.emitOp("CMP_GE")
+			if unsignedCmp {
+				c.emitOp("UCMP_GE")
+			} else {
+				c.emitOp("CMP_GE")
+			}
 		}
 		lt = TypeDesc{Kind: "scalar", ScalarType: "bool", ByteSize: 4, ElemSize: 4}
 	}
@@ -2190,7 +2208,12 @@ func (c *Compiler) compileShift() (TypeDesc, error) {
 			if _, err := c.compileAdd(); err != nil {
 				return TypeDesc{}, err
 			}
-			c.emitOp("SHR")
+			if lt.ScalarType == "uint" || lt.ScalarType == "uint32" || lt.ScalarType == "word" ||
+				lt.ScalarType == "byte" || lt.ScalarType == "uint8" || lt.ScalarType == "uint16" || lt.ScalarType == "half" {
+				c.emitOp("USHR")
+			} else {
+				c.emitOp("SHR")
+			}
 		} else if c.matchPunct(">>>") {
 			if _, err := c.compileAdd(); err != nil {
 				return TypeDesc{}, err
@@ -2265,14 +2288,25 @@ func (c *Compiler) compileMul() (TypeDesc, error) {
 			if c.emitBinaryFloatArgs(lt, rt) {
 				c.emitOp("FDIV")
 				lt = ScalarFloat
+			} else if lt.ScalarType == "uint" || lt.ScalarType == "uint32" || lt.ScalarType == "word" ||
+				rt.ScalarType == "uint" || rt.ScalarType == "uint32" || rt.ScalarType == "word" {
+				c.emitOp("UDIV")
+				lt = TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}
 			} else {
 				c.emitOp("DIV")
 			}
 		} else if c.matchPunct("%") {
-			if _, err := c.compileUnary(); err != nil {
+			rt, err := c.compileUnary()
+			if err != nil {
 				return TypeDesc{}, err
 			}
-			c.emitOp("MOD")
+			if lt.ScalarType == "uint" || lt.ScalarType == "uint32" || lt.ScalarType == "word" ||
+				rt.ScalarType == "uint" || rt.ScalarType == "uint32" || rt.ScalarType == "word" {
+				c.emitOp("UMOD")
+				lt = TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}
+			} else {
+				c.emitOp("MOD")
+			}
 		} else {
 			break
 		}
@@ -2664,7 +2698,7 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 			c.emitOp("I32_TO_F32")
 		}
 		return ScalarFloat, nil
-	case "int", "int32", "uint", "uint32", "word", "bool":
+	case "int", "int32", "bool":
 		argTypes, err := c.parseCallArgs()
 		if err != nil {
 			return TypeDesc{}, err
@@ -2673,6 +2707,15 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 			c.emitOp("F32_TO_I32")
 		}
 		return ScalarInt, nil
+	case "uint", "uint32", "word":
+		argTypes, err := c.parseCallArgs()
+		if err != nil {
+			return TypeDesc{}, err
+		}
+		if len(argTypes) == 1 && isFloatType(argTypes[0]) {
+			c.emitOp("F32_TO_I32")
+		}
+		return TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}, nil
 	case "float32_bits", "math_float32_bits", "math_float32bits":
 		_, err := c.parseCallArgs()
 		return ScalarInt, err
@@ -2995,14 +3038,21 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		c.emitOp("MEM_CMP")
 		return ScalarInt, nil
 	case "println", "os_println":
+		emitScalarToStr := func(t TypeDesc) {
+			c.emitOp("PUSH_0")
+			if t.ScalarType == "uint" || t.ScalarType == "uint32" || t.ScalarType == "word" {
+				c.emitPushInt(-2147483648) // 0x80000000 unsigned flag
+			} else {
+				c.emitOp("PUSH_0")
+			}
+			c.emitOp("SYSCALL", "SYS_FMT_INT_TO_STR")
+		}
 		if len(argTypes) == 1 {
 			if isFloatType(argTypes[0]) {
 				c.emitOp("PUSH_NEG1")
 				c.emitOp("SYSCALL", "SYS_FMT_FLOAT_TO_STR")
 			} else if argTypes[0].Kind != "slice" {
-				c.emitOp("PUSH_0")
-				c.emitOp("PUSH_0")
-				c.emitOp("SYSCALL", "SYS_FMT_INT_TO_STR")
+				emitScalarToStr(argTypes[0])
 			}
 			c.emitOp("IO_PRINT")
 			return VoidType, nil
@@ -3019,9 +3069,7 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 				c.emitOp("PUSH_NEG1")
 				c.emitOp("SYSCALL", "SYS_FMT_FLOAT_TO_STR")
 			} else if argTypes[i].Kind != "slice" {
-				c.emitOp("PUSH_0")
-				c.emitOp("PUSH_0")
-				c.emitOp("SYSCALL", "SYS_FMT_INT_TO_STR")
+				emitScalarToStr(argTypes[i])
 			}
 			c.emitOp("SWAP")
 			c.emitOp("POP")
@@ -3039,19 +3087,26 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 			c.emitOp("PUSH_NEG1")
 			c.emitOp("SYSCALL", "SYS_FMT_FLOAT_TO_STR")
 		} else if argTypes[last].Kind != "slice" {
-			c.emitOp("PUSH_0")
-			c.emitOp("PUSH_0")
-			c.emitOp("SYSCALL", "SYS_FMT_INT_TO_STR")
+			emitScalarToStr(argTypes[last])
 		}
 		c.emitOp("IO_PRINT")
 		return VoidType, nil
 	case "panic":
 		c.emitOp("PANIC")
 		return VoidType, nil
-	case "int_to_str", "itoa":
+	case "int_to_str", "itoa", "uint_to_str", "utoa", "os_int_to_str", "os_uint_to_str":
+		isUnsigned := name == "uint_to_str" || name == "utoa" || name == "os_uint_to_str" ||
+			(len(argTypes) >= 1 && (argTypes[0].ScalarType == "uint" || argTypes[0].ScalarType == "uint32" || argTypes[0].ScalarType == "word"))
 		if len(argTypes) == 1 {
 			c.emitOp("PUSH_0")
-			c.emitOp("PUSH_0")
+			if isUnsigned {
+				c.emitPushInt(-2147483648)
+			} else {
+				c.emitOp("PUSH_0")
+			}
+		} else if isUnsigned {
+			c.emitPushInt(-2147483648)
+			c.emitOp("BIT_OR")
 		}
 		c.emitOp("SYSCALL", "SYS_FMT_INT_TO_STR")
 		return SliceStr, nil
@@ -3101,6 +3156,25 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "os_format_local_time", "format_local_time":
 		c.emitOp("SYSCALL", "SYS_FORMAT_LOCAL_TIME")
 		return ScalarInt, nil
+	case "os_city_hash32", "os_cityhash32", "city_hash32", "cityhash32":
+		if len(argTypes) == 1 && argTypes[0].Kind == "slice" {
+			sTmp := c.allocTemp(argTypes[0])
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+		} else if len(argTypes) == 2 && argTypes[0].Kind == "slice" {
+			szTmp := c.allocTemp(ScalarInt)
+			sTmp := c.allocTemp(argTypes[0])
+			c.emitStoreVar(szTmp)
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(szTmp)
+		}
+		c.emitOp("SYSCALL", "SYS_CITY_HASH32")
+		return TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}, nil
 
 	// TFT Display
 	case "tft_fill_screen", "os_tft_fill_screen":
@@ -3407,8 +3481,45 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "os_wifi_connected", "wifi_is_connected":
 		c.emitOp("SYSCALL", "SYS_WIFI_CONNECTED")
 		return ScalarInt, nil
-	case "os_http_get", "http_get":
+	case "os_http_get", "http_get", "os_fetch", "fetch":
+		if len(argTypes) == 2 && argTypes[1].Kind == "slice" {
+			sTmp := c.allocTemp(argTypes[1])
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+		}
 		c.emitOp("SYSCALL", "SYS_HTTP_GET")
+		return ScalarInt, nil
+	case "os_fetch_with_cache", "fetch_with_cache", "os_http_get_cached", "http_get_cached":
+		if len(argTypes) == 4 && argTypes[1].ScalarType != "word" && argTypes[2].ScalarType == "word" {
+			// Reorder (url, maxAgeSec, bufPtr, maxLen) -> (url, bufPtr, maxLen, maxAgeSec)
+			c.emitOp("ROT")
+		} else if len(argTypes) == 3 && argTypes[1].Kind == "slice" {
+			// 3-arg slice form: (url, bufSlice, maxAgeSec) -> (url, bufPtr, maxLen, maxAgeSec)
+			ageTmp := c.allocTemp(ScalarInt)
+			sTmp := c.allocTemp(argTypes[1])
+			c.emitStoreVar(ageTmp)
+			c.emitStoreVar(sTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+			c.emitLoadVar(ageTmp)
+		} else if len(argTypes) == 3 && argTypes[2].Kind == "slice" {
+			// 3-arg slice form: (url, maxAgeSec, bufSlice) -> (url, bufPtr, maxLen, maxAgeSec)
+			sTmp := c.allocTemp(argTypes[2])
+			ageTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(sTmp)
+			c.emitStoreVar(ageTmp)
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_DATA")
+			c.emitLoadVar(sTmp)
+			c.emitOp("SLICE_LEN")
+			c.emitLoadVar(ageTmp)
+		}
+		c.emitOp("SYSCALL", "SYS_HTTP_GET_CACHED")
 		return ScalarInt, nil
 	case "os_serial_available", "serial_available":
 		c.emitOp("SYSCALL", "SYS_SERIAL_AVAIL")

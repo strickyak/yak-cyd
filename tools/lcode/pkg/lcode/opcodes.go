@@ -181,6 +181,7 @@ const (
 	SysGetShUrl         = byte(0x0C) // ( -- strSlice)
 	SysGetUnixTime      = byte(0x0D) // ( -- unixSecs)
 	SysFormatLocalTime  = byte(0x0E) // (fmtSlice bufAddr maxLen -- ok)
+	SysCityHash32       = byte(0x0F) // (bufAddr len -- hash32)
 
 	// TFT Display (0x10 .. 0x24)
 	SysTftFillScreen    = byte(0x10) // (color -- )
@@ -232,6 +233,7 @@ const (
 	SysSerialAvail   = byte(0x3B) // ( -- count)
 	SysSerialRead    = byte(0x3C) // ( -- ch)
 	SysSerialWrite   = byte(0x3D) // (bufAddr len -- written)
+	SysHttpGetCached = byte(0x3E) // (urlSlice bufAddr maxLen maxAgeSec -- bytesRead)
 
 	// JPEG Image Decoder & Renderer (0x40 .. 0x42)
 	SysTftDrawJpgFile = byte(0x40) // (pathSlice x y scale -- ok)
@@ -412,6 +414,7 @@ var SyscallByName = map[string]byte{
 	"SYS_GET_SH_URL":         SysGetShUrl,
 	"SYS_GET_UNIX_TIME":      SysGetUnixTime,
 	"SYS_FORMAT_LOCAL_TIME":  SysFormatLocalTime,
+	"SYS_CITY_HASH32":        SysCityHash32,
 	"SYS_TFT_FILL_SCREEN":    SysTftFillScreen,
 	"SYS_TFT_FILL_RECT":      SysTftFillRect,
 	"SYS_TFT_DRAW_RECT":      SysTftDrawRect,
@@ -463,6 +466,7 @@ var SyscallByName = map[string]byte{
 	"SYS_SERIAL_AVAIL":       SysSerialAvail,
 	"SYS_SERIAL_READ":        SysSerialRead,
 	"SYS_SERIAL_WRITE":       SysSerialWrite,
+	"SYS_HTTP_GET_CACHED":    SysHttpGetCached,
 }
 
 var SyscallToName = map[byte]string{}

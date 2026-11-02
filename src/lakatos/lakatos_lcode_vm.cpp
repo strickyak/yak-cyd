@@ -165,6 +165,7 @@ enum LCodeSyscall : uint8_t {
   SysGetShUrl        = 0x0C,
   SysGetUnixTime     = 0x0D,
   SysFormatLocalTime = 0x0E,
+  SysCityHash32      = 0x0F,
 
   SysTftFillScreen    = 0x10,
   SysTftFillRect      = 0x11,
@@ -213,6 +214,7 @@ enum LCodeSyscall : uint8_t {
   SysSerialAvail   = 0x3B,
   SysSerialRead    = 0x3C,
   SysSerialWrite   = 0x3D,
+  SysHttpGetCached = 0x3E,
 
   SysTftDrawJpgFile = 0x40,
   SysTftDrawJpgMem  = 0x41,
@@ -584,6 +586,13 @@ struct LCodeVM {
         bool ok = lakatosFormatLocalTime((char*)(mem + bufAddr), maxLen, fmtStr);
         return push(ok ? 1 : 0);
       }
+      case SysCityHash32: {
+        uint32_t ln = 0, bufAddr = 0;
+        if (!pop(ln) || !pop(bufAddr)) return false;
+        if (ln > 0 && !checkAddr(bufAddr, ln)) return false;
+        uint32_t h = lakatosCityHash32(ln > 0 ? (mem + bufAddr) : nullptr, ln);
+        return push(h);
+      }
 
       // TFT Display
       case SysTftFillScreen: {
@@ -724,8 +733,14 @@ struct LCodeVM {
       case SysFmtIntToStr: {
         uint32_t maxLen = 0, bufAddr = 0, val = 0;
         if (!pop(maxLen) || !pop(bufAddr) || !pop(val)) return false;
+        bool isUnsigned = (maxLen & 0x80000000u) != 0;
+        maxLen &= 0x7FFFFFFFu;
         char numBuf[24];
-        snprintf(numBuf, sizeof(numBuf), "%ld", (long)(int32_t)val);
+        if (isUnsigned) {
+          snprintf(numBuf, sizeof(numBuf), "%lu", (unsigned long)val);
+        } else {
+          snprintf(numBuf, sizeof(numBuf), "%ld", (long)(int32_t)val);
+        }
         uint32_t sLen = (uint32_t)strlen(numBuf);
         if (bufAddr != 0 && maxLen > 0) {
           if (!checkAddr(bufAddr, maxLen)) return false;
@@ -988,10 +1003,19 @@ struct LCodeVM {
       case SysHttpGet: {
         uint32_t maxLen = 0, bufAddr = 0;
         if (!pop(maxLen) || !pop(bufAddr)) return false;
-        char urlBuf[160];
+        char urlBuf[256];
         if (!popSliceAsCStr(urlBuf, sizeof(urlBuf))) return false;
         if (maxLen > 0 && !checkAddr(bufAddr, maxLen)) return false;
         int got = lakatosHttpGet(urlBuf, mem + bufAddr, maxLen);
+        return push((uint32_t)(int32_t)got);
+      }
+      case SysHttpGetCached: {
+        uint32_t maxAgeSec = 0, maxLen = 0, bufAddr = 0;
+        if (!pop(maxAgeSec) || !pop(maxLen) || !pop(bufAddr)) return false;
+        char urlBuf[256];
+        if (!popSliceAsCStr(urlBuf, sizeof(urlBuf))) return false;
+        if (maxLen > 0 && !checkAddr(bufAddr, maxLen)) return false;
+        int got = lakatosHttpGetCached(urlBuf, mem + bufAddr, maxLen, maxAgeSec);
         return push((uint32_t)(int32_t)got);
       }
       case SysSerialAvail:
@@ -1013,6 +1037,143 @@ struct LCodeVM {
 };
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Google CityHash32 Reference Implementation
+// ---------------------------------------------------------------------------
+static inline uint32_t cityRotate32(uint32_t val, int shift) {
+  return shift == 0 ? val : ((val >> shift) | (val << (32 - shift)));
+}
+
+static inline uint32_t cityBswap32(uint32_t x) {
+  return __builtin_bswap32(x);
+}
+
+static inline uint32_t cityFmix(uint32_t h) {
+  h ^= h >> 16;
+  h *= 0x85ebca6bu;
+  h ^= h >> 13;
+  h *= 0xc2b2ae35u;
+  h ^= h >> 16;
+  return h;
+}
+
+static inline uint32_t cityMur(uint32_t a, uint32_t h) {
+  constexpr uint32_t c1 = 0xcc9e2d51u;
+  constexpr uint32_t c2 = 0x1b873593u;
+  a *= c1;
+  a = cityRotate32(a, 17);
+  a *= c2;
+  h ^= a;
+  h = cityRotate32(h, 19);
+  return h * 5u + 0xe6546b64u;
+}
+
+static uint32_t cityHash32Len0to4(const uint8_t* s, size_t len) {
+  constexpr uint32_t c1 = 0xcc9e2d51u;
+  uint32_t b = 0;
+  uint32_t c = 9;
+  for (size_t i = 0; i < len; i++) {
+    int8_t v = (int8_t)s[i];
+    b = b * c1 + (uint32_t)(int32_t)v;
+    c ^= b;
+  }
+  return cityFmix(cityMur(b, cityMur((uint32_t)len, c)));
+}
+
+static uint32_t cityHash32Len5to12(const uint8_t* s, size_t len) {
+  uint32_t a = (uint32_t)len, b = (uint32_t)len * 5u, c = 9u, d = b;
+  a += readU32LE(s);
+  b += readU32LE(s + len - 4);
+  c += readU32LE(s + ((len >> 1) & 4));
+  return cityFmix(cityMur(c, cityMur(b, cityMur(a, d))));
+}
+
+static uint32_t cityHash32Len13to24(const uint8_t* s, size_t len) {
+  uint32_t a = readU32LE(s - 4 + (len >> 1));
+  uint32_t b = readU32LE(s + 4);
+  uint32_t c = readU32LE(s + len - 8);
+  uint32_t d = readU32LE(s + (len >> 1));
+  uint32_t e = readU32LE(s);
+  uint32_t f = readU32LE(s + len - 4);
+  uint32_t h = (uint32_t)len;
+  return cityFmix(cityMur(f, cityMur(e, cityMur(d, cityMur(c, cityMur(b, cityMur(a, h)))))));
+}
+
+uint32_t lakatosCityHash32(const void* buf, size_t len) {
+  const uint8_t* s = (const uint8_t*)buf;
+  if (!s) len = 0;
+  if (len <= 24) {
+    return len <= 12
+               ? (len <= 4 ? cityHash32Len0to4(s, len) : cityHash32Len5to12(s, len))
+               : cityHash32Len13to24(s, len);
+  }
+
+  constexpr uint32_t c1 = 0xcc9e2d51u;
+  constexpr uint32_t c2 = 0x1b873593u;
+  uint32_t h = (uint32_t)len, g = c1 * h, f = g;
+  uint32_t a0 = cityRotate32(readU32LE(s + len - 4) * c1, 17) * c2;
+  uint32_t a1 = cityRotate32(readU32LE(s + len - 8) * c1, 17) * c2;
+  uint32_t a2 = cityRotate32(readU32LE(s + len - 16) * c1, 17) * c2;
+  uint32_t a3 = cityRotate32(readU32LE(s + len - 12) * c1, 17) * c2;
+  uint32_t a4 = cityRotate32(readU32LE(s + len - 20) * c1, 17) * c2;
+  h ^= a0;
+  h = cityRotate32(h, 19);
+  h = h * 5u + 0xe6546b64u;
+  h ^= a2;
+  h = cityRotate32(h, 19);
+  h = h * 5u + 0xe6546b64u;
+  g ^= a1;
+  g = cityRotate32(g, 19);
+  g = g * 5u + 0xe6546b64u;
+  g ^= a3;
+  g = cityRotate32(g, 19);
+  g = g * 5u + 0xe6546b64u;
+  f += a4;
+  f = cityRotate32(f, 19) + 113u;
+  size_t iters = (len - 1) / 20;
+  do {
+    uint32_t b0 = cityRotate32(readU32LE(s) * c1, 17) * c2;
+    uint32_t b1 = readU32LE(s + 4);
+    uint32_t b2 = cityRotate32(readU32LE(s + 8) * c1, 17) * c2;
+    uint32_t b3 = cityRotate32(readU32LE(s + 12) * c1, 17) * c2;
+    uint32_t b4 = readU32LE(s + 16);
+    h ^= b0;
+    h = cityRotate32(h, 18);
+    h = h * 5u + 0xe6546b64u;
+    f += b1;
+    f = cityRotate32(f, 19);
+    f = f * c1;
+    g += b2;
+    g = cityRotate32(g, 18);
+    g = g * 5u + 0xe6546b64u;
+    h ^= b3 + b1;
+    h = cityRotate32(h, 19);
+    h = h * 5u + 0xe6546b64u;
+    g ^= b4;
+    g = cityBswap32(g) * 5u;
+    h += b4 * 5u;
+    h = cityBswap32(h);
+    f += b0;
+    // PERMUTE3(f, h, g): swap(f, h); swap(f, g);
+    uint32_t tmp = f;
+    f = g;
+    g = h;
+    h = tmp;
+    s += 20;
+  } while (--iters != 0);
+  g = cityRotate32(g, 11) * c1;
+  g = cityRotate32(g, 17) * c1;
+  f = cityRotate32(f, 11) * c1;
+  f = cityRotate32(f, 17) * c1;
+  h = cityRotate32(h + g, 19);
+  h = h * 5u + 0xe6546b64u;
+  h = cityRotate32(h, 17) * c1;
+  h = cityRotate32(h + f, 19);
+  h = h * 5u + 0xe6546b64u;
+  h = cityRotate32(h, 17) * c1;
+  return h;
+}
 
 bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                         size_t payloadLen, int* outExitCode, String* outErrMsg) {

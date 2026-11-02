@@ -2,14 +2,18 @@ package lcode
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func compileAndRun(t *testing.T, src string, maxSteps int) (*VM, string) {
@@ -445,5 +449,122 @@ func main() {
 	// Centered 10x10 inside (0, 20, 320, 220) -> dstX = (320-10)/2 = 155, dstY = 20 + (220-10)/2 = 125
 	if vm.Screen[125][155] != 0xF800 {
 		t.Fatalf("expected centered pixel (155,125) to be red 0xF800, got 0x%04X", vm.Screen[125][155])
+	}
+}
+
+func TestCityHash32(t *testing.T) {
+	src := `
+package main
+
+var urlBuf [128]byte
+
+func hashSlice(ptr *byte, n uint) uint {
+	return os.CityHash32(ptr, n)
+}
+
+func main() {
+	u := "https://aviationweather.gov/api/data/metar?ids=KSFO,KJFK,KLAX,KATL,KORD,KDEN,KSEA&format=json"
+	for i := 0; i < u.Len; i++ {
+		urlBuf[i] = byte(peek1(u.Base + i))
+	}
+	h1 := hashSlice(&urlBuf[0], uint(u.Len))
+	h2 := os.CityHash32(u.Base, uint(u.Len))
+	h3 := os.CityHash32(u)
+	hShort := os.CityHash32("abc")
+	hMed := os.CityHash32("hello world!")
+	h18 := os.CityHash32("0123456789abcdefgh")
+	println(h1 == h2, h2 == h3, int_to_str(h1), hShort != 0, hMed != 0, h18 != 0)
+}
+`
+	_, out := compileAndRun(t, src, 100000)
+	expectedHash := CityHash32([]byte("https://aviationweather.gov/api/data/metar?ids=KSFO,KJFK,KLAX,KATL,KORD,KDEN,KSEA&format=json"))
+	want := fmt.Sprintf("1 1 %d 1 1 1", expectedHash)
+	if strings.TrimSpace(out) != want {
+		t.Fatalf("expected %q, got %q", want, strings.TrimSpace(out))
+	}
+}
+
+func TestFetchWithCache(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		fmt.Fprintf(w, "METAR-V%d", hits)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	urlStr := srv.URL + "/metar?ids=KSFO"
+
+	src := fmt.Sprintf(`
+package main
+
+var buf [256]byte
+
+func main() {
+	u := %q
+	n1 := os.FetchWithCache(u, &buf[0], 256, 3600)
+	s1 := make_slice(&buf[0], n1, n1)
+	n2 := os.FetchWithCache(u, &buf[0], 256, 3600)
+	s2 := make_slice(&buf[0], n2, n2)
+	println(n1, s1, n2, s2)
+}
+`, urlStr)
+
+	lapp, asmText, err := CompileToLapp("CacheTest", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 100000
+	var out bytes.Buffer
+	vm.Stdout = &out
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "8 METAR-V1 8 METAR-V1" {
+		t.Fatalf("expected '8 METAR-V1 8 METAR-V1', got %q", out.String())
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly 1 HTTP hit due to cache hit, got %d", hits)
+	}
+
+	// Verify cache file at /net/cache/%u has timestamp on line 1 and payload after
+	hash := CityHash32([]byte(urlStr))
+	cacheFile := filepath.Join(tmpDir, "net", "cache", fmt.Sprintf("%d", hash))
+	cacheBytes, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatalf("expected cache file %s to exist: %v", cacheFile, err)
+	}
+	parts := strings.SplitN(string(cacheBytes), "\n", 2)
+	if len(parts) != 2 || parts[1] != "METAR-V1" {
+		t.Fatalf("unexpected cache file contents: %q", string(cacheBytes))
+	}
+
+	// Backdate the cache file timestamp by 7200 seconds so maxAgeSec=3600 forces a re-fetch
+	staleContent := fmt.Sprintf("%d\nOLD-DATA", uint32(time.Now().Unix()-7200))
+	if err := os.WriteFile(cacheFile, []byte(staleContent), 0o644); err != nil {
+		t.Fatalf("WriteFile stale: %v", err)
+	}
+
+	vm2, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM 2: %v", err)
+	}
+	vm2.VfsRoot = tmpDir
+	vm2.MaxInstructions = 100000
+	out.Reset()
+	vm2.Stdout = &out
+	if _, err := vm2.Run(); err != nil {
+		t.Fatalf("VM2 Run: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "8 METAR-V2 8 METAR-V2" {
+		t.Fatalf("expected '8 METAR-V2 8 METAR-V2' after stale refresh, got %q", out.String())
+	}
+	if hits != 2 {
+		t.Fatalf("expected 2 total HTTP hits after stale refresh, got %d", hits)
 	}
 }

@@ -161,7 +161,10 @@ cd tools/lcode && GOWORK=off go build -o ../../bin/lakat ./cmd/lakat
 | | `os_get_device_name() string` | Configured device name |
 | | `os_get_serial_number() string` | Configured device serial number |
 | | `os_get_unix_time() int` | Current UTC epoch timestamp |
+| | `os.CityHash32(ptr *byte, size uint) uint` | Computes Google's 32-bit `CityHash32` of `size` bytes at `ptr` (also accepts a 1-arg `string` or `[]byte` slice, or `os_city_hash32`) |
 | | `os_wifi_connected() int` | Returns `1` if Wi-Fi is connected, `0` otherwise |
+| | `os_http_get(url string, bufAddr *byte, maxLen int) int` | Performs an HTTP/HTTPS `GET` into `bufAddr` (up to `maxLen` bytes); returns bytes read or `<0` on error (also `os.HttpGet`) |
+| | `os.FetchWithCache(url string, bufAddr *byte, maxLen int, maxAgeSec int) int` | Reads `/net/cache/<CityHash32(url)>` (line 1: `"%u\n"` fetch timestamp, rest: payload); if missing or older than `maxAgeSec`, fetches `url` and writes the cache file (also `os_fetch_with_cache`) |
 | | `os_serial_available() int` | Number of bytes waiting on hardware Serial |
 | | `os_serial_read() int` | Reads one byte from hardware Serial (`-1` if none) |
 | | `os_prompt_keyboard(title string, bufAddr, maxLen int, allowSlash bool) int` | Opens the on-screen touch keyboard modal into `bufAddr` |

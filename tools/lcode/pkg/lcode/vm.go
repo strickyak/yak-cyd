@@ -1490,6 +1490,23 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.Memory[int(bufAddr)+len(b)] = 0
 		}
 		vm.push(1)
+	case SysCityHash32:
+		ln, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		var data []byte
+		if ln > 0 {
+			if err := vm.checkAddr(bufAddr, int(ln)); err != nil {
+				return err
+			}
+			data = vm.Memory[bufAddr : bufAddr+ln]
+		}
+		vm.push(CityHash32(data))
 
 	// TFT Display Primitives
 	case SysTftFillScreen:
@@ -1650,7 +1667,14 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		s := strconv.Itoa(int(int32(val)))
+		isUnsigned := (maxLen & 0x80000000) != 0
+		maxLen &= 0x7FFFFFFF
+		var s string
+		if isUnsigned {
+			s = strconv.FormatUint(uint64(val), 10)
+		} else {
+			s = strconv.Itoa(int(int32(val)))
+		}
 		if bufAddr != 0 && maxLen > 0 {
 			if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
 				return err
@@ -2116,6 +2140,78 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.Memory[int(bufAddr)+len(body)] = 0
 		}
 		vm.push(uint32(len(body)))
+	case SysHttpGetCached:
+		maxAgeSec, _ := vm.pop()
+		maxLen, _ := vm.pop()
+		bufAddr, _ := vm.pop()
+		urlStr, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if maxLen == 0 {
+			vm.push(0)
+			return nil
+		}
+		if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
+			return err
+		}
+		hash := CityHash32([]byte(urlStr))
+		var cacheHostPath string
+		if vm.VfsRoot != "" {
+			cacheRel := fmt.Sprintf("/net/cache/%d", hash)
+			cacheHostPath = filepath.Join(vm.VfsRoot, filepath.Clean(cacheRel))
+			if data, err := os.ReadFile(cacheHostPath); err == nil && len(data) > 0 {
+				if nl := bytes.IndexByte(data, '\n'); nl > 0 && nl < 24 {
+					line := string(bytes.TrimRight(data[:nl], "\r"))
+					if cachedTime, err := strconv.ParseUint(line, 10, 32); err == nil && cachedTime > 0 {
+						nowSec := uint64(time.Now().Unix())
+						var age uint64
+						if nowSec >= cachedTime {
+							age = nowSec - cachedTime
+						}
+						if age <= uint64(maxAgeSec) {
+							payload := data[nl+1:]
+							if len(payload) > int(maxLen) {
+								payload = payload[:maxLen]
+							}
+							copy(vm.Memory[bufAddr:int(bufAddr)+len(payload)], payload)
+							if len(payload) < int(maxLen) {
+								vm.Memory[int(bufAddr)+len(payload)] = 0
+							}
+							vm.push(uint32(len(payload)))
+							return nil
+						}
+					}
+				}
+			}
+		}
+		client := &http.Client{Timeout: 6 * time.Second}
+		resp, err := client.Get(urlStr)
+		if err != nil {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			vm.push(uint32(int32(-resp.StatusCode)))
+			return nil
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLen)))
+		if err != nil {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		copy(vm.Memory[bufAddr:int(bufAddr)+len(body)], body)
+		if len(body) < int(maxLen) {
+			vm.Memory[int(bufAddr)+len(body)] = 0
+		}
+		if cacheHostPath != "" {
+			_ = os.MkdirAll(filepath.Dir(cacheHostPath), 0o755)
+			hdr := fmt.Sprintf("%d\n", uint32(time.Now().Unix()))
+			cacheData := append([]byte(hdr), body...)
+			_ = os.WriteFile(cacheHostPath, cacheData, 0o644)
+		}
+		vm.push(uint32(len(body)))
 	case SysSerialAvail:
 		vm.push(uint32(len(vm.SerialIn)))
 	case SysSerialRead:
@@ -2446,4 +2542,156 @@ func (vm *VM) drawJpgBytes(data []byte, dstX, dstY, scale int) bool {
 		}
 	}
 	return true
+}
+
+func cityRotate32(val uint32, shift uint) uint32 {
+	if shift == 0 {
+		return val
+	}
+	return (val >> shift) | (val << (32 - shift))
+}
+
+func cityBswap32(x uint32) uint32 {
+	return ((x & 0x000000FF) << 24) |
+		((x & 0x0000FF00) << 8) |
+		((x & 0x00FF0000) >> 8) |
+		((x & 0xFF000000) >> 24)
+}
+
+func cityFmix(h uint32) uint32 {
+	h ^= h >> 16
+	h *= 0x85ebca6b
+	h ^= h >> 13
+	h *= 0xc2b2ae35
+	h ^= h >> 16
+	return h
+}
+
+func cityMur(a, h uint32) uint32 {
+	const c1 uint32 = 0xcc9e2d51
+	const c2 uint32 = 0x1b873593
+	a *= c1
+	a = cityRotate32(a, 17)
+	a *= c2
+	h ^= a
+	h = cityRotate32(h, 19)
+	return h*5 + 0xe6546b64
+}
+
+func cityHash32Len0to4(s []byte) uint32 {
+	const c1 uint32 = 0xcc9e2d51
+	var b uint32 = 0
+	var c uint32 = 9
+	for i := 0; i < len(s); i++ {
+		v := int8(s[i])
+		b = b*c1 + uint32(int32(v))
+		c ^= b
+	}
+	return cityFmix(cityMur(b, cityMur(uint32(len(s)), c)))
+}
+
+func cityHash32Len5to12(s []byte) uint32 {
+	n := uint32(len(s))
+	a := n
+	b := n * 5
+	c := uint32(9)
+	d := b
+	a += binary.LittleEndian.Uint32(s[0:4])
+	b += binary.LittleEndian.Uint32(s[len(s)-4:])
+	off := (len(s) >> 1) & 4
+	c += binary.LittleEndian.Uint32(s[off : off+4])
+	return cityFmix(cityMur(c, cityMur(b, cityMur(a, d))))
+}
+
+func cityHash32Len13to24(s []byte) uint32 {
+	n := len(s)
+	a := binary.LittleEndian.Uint32(s[(n>>1)-4:])
+	b := binary.LittleEndian.Uint32(s[4:])
+	c := binary.LittleEndian.Uint32(s[n-8:])
+	d := binary.LittleEndian.Uint32(s[n>>1:])
+	e := binary.LittleEndian.Uint32(s[0:])
+	f := binary.LittleEndian.Uint32(s[n-4:])
+	h := uint32(n)
+	return cityFmix(cityMur(f, cityMur(e, cityMur(d, cityMur(c, cityMur(b, cityMur(a, h)))))))
+}
+
+// CityHash32 computes Google's 32-bit CityHash of s.
+func CityHash32(s []byte) uint32 {
+	n := len(s)
+	if n <= 24 {
+		if n <= 12 {
+			if n <= 4 {
+				return cityHash32Len0to4(s)
+			}
+			return cityHash32Len5to12(s)
+		}
+		return cityHash32Len13to24(s)
+	}
+	const c1 uint32 = 0xcc9e2d51
+	const c2 uint32 = 0x1b873593
+	h := uint32(n)
+	g := c1 * h
+	f := g
+	a0 := cityRotate32(binary.LittleEndian.Uint32(s[n-4:])*c1, 17) * c2
+	a1 := cityRotate32(binary.LittleEndian.Uint32(s[n-8:])*c1, 17) * c2
+	a2 := cityRotate32(binary.LittleEndian.Uint32(s[n-16:])*c1, 17) * c2
+	a3 := cityRotate32(binary.LittleEndian.Uint32(s[n-12:])*c1, 17) * c2
+	a4 := cityRotate32(binary.LittleEndian.Uint32(s[n-20:])*c1, 17) * c2
+	h ^= a0
+	h = cityRotate32(h, 19)
+	h = h*5 + 0xe6546b64
+	h ^= a2
+	h = cityRotate32(h, 19)
+	h = h*5 + 0xe6546b64
+	g ^= a1
+	g = cityRotate32(g, 19)
+	g = g*5 + 0xe6546b64
+	g ^= a3
+	g = cityRotate32(g, 19)
+	g = g*5 + 0xe6546b64
+	f += a4
+	f = cityRotate32(f, 19) + 113
+	iters := (n - 1) / 20
+	pos := 0
+	for {
+		b0 := cityRotate32(binary.LittleEndian.Uint32(s[pos:])*c1, 17) * c2
+		b1 := binary.LittleEndian.Uint32(s[pos+4:])
+		b2 := cityRotate32(binary.LittleEndian.Uint32(s[pos+8:])*c1, 17) * c2
+		b3 := cityRotate32(binary.LittleEndian.Uint32(s[pos+12:])*c1, 17) * c2
+		b4 := binary.LittleEndian.Uint32(s[pos+16:])
+		h ^= b0
+		h = cityRotate32(h, 18)
+		h = h*5 + 0xe6546b64
+		f += b1
+		f = cityRotate32(f, 19)
+		f = f * c1
+		g += b2
+		g = cityRotate32(g, 18)
+		g = g*5 + 0xe6546b64
+		h ^= b3 + b1
+		h = cityRotate32(h, 19)
+		h = h*5 + 0xe6546b64
+		g ^= b4
+		g = cityBswap32(g) * 5
+		h += b4 * 5
+		h = cityBswap32(h)
+		f += b0
+		f, g, h = g, h, f
+		pos += 20
+		iters--
+		if iters == 0 {
+			break
+		}
+	}
+	g = cityRotate32(g, 11) * c1
+	g = cityRotate32(g, 17) * c1
+	f = cityRotate32(f, 11) * c1
+	f = cityRotate32(f, 17) * c1
+	h = cityRotate32(h+g, 19)
+	h = h*5 + 0xe6546b64
+	h = cityRotate32(h, 17) * c1
+	h = cityRotate32(h+f, 19)
+	h = h*5 + 0xe6546b64
+	h = cityRotate32(h, 17) * c1
+	return h
 }

@@ -192,6 +192,8 @@ typedef struct LakatosApi {
   int      (*serial_read)(void);
   size_t   (*serial_write)(const void* buf, size_t len);
   int      (*vsnprintf)(char* buf, size_t size, const char* fmt, va_list ap);
+  uint32_t (*city_hash32)(const void* buf, size_t len);
+  int      (*fetch_with_cache)(const char* url, void* buf, size_t max_len, uint32_t max_age_sec);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);

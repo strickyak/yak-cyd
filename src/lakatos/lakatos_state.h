@@ -104,6 +104,7 @@ bool    lakatosFsRmdir(const char* path);
 bool    lakatosFsRm(const char* path);
 int64_t lakatosFsDu(const char* path);
 int     lakatosHttpGet(const char* url, void* buf, size_t maxLen);
+int     lakatosHttpGetCached(const char* url, void* buf, size_t maxLen, uint32_t maxAgeSec);
 
 struct LakatosVfsStream;
 LakatosVfsStream* lakatosFsOpenRead(const char* path);
@@ -138,6 +139,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode = nullptr,
 bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                         size_t payloadLen, int* outExitCode = nullptr,
                         String* outErrMsg = nullptr);
+uint32_t lakatosCityHash32(const void* buf, size_t len);
 
 // ---------------------------------------------------------------------------
 // PNG Image Decoder & Renderer (implemented in lakatos_png.cpp)

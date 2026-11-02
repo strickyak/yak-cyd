@@ -291,6 +291,8 @@ static const LakatosApi gLakatosApi = {
     .serial_read          = api_serial_read,
     .serial_write         = api_serial_write,
     .vsnprintf            = vsnprintf,
+    .city_hash32          = lakatosCityHash32,
+    .fetch_with_cache     = lakatosHttpGetCached,
 };
 
 // ---------------------------------------------------------------------------

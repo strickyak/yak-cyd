@@ -447,8 +447,9 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
     }
     size_t total = 0;
     uint32_t startMs = millis();
-    while (http.connected() && total < toRead && (millis() - startMs < 8000)) {
-      size_t avail = stream->available();
+    while ((http.connected() || (stream && stream->available() > 0)) &&
+           total < toRead && (millis() - startMs < 8000)) {
+      size_t avail = stream ? stream->available() : 0;
       if (avail > 0) {
         size_t chunk = (avail > (toRead - total)) ? (toRead - total) : avail;
         int r = stream->read((uint8_t*)buf + total, chunk);
@@ -690,6 +691,99 @@ int lakatosHttpGet(const char* url, void* buf, size_t maxLen) {
   http.end();
   lakatosDevLogf("HTTP GET ok -> %u B (code=%d)", (unsigned)total, code);
   return (int)total;
+}
+
+int lakatosHttpGetCached(const char* url, void* buf, size_t maxLen, uint32_t maxAgeSec) {
+  if (!url || !url[0] || !buf || maxLen == 0) return -1;
+
+  uint32_t hash = lakatosCityHash32(url, strlen(url));
+  char cachePath[48];
+  snprintf(cachePath, sizeof(cachePath), "/net/cache/%u", (unsigned)hash);
+
+  uint8_t* bytes = (uint8_t*)buf;
+  int32_t got = lakatosFsRead(cachePath, 0, bytes, maxLen);
+  if (got > 0) {
+    size_t scanLimit = ((size_t)got < 24) ? (size_t)got : 24;
+    size_t nlIdx = 0;
+    bool foundNl = false;
+    bool validDigits = false;
+    uint32_t cachedTime = 0;
+    for (size_t i = 0; i < scanLimit; i++) {
+      char c = (char)bytes[i];
+      if (c == '\n') {
+        nlIdx = i;
+        foundNl = true;
+        break;
+      }
+      if (c == '\r') continue;
+      if (c >= '0' && c <= '9') {
+        cachedTime = cachedTime * 10u + (uint32_t)(c - '0');
+        validDigits = true;
+      } else {
+        validDigits = false;
+        break;
+      }
+    }
+
+    uint32_t nowSec = (uint32_t)lakatosGetUnixTime();
+    if (foundNl && validDigits && cachedTime > 0 && nowSec > 0) {
+      uint32_t age = (nowSec >= cachedTime) ? (nowSec - cachedTime) : 0;
+      if (age <= maxAgeSec) {
+        size_t payloadOff = nlIdx + 1;
+        size_t payloadLen = (size_t)got - payloadOff;
+        if (payloadLen > 0) {
+          memmove(bytes, bytes + payloadOff, payloadLen);
+        }
+        if ((size_t)got == maxLen && payloadLen < maxLen) {
+          int32_t extra = lakatosFsRead(cachePath, (uint32_t)maxLen,
+                                        bytes + payloadLen, maxLen - payloadLen);
+          if (extra > 0) {
+            payloadLen += (size_t)extra;
+          }
+        }
+        if (payloadLen < maxLen) {
+          bytes[payloadLen] = 0;
+        }
+        lakatosDevLogf("HTTP CACHE HIT %s (age=%us <= %us, %u B)",
+                       cachePath, (unsigned)age, (unsigned)maxAgeSec, (unsigned)payloadLen);
+        return (int)payloadLen;
+      }
+      lakatosDevLogf("HTTP CACHE STALE %s (age=%us > %us)",
+                     cachePath, (unsigned)age, (unsigned)maxAgeSec);
+    }
+  } else {
+    lakatosDevLogf("HTTP CACHE MISS %s", cachePath);
+  }
+
+  int fetched = lakatosHttpGet(url, buf, maxLen);
+  if (fetched < 0) {
+    return fetched;
+  }
+
+  uint32_t saveTime = (uint32_t)lakatosGetUnixTime();
+  char hdr[24];
+  int hdrLen = snprintf(hdr, sizeof(hdr), "%u\n", (unsigned)saveTime);
+  if (hdrLen > 0) {
+    size_t totalCacheLen = (size_t)hdrLen + (size_t)fetched;
+    uint8_t* cacheBuf = (uint8_t*)malloc(totalCacheLen);
+    if (cacheBuf) {
+      memcpy(cacheBuf, hdr, (size_t)hdrLen);
+      if (fetched > 0) {
+        memcpy(cacheBuf + hdrLen, buf, (size_t)fetched);
+      }
+      static bool sNetCacheDirReady = false;
+      if (!sNetCacheDirReady) {
+        sNetCacheDirReady = lakatosFsMkdir("/net/cache", true);
+      }
+      if (!lakatosFsWrite(cachePath, cacheBuf, totalCacheLen)) {
+        lakatosFsMkdir("/net/cache", true);
+        lakatosFsWrite(cachePath, cacheBuf, totalCacheLen);
+      }
+      free(cacheBuf);
+    }
+  }
+
+  return fetched;
 }
 
 struct LakatosVfsStream {
