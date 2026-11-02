@@ -25,7 +25,7 @@ push: lakatos apps
 	TODO
 
 lakat:
-	mkdir -p build
+	mkdir -p build build/flash build/sd build/net
 	GOWORK=off go build -o build/lakat ./cmd/lakat
 	GOWORK=off go build -o build/cyd-resize ./cmd/cyd-resize
 
@@ -62,4 +62,4 @@ monitor:
 
 clean:
 	$(PIO) run -t clean
-	rm -rf build/apps build/lakat build/cyd-resize
+	rm -rf build/apps build/flash build/sd build/net build/lakat build/cyd-resize

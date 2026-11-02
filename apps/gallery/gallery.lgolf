@@ -347,25 +347,35 @@ func showCurrentImage() {
 	}
 
 	tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H, BLACK)
-	if st != 2 || got <= 0 {
-		tft_set_text_color(RED, BLACK)
-		tft_draw_string("Failed to load image", 80, 110, 2)
-		return
-	}
-
-	// Decode and blast from the 64 KB RAM buffer to the TFT screen!
 	t0 := os_millis()
 	imgType := int(imgTypes[curIdx])
-	if imgType == 1 {
-		tft_draw_png(&imgBuf, got, -1, VIEW_Y)
-	} else {
-		tft_draw_jpg(&imgBuf, got, -1, VIEW_Y, 0)
+	drawn := false
+	if st == 2 && got > 0 {
+		// Decode and blast from the 64 KB RAM buffer to the TFT screen!
+		if imgType == 1 {
+			drawn = tft_draw_png(&imgBuf, got, -1, VIEW_Y)
+		} else {
+			drawn = tft_draw_jpg(&imgBuf, got, -1, VIEW_Y, 0)
+		}
+	}
+	if !drawn {
+		buildFullPath(curIdx)
+		if imgType == 1 {
+			drawn = tft_draw_png_file(pathSlice[0:pathLen], -1, VIEW_Y)
+		} else {
+			drawn = tft_draw_jpg_file(pathSlice[0:pathLen], -1, VIEW_Y, 0)
+		}
 	}
 	lastRenderMs = os_millis() - t0
 
-	truncated := imgSizes[curIdx] > BUF_MAX
-	drawBottomCaption(truncated)
-	println("[GALLERY] Displayed idx=", curIdx, "bytes=", got, "renderMs=", lastRenderMs)
+	if !drawn {
+		tft_set_text_color(RED, BLACK)
+		tft_draw_string("Failed to load image", 80, 110, 2)
+	} else {
+		truncated := (st == 2 && imgSizes[curIdx] > BUF_MAX)
+		drawBottomCaption(truncated)
+		println("[GALLERY] Displayed idx=", curIdx, "bytes=", got, "renderMs=", lastRenderMs)
+	}
 
 	// Immediately kick off Core 0 background prefetch for the NEXT image into imgBuf!
 	if imgCount > 1 {

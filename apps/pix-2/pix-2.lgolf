@@ -7,7 +7,7 @@ package main
 
 const (
 	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
-	MAX_IMAGES   = 48
+	MAX_IMAGES   = 32
 	NAME_STRIDE  = 64
 	ENTRY_SIZE   = 88 // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
 	ENTRY_SIZE_O = 64
@@ -19,7 +19,7 @@ const (
 
 var (
 	imgBuf   [BUF_MAX]byte
-	imgNames [3072]byte // MAX_IMAGES * NAME_STRIDE
+	imgNames [2048]byte // MAX_IMAGES * NAME_STRIDE
 	imgSizes [MAX_IMAGES]int
 	imgTypes [MAX_IMAGES]byte // 1 = PNG, 2 = JPG
 	imgCount int

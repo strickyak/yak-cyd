@@ -348,7 +348,16 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
     return false;
   }
 
-  PngDecoderState* st = (PngDecoderState*)calloc(1, sizeof(PngDecoderState));
+  bool dictFromArena = !lakatosIsNativeAppRunning() && (LAKATOS_APP_DRAM_SIZE >= TINFL_LZ_DICT_SIZE);
+  bool stFromArena   = dictFromArena &&
+                       (LAKATOS_APP_DRAM_SIZE >= TINFL_LZ_DICT_SIZE + sizeof(PngDecoderState));
+  PngDecoderState* st = nullptr;
+  if (stFromArena) {
+    st = (PngDecoderState*)(gLakatosAppRamArena + TINFL_LZ_DICT_SIZE);
+    memset(st, 0, sizeof(PngDecoderState));
+  } else {
+    st = (PngDecoderState*)calloc(1, sizeof(PngDecoderState));
+  }
   if (!st) {
     Serial.println("[Lakatos PNG] Out of memory for PngDecoderState");
     return false;
@@ -364,7 +373,6 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
                                    ? (tinfl_decompressor*)gLakatosPngScratch
                                    : (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
 
-  bool dictFromArena = !lakatosIsNativeAppRunning() && (LAKATOS_APP_DRAM_SIZE >= TINFL_LZ_DICT_SIZE);
   uint8_t* dict = dictFromArena ? gLakatosAppRamArena : (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
   constexpr size_t kInChunkSize = 4096;
   uint8_t* inBuf = (reader.memData != nullptr) ? nullptr : (uint8_t*)malloc(kInChunkSize);
@@ -377,7 +385,7 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
     if (inBuf) free(inBuf);
     if (!dictFromArena && dict) free(dict);
     if (!useScratch && decomp) free(decomp);
-    free(st);
+    if (!stFromArena) free(st);
     return false;
   }
 
@@ -603,7 +611,7 @@ static bool decodeAndRenderPng(PngReader& reader, int dstX, int dstY,
   if (!dictFromArena && dict) free(dict);
   if (!useScratch) free(decomp);
   bool success = gotIhdr && (st->curY > 0);
-  free(st);
+  if (!stFromArena) free(st);
   return success;
 }
 
@@ -632,6 +640,10 @@ bool lakatosDrawPngFile(const char* vfsPath, int x, int y) {
   PngReader reader;
   reader.stream = lakatosFsOpenRead(vfsPath);
   if (!reader.stream) return false;
+  if (x < 0) {
+    int boxY = (y >= 0 && y < LAKATOS_SCREEN_H) ? y : 0;
+    return decodeAndRenderPng(reader, 0, boxY, LAKATOS_SCREEN_W, LAKATOS_SCREEN_H - boxY);
+  }
   return decodeAndRenderPng(reader, x, y, 0, 0);
 }
 

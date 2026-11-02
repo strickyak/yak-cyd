@@ -387,8 +387,19 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
     }
     String body = http.getString();
     http.end();
+    const char* slash = strrchr(subPath.c_str(), '/');
+    const char* baseName = slash ? (slash + 1) : subPath.c_str();
     int totalCount = 0;
-    if (parseShLsBody(body, outEntry, 1, &totalCount) == 1 && totalCount == 1) {
+    int parsed = parseShLsBody(body, outEntry, 1, &totalCount);
+    if (parsed >= 0) {
+      if (totalCount == 1 && parsed == 1 && !outEntry->isDir &&
+          strcmp(outEntry->name, baseName) == 0) {
+        return true;
+      }
+      memset(outEntry, 0, sizeof(*outEntry));
+      strncpy(outEntry->name, baseName[0] ? baseName : "/", sizeof(outEntry->name) - 1);
+      outEntry->size = 4096;
+      outEntry->isDir = true;
       return true;
     }
     if (body.endsWith("\n") && body.indexOf('\n') == (int)body.length() - 1) {
@@ -474,6 +485,7 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   bool ok = false;
+  int httpCode = 0;
   if (b == VFS_LO || b == VFS_SD) {
     fs::FS* fsPtr = (b == VFS_LO) ? (fs::FS*)&LittleFS : (fs::FS*)&SD;
     if (b == VFS_LO && !gLoMounted) return false;
@@ -490,11 +502,17 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);
-    int code = http.sendRequest("PUT", (uint8_t*)buf, len);
+    httpCode = http.sendRequest("PUT", (uint8_t*)buf, len);
     http.end();
-    ok = (code >= 200 && code < 300);
+    ok = (httpCode >= 200 && httpCode < 300);
   }
-  lakatosDevLogf("VFS write %s (%u B) -> %s", path ? path : "", (unsigned)len, ok ? "OK" : "FAIL");
+  if (b == VFS_SH) {
+    lakatosDevLogf("VFS write %s (%u B) -> %s (HTTP %d)",
+                   path ? path : "", (unsigned)len, ok ? "OK" : "FAIL", httpCode);
+  } else {
+    lakatosDevLogf("VFS write %s (%u B) -> %s",
+                   path ? path : "", (unsigned)len, ok ? "OK" : "FAIL");
+  }
   return ok;
 }
 
@@ -913,7 +931,7 @@ int32_t lakatosFsStreamRead(LakatosVfsStream* s, void* buf, size_t len) {
         }
       } else {
         uint32_t now = millis();
-        if (now - lastYieldMs >= 40) {
+        if (now - lastYieldMs >= 5) {
           vTaskDelay(1);
           lastYieldMs = millis();
         } else {
@@ -1017,7 +1035,13 @@ static void prefetchWorkerTaskCore0(void* arg) {
         break;
       }
       if (got == 0) {
-        break; // EOF
+        if (s->contentLen > 0 && total < (size_t)s->contentLen && total < gPrefetchMaxLen) {
+          err = true;
+          if (s->backend == VFS_SH && s->httpPtr) {
+            s->httpPtr->setReuse(false);
+          }
+        }
+        break; // EOF or timeout
       }
       total += (size_t)got;
       gPrefetchBytesGot = (uint32_t)total;

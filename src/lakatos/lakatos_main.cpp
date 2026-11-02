@@ -1330,7 +1330,7 @@ static void handleSerialCommand() {
 
 void setup() {
   esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
-  Serial.setRxBufferSize(4096);
+  Serial.setRxBufferSize(1024);
   Serial.begin(115200);
   delay(80);
   Serial.println("\r\n================================================");

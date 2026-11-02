@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,6 +251,302 @@ func (b *TetherBridge) FuseRmdir(vfsPath string) error {
 	return err
 }
 
+// ReadPortLoop reads serial output from port, intercepts @@FUSE response lines
+// for b.handleFuseLine, and forwards any non-FUSE serial bytes to passthrough
+// (if non-nil).
+func (b *TetherBridge) ReadPortLoop(port io.Reader, passthrough io.Writer) {
+	buf := make([]byte, 1024)
+	var lineBuf bytes.Buffer
+	capturingFuse := false
+	const fusePrefix = "@@FUSE"
+
+	for {
+		n, rerr := port.Read(buf)
+		if n > 0 {
+			var outBytes []byte
+			for _, ch := range buf[:n] {
+				if !capturingFuse {
+					if ch == '@' {
+						capturingFuse = true
+						lineBuf.Reset()
+						lineBuf.WriteByte(ch)
+					} else {
+						outBytes = append(outBytes, ch)
+					}
+					continue
+				}
+
+				lineBuf.WriteByte(ch)
+				if lineBuf.Len() <= len(fusePrefix) {
+					if fusePrefix[:lineBuf.Len()] != lineBuf.String() {
+						// Not an @@FUSE packet; flush buffered bytes to passthrough.
+						// If the latest byte was '@', keep it as the start of a new candidate.
+						raw := lineBuf.Bytes()
+						if ch == '@' && len(raw) > 1 {
+							outBytes = append(outBytes, raw[:len(raw)-1]...)
+							lineBuf.Reset()
+							lineBuf.WriteByte('@')
+						} else {
+							outBytes = append(outBytes, raw...)
+							lineBuf.Reset()
+							capturingFuse = false
+						}
+					}
+					continue
+				}
+
+				if ch == '\n' {
+					b.handleFuseLine(lineBuf.String())
+					lineBuf.Reset()
+					capturingFuse = false
+				}
+			}
+			if len(outBytes) > 0 && passthrough != nil {
+				_, _ = passthrough.Write(outBytes)
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+}
+
+// WaitUntilReady polls STAT /flash (and STAT /net if vfsDest is under /net)
+// until the Lakatos serial @FUSE handler and required backend are ready
+// (handling any boot/Wi-Fi delay if opening the serial port reset the ESP32).
+func (b *TetherBridge) WaitUntilReady(vfsDest string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	flashReady := false
+	cleaned, _, _ := normalizeVfsDest(vfsDest)
+	needNet := cleaned == "/net" || strings.HasPrefix(cleaned, "/net/")
+
+	for time.Now().Before(deadline) {
+		if !flashReady {
+			_, err := b.callFuse("STAT /flash", 800*time.Millisecond)
+			if err != nil {
+				lastErr = err
+				time.Sleep(150 * time.Millisecond)
+				continue
+			}
+			flashReady = true
+		}
+		if needNet {
+			_, err := b.callFuse("LS /net", 2500*time.Millisecond)
+			if err != nil {
+				lastErr = err
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timeout")
+	}
+	return fmt.Errorf("device did not become ready for %s over serial: %w", vfsDest, lastErr)
+}
+
+func normalizeVfsDest(rawDest string) (cleaned string, trailingSlash bool, err error) {
+	s := strings.TrimSpace(strings.ReplaceAll(rawDest, "\\", "/"))
+	if s == "" {
+		return "", false, fmt.Errorf("empty VFS destination path")
+	}
+	if !strings.HasPrefix(s, "/") {
+		s = "/" + s
+	}
+	trailingSlash = strings.HasSuffix(s, "/")
+	cleaned = path.Clean(s)
+	validRoot := cleaned == "/flash" || strings.HasPrefix(cleaned, "/flash/") ||
+		cleaned == "/sd" || strings.HasPrefix(cleaned, "/sd/") ||
+		cleaned == "/net" || strings.HasPrefix(cleaned, "/net/")
+	if !validRoot {
+		return "", false, fmt.Errorf("VFS destination %q must start with /flash, /sd, or /net", rawDest)
+	}
+	return cleaned, trailingSlash, nil
+}
+
+// PushBytes uploads data (originally from srcBaseName) to vfsDest in the
+// Lakatos VFS using chunked @FUSE WRITE + COMMIT commands, returning the
+// resolved destination file path in the VFS.
+func (b *TetherBridge) PushBytes(srcBaseName string, data []byte, vfsDest string) (string, error) {
+	cleaned, trailingSlash, err := normalizeVfsDest(vfsDest)
+	if err != nil {
+		return "", err
+	}
+
+	targetPath := cleaned
+	if trailingSlash || cleaned == "/flash" || cleaned == "/sd" || cleaned == "/net" {
+		targetPath = path.Join(cleaned, srcBaseName)
+	} else if st, err := b.FuseStat(cleaned); err == nil && st.IsDir {
+		targetPath = path.Join(cleaned, srcBaseName)
+	}
+
+	parentDir := path.Dir(targetPath)
+	if parentDir != "/flash" && parentDir != "/sd" && parentDir != "/net" && parentDir != "/" && parentDir != "." {
+		if st, err := b.FuseStat(parentDir); err != nil || !st.IsDir {
+			_ = b.FuseMkdir(parentDir)
+		}
+	}
+
+	const maxChunk = 512
+	if len(data) == 0 {
+		if err := b.FuseWriteChunk(targetPath, "W", 0, nil); err != nil {
+			return targetPath, err
+		}
+	} else {
+		for offset := 0; offset < len(data); offset += maxChunk {
+			end := offset + maxChunk
+			if end > len(data) {
+				end = len(data)
+			}
+			mode := "A"
+			if offset == 0 {
+				mode = "W"
+			}
+			if err := b.FuseWriteChunk(targetPath, mode, uint32(offset), data[offset:end]); err != nil {
+				return targetPath, err
+			}
+		}
+	}
+
+	if err := b.FuseCommit(targetPath); err != nil {
+		return targetPath, err
+	}
+	return targetPath, nil
+}
+
+// findActiveLakatosFuseMount checks /proc/mounts for a live fuse.lakatos mount
+// (created by a running `lakat tether` process) and verifies it is responsive.
+func findActiveLakatosFuseMount() string {
+	mounts, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(mounts), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == "fuse.lakatos" {
+			mp := fields[1]
+			if st, err := os.Stat(filepath.Join(mp, "flash")); err == nil && st.IsDir() {
+				return mp
+			}
+		}
+	}
+	return ""
+}
+
+func pushViaFuseMount(mountPoint, srcBaseName string, data []byte, vfsDest string) (string, error) {
+	cleaned, trailingSlash, err := normalizeVfsDest(vfsDest)
+	if err != nil {
+		return "", err
+	}
+
+	targetPath := cleaned
+	hostPath := filepath.Join(mountPoint, strings.TrimPrefix(targetPath, "/"))
+	if trailingSlash || cleaned == "/flash" || cleaned == "/sd" || cleaned == "/net" {
+		targetPath = path.Join(cleaned, srcBaseName)
+		hostPath = filepath.Join(mountPoint, strings.TrimPrefix(targetPath, "/"))
+	} else if st, err := os.Stat(hostPath); err == nil && st.IsDir() {
+		targetPath = path.Join(cleaned, srcBaseName)
+		hostPath = filepath.Join(mountPoint, strings.TrimPrefix(targetPath, "/"))
+	}
+
+	parentDir := path.Dir(targetPath)
+	if parentDir != "/flash" && parentDir != "/sd" && parentDir != "/net" && parentDir != "/" && parentDir != "." {
+		_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
+	}
+
+	if err := os.WriteFile(hostPath, data, 0o644); err != nil {
+		return targetPath, err
+	}
+	return targetPath, nil
+}
+
+func cmdPush(args []string) {
+	fs := flag.NewFlagSet("push", flag.ExitOnError)
+	wire := fs.String("wire", "/dev/ttyUSB0", "Serial device connected to CYD (e.g. /dev/ttyUSB0 or /dev/ttyACM0)")
+	baud := fs.Uint("baud", 115200, "Serial baud rate")
+	quiet := fs.Bool("q", false, "Suppress output on success")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: lakat push [-wire /dev/ttyUSB0] [-baud 115200] [-q] SRC_FILEPATH VFS_DEST\n\n")
+		fmt.Fprintf(os.Stderr, "Uploads SRC_FILEPATH from the Linux PC to VFS_DEST (/flash/..., /sd/..., or /net/...)\n")
+		fmt.Fprintf(os.Stderr, "in the Lakatos VFS.\n\n")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+
+	if fs.NArg() != 2 {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	srcPath := fs.Arg(0)
+	vfsDest := fs.Arg(1)
+
+	st, err := os.Stat(srcPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
+		os.Exit(1)
+	}
+	if st.IsDir() {
+		fmt.Fprintf(os.Stderr, "lakat push: %s is a directory (expected a single file)\n", srcPath)
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
+		os.Exit(1)
+	}
+
+	srcBase := filepath.Base(srcPath)
+
+	// If a live `lakat tether` FUSE mount is active, write through it so we do
+	// not contend for the open serial port.
+	if mp := findActiveLakatosFuseMount(); mp != "" {
+		if targetPath, err := pushViaFuseMount(mp, srcBase, data, vfsDest); err == nil {
+			if !*quiet {
+				fmt.Printf("Pushed %s (%d bytes) -> %s (via %s)\n", srcPath, len(data), targetPath, mp)
+			}
+			return
+		}
+	}
+
+	options := OpenSerialOptions{
+		PortName:        *wire,
+		BaudRate:        *baud,
+		DataBits:        8,
+		StopBits:        1,
+		MinimumReadSize: 1,
+	}
+
+	port, err := OpenSerial(options)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lakat push: cannot open %s: %v\n", options.PortName, err)
+		os.Exit(1)
+	}
+	defer port.Close()
+
+	bridge := NewTetherBridge()
+	bridge.SetPort(port)
+	go bridge.ReadPortLoop(port, nil)
+
+	if err := bridge.WaitUntilReady(vfsDest, 15*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
+		os.Exit(1)
+	}
+
+	targetPath, err := bridge.PushBytes(srcBase, data, vfsDest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lakat push %s -> %s failed: %v\n", srcPath, targetPath, err)
+		os.Exit(1)
+	}
+
+	if !*quiet {
+		fmt.Printf("Pushed %s (%d bytes) -> %s\n", srcPath, len(data), targetPath)
+	}
+}
+
 func cmdTether(args []string) {
 	fs := flag.NewFlagSet("tether", flag.ExitOnError)
 	wire := fs.String("wire", "/dev/ttyUSB0", "Serial device connected to CYD (e.g. /dev/ttyUSB0 or /dev/ttyACM0)")
@@ -342,7 +639,6 @@ func cmdTether(args []string) {
 		}
 	}()
 
-	buf := make([]byte, 1024)
 	for {
 		port, err := OpenSerial(options)
 		if err != nil {
@@ -358,59 +654,7 @@ func cmdTether(args []string) {
 		fmt.Fprintf(os.Stderr, "[tether connected to %s @ %d baud]\n", options.PortName, options.BaudRate)
 		maybeStartFuse()
 
-		var lineBuf bytes.Buffer
-		capturingFuse := false
-		const fusePrefix = "@@FUSE"
-
-		for {
-			n, rerr := port.Read(buf)
-			if n > 0 {
-				var outBytes []byte
-				for _, b := range buf[:n] {
-					if !capturingFuse {
-						if b == '@' {
-							capturingFuse = true
-							lineBuf.Reset()
-							lineBuf.WriteByte(b)
-						} else {
-							outBytes = append(outBytes, b)
-						}
-						continue
-					}
-
-					lineBuf.WriteByte(b)
-					if lineBuf.Len() <= len(fusePrefix) {
-						if fusePrefix[:lineBuf.Len()] != lineBuf.String() {
-							// Not an @@FUSE packet; flush buffered bytes to stdout.
-							// If the latest byte was '@', keep it as the start of a new candidate.
-							raw := lineBuf.Bytes()
-							if b == '@' && len(raw) > 1 {
-								outBytes = append(outBytes, raw[:len(raw)-1]...)
-								lineBuf.Reset()
-								lineBuf.WriteByte('@')
-							} else {
-								outBytes = append(outBytes, raw...)
-								lineBuf.Reset()
-								capturingFuse = false
-							}
-						}
-						continue
-					}
-
-					if b == '\n' {
-						bridge.handleFuseLine(lineBuf.String())
-						lineBuf.Reset()
-						capturingFuse = false
-					}
-				}
-				if len(outBytes) > 0 {
-					_, _ = os.Stdout.Write(outBytes)
-				}
-			}
-			if rerr != nil {
-				break
-			}
-		}
+		bridge.ReadPortLoop(port, os.Stdout)
 
 		bridge.SetPort(nil)
 		_ = port.Close()

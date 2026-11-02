@@ -280,16 +280,16 @@ static inline uint32_t f32ToU32(float f) {
 }
 
 struct LCodeFuncMeta {
-  uint16_t argCount;
-  uint16_t localCount;
+  uint32_t argCount;
+  uint32_t localCount;
   uint32_t frameSize;
   uint32_t codeOffset;
   uint32_t codeSize;
-  uint16_t varSizeStart; // Index into varSizesPool
+  uint32_t varSizeStart; // Index into varSizesPool
 };
 
 struct LCodeCallFrame {
-  uint16_t funcIdx;
+  uint32_t funcIdx;
   int32_t  returnPC;
   uint32_t frameAddr;
 };
@@ -311,8 +311,8 @@ struct LCodeVM {
   int32_t        funcCount = 0;
   int32_t        entryFuncIdx = 0;
 
-  uint16_t       varSizesPool[kMaxVarPool];
-  uint16_t       localOffsetsPool[kMaxVarPool];
+  uint32_t       varSizesPool[kMaxVarPool];
+  uint32_t       localOffsetsPool[kMaxVarPool];
   int32_t        varPoolUsed = 0;
 
   uint32_t       globalSizes[kMaxGlobals];
@@ -1241,23 +1241,23 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     return false;
   }
 
-  // Place LCodeVM (~1.5 KB) + bytecode (~2.9 KB) in the upper ~4.5 KB of
-  // gLakatosPngScratch (above the 11,008-byte tinfl_decompressor region) when available
-  constexpr size_t kTinflReserved = 11008;
-  size_t vmAligned = (sizeof(LCodeVM) + 7u) & ~7u;
-  bool vmFromScratch = (gLakatosPngScratch != nullptr) &&
-                       (gLakatosPngScratchSize >= kTinflReserved + vmAligned);
-  LCodeVM* vm = nullptr;
-  if (vmFromScratch) {
-    vm = (LCodeVM*)(gLakatosPngScratch + kTinflReserved);
-    memset(vm, 0, sizeof(LCodeVM));
-  } else {
-    vm = (LCodeVM*)calloc(1, sizeof(LCodeVM));
+  // Allocate LCodeVM (~6.8 KB, all 32-bit aligned fields) from 32-bit IRAM first
+  // so it consumes 0 bytes of precious 8-bit DRAM heap and 0 bytes of gLakatosPngScratch.
+  static_assert(sizeof(LCodeVM) % sizeof(uint32_t) == 0, "LCodeVM must be 32-bit word aligned");
+  LCodeVM* vm = (LCodeVM*)heap_caps_malloc(sizeof(LCodeVM), MALLOC_CAP_32BIT);
+  if (!vm) {
+    vm = (LCodeVM*)malloc(sizeof(LCodeVM));
   }
   if (!vm) {
     free(arenaMem);
     if (outErrMsg) *outErrMsg = "Out of heap for LCodeVM struct";
     return false;
+  }
+  {
+    volatile uint32_t* p32 = (volatile uint32_t*)vm;
+    for (size_t w = 0; w < sizeof(LCodeVM) / sizeof(uint32_t); w++) {
+      p32[w] = 0;
+    }
   }
 
   vm->mem = arenaMem;
@@ -1292,7 +1292,7 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   for (uint16_t i = 0; i < funcCount; i++) {
     if (offset + 20 > payloadLen) {
       free(vm->mem);
-      if (!vmFromScratch) free(vm);
+      heap_caps_free(vm);
       lakatosPrefetchFree();
       if (outErrMsg) *outErrMsg = "Truncated LCOD function table";
       return false;
@@ -1309,19 +1309,19 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
 
     if (vm->varPoolUsed + localCount > kMaxVarPool) {
       free(vm->mem);
-      if (!vmFromScratch) free(vm);
+      heap_caps_free(vm);
       lakatosPrefetchFree();
       if (outErrMsg) *outErrMsg = "Too many local variables in LCOD";
       return false;
     }
 
-    uint16_t poolStart = (uint16_t)vm->varPoolUsed;
+    uint32_t poolStart = (uint32_t)vm->varPoolUsed;
     uint32_t mPos = metaOff;
     uint32_t lOff = 0;
     for (uint16_t v = 0; v < localCount; v++) {
       if (mPos + 4 > payloadLen) {
         free(vm->mem);
-        if (!vmFromScratch) free(vm);
+        heap_caps_free(vm);
         lakatosPrefetchFree();
         if (outErrMsg) *outErrMsg = "Truncated LCOD local metadata";
         return false;
@@ -1350,21 +1350,42 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
 
   if (maxMetaEnd + codeSize > payloadLen || codeSize == 0) {
     free(vm->mem);
-    if (!vmFromScratch) free(vm);
+    heap_caps_free(vm);
     lakatosPrefetchFree();
     if (outErrMsg) *outErrMsg = "Truncated LCOD bytecode section";
     return false;
   }
 
-  // `payload` is already resident in RAM (gLakatosAppRamArena or heap) for the entire
-  // duration of lakatosRunLCodeApp(), so point vm->code directly at payload + maxMetaEnd.
-  vm->codeBuf  = nullptr;
-  vm->code     = payload + maxMetaEnd;
+  // Copy bytecode out of `payload` (which resides in gLakatosAppRamArena and may be
+  // overwritten when lakatos_png.cpp uses gLakatosAppRamArena for its 32 KB LZ77 dict).
+  // Place bytecode in the upper ~4.5 KB of gLakatosPngScratch (above the 11,008-byte
+  // tinfl_decompressor region) when it fits, or allocate from heap otherwise.
+  constexpr size_t kTinflReserved = 11008;
+  bool codeFromScratch = (gLakatosPngScratch != nullptr) &&
+                         (gLakatosPngScratchSize >= kTinflReserved + codeSize);
+  if (codeFromScratch) {
+    uint8_t* codeDst = gLakatosPngScratch + kTinflReserved;
+    memcpy(codeDst, payload + maxMetaEnd, codeSize);
+    vm->codeBuf = nullptr;
+    vm->code    = codeDst;
+  } else {
+    vm->codeBuf = (uint8_t*)malloc(codeSize);
+    if (!vm->codeBuf) {
+      free(vm->mem);
+      heap_caps_free(vm);
+      lakatosPrefetchFree();
+      if (outErrMsg) *outErrMsg = "Out of heap for LCode bytecode";
+      return false;
+    }
+    memcpy(vm->codeBuf, payload + maxMetaEnd, codeSize);
+    vm->code = vm->codeBuf;
+  }
   vm->codeSize = codeSize;
 
   if (vm->entryFuncIdx < 0 || vm->entryFuncIdx >= vm->funcCount) {
+    if (vm->codeBuf) free(vm->codeBuf);
     free(vm->mem);
-    if (!vmFromScratch) free(vm);
+    heap_caps_free(vm);
     lakatosPrefetchFree();
     if (outErrMsg) *outErrMsg = "Invalid LCOD entry function";
     return false;
@@ -2150,6 +2171,6 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   lakatosPrefetchFree();
   if (vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);
-  if (!vmFromScratch) free(vm);
+  heap_caps_free(vm);
   return !hadErr;
 }

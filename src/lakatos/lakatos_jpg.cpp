@@ -108,13 +108,15 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
   ctx.dstX = x;
   ctx.dstY = y;
 
-  uint8_t* workBuf = (uint8_t*)malloc(kTjpgdWorkSize);
+  bool useScratch = (gLakatosPngScratch != nullptr) &&
+                    (gLakatosPngScratchSize >= kTjpgdWorkSize);
+  uint8_t* workBuf = useScratch ? gLakatosPngScratch : (uint8_t*)malloc(kTjpgdWorkSize);
   if (!workBuf) return false;
 
   JDEC jdec;
   JRESULT res = jd_prepare(&jdec, jpgInCallback, workBuf, kTjpgdWorkSize, &ctx);
   if (res != JDR_OK) {
-    free(workBuf);
+    if (!useScratch) free(workBuf);
     return false;
   }
 
@@ -137,7 +139,7 @@ bool decodeAndRenderJpg(JpgReaderContext& ctx, int x, int y, int scale,
   res = jd_decomp(&jdec, jpgOutCallback, (BYTE)scale);
 
   tft.setSwapBytes(prevSwap);
-  free(workBuf);
+  if (!useScratch) free(workBuf);
 
   lakatosDevLogf("JPG %ux%u scale=%d decode+draw=%lu ms",
                  (unsigned)jdec.width, (unsigned)jdec.height, scale,
@@ -160,7 +162,9 @@ bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight) {
   ctx.stream = lakatosFsOpenRead(vfsPath);
   if (!ctx.stream) return false;
 
-  uint8_t* workBuf = (uint8_t*)malloc(kTjpgdWorkSize);
+  bool useScratch = (gLakatosPngScratch != nullptr) &&
+                    (gLakatosPngScratchSize >= kTjpgdWorkSize);
+  uint8_t* workBuf = useScratch ? gLakatosPngScratch : (uint8_t*)malloc(kTjpgdWorkSize);
   if (!workBuf) return false;
 
   JDEC jdec;
@@ -171,7 +175,7 @@ bool lakatosJpgInfo(const char* vfsPath, int* outWidth, int* outHeight) {
     if (outHeight) *outHeight = (int)jdec.height;
   }
 
-  free(workBuf);
+  if (!useScratch) free(workBuf);
   return ok;
 }
 
@@ -184,7 +188,9 @@ bool lakatosJpgInfoMem(const uint8_t* data, size_t len, int* outWidth, int* outH
   ctx.memData = data;
   ctx.memLen  = len;
 
-  uint8_t* workBuf = (uint8_t*)malloc(kTjpgdWorkSize);
+  bool useScratch = (gLakatosPngScratch != nullptr) &&
+                    (gLakatosPngScratchSize >= kTjpgdWorkSize);
+  uint8_t* workBuf = useScratch ? gLakatosPngScratch : (uint8_t*)malloc(kTjpgdWorkSize);
   if (!workBuf) return false;
 
   JDEC jdec;
@@ -194,7 +200,7 @@ bool lakatosJpgInfoMem(const uint8_t* data, size_t len, int* outWidth, int* outH
     if (outWidth) *outWidth = (int)jdec.width;
     if (outHeight) *outHeight = (int)jdec.height;
   }
-  free(workBuf);
+  if (!useScratch) free(workBuf);
   return ok;
 }
 
@@ -203,6 +209,10 @@ bool lakatosDrawJpgFile(const char* vfsPath, int x, int y, int scale) {
   JpgReaderContext ctx;
   ctx.stream = lakatosFsOpenRead(vfsPath);
   if (!ctx.stream) return false;
+  if (x < 0) {
+    int boxY = (y >= 0 && y < LAKATOS_SCREEN_H) ? y : 0;
+    return decodeAndRenderJpg(ctx, 0, boxY, 0, LAKATOS_SCREEN_W, LAKATOS_SCREEN_H - boxY);
+  }
   return decodeAndRenderJpg(ctx, x, y, scale, 0, 0);
 }
 

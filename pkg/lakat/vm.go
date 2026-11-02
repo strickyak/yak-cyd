@@ -115,6 +115,7 @@ func NewVM(lappOrLcod []byte) (*VM, error) {
 		SerialNumber: "ing",
 		ShUrl:        "http://pizga.net:1908/",
 		Stdout:       os.Stdout,
+		VfsRoot:      "build",
 	}
 	if err := vm.loadModule(payload); err != nil {
 		return nil, err

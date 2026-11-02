@@ -24,7 +24,9 @@ Commands:
   dis       Disassemble an LCode .lapp or LCOD binary into .lasm assembly
   run       Run an LCode .lapp binary in the headless 320x240 RGB565 emulator
   upload    Upload a .lapp binary to the Lakatos Superhighway HTTP server
+  push      Upload a file from the Linux PC to a destination in the Lakatos VFS (/flash, /sd, /net)
   tether    Connect to CYD over USB serial (--wire=/dev/ttyUSB0), stream logs, and send stdin commands
+  imagine   Recursively resize images in SRC_DIR into 320x240 PNG or JPEG files in DEST_DIR
 `)
 	os.Exit(2)
 }
@@ -229,7 +231,7 @@ func cmdRun(args []string) {
 	steps := fs.Int("steps", 500000, "Maximum VM instructions to execute")
 	ascii := fs.Bool("ascii", false, "Print an ASCII art preview of the 320x240 TFT screen")
 	dumpPPM := fs.String("dump-ppm", "", "Write 320x240 RGB565 framebuffer to a .ppm image file")
-	vfsRoot := fs.String("vfs", ".", "Host root directory mapped to VFS /flash, /sd, /net")
+	vfsRoot := fs.String("vfs", "build", "Host root directory mapped to VFS /flash, /sd, /net")
 	var taps tapFlag
 	fs.Var(&taps, "tap", "Inject a touchscreen tap x,y (may be repeated)")
 	fs.Parse(args)
@@ -250,6 +252,11 @@ func cmdRun(args []string) {
 	}
 	vm.MaxInstructions = *steps
 	vm.VfsRoot = *vfsRoot
+	if *vfsRoot != "" {
+		for _, sub := range []string{"flash", "sd", "net"} {
+			_ = os.MkdirAll(filepath.Join(*vfsRoot, sub), 0o755)
+		}
+	}
 	var stdoutBuf bytes.Buffer
 	vm.Stdout = &stdoutBuf
 
@@ -366,8 +373,12 @@ func main() {
 		cmdRun(os.Args[2:])
 	case "upload":
 		cmdUpload(os.Args[2:])
+	case "push":
+		cmdPush(os.Args[2:])
 	case "tether":
 		cmdTether(os.Args[2:])
+	case "imagine":
+		cmdImagine(os.Args[2:])
 	default:
 		usage()
 	}
