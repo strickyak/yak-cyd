@@ -76,6 +76,7 @@ void        lakatosSetDeveloperMode(bool en);
 bool        lakatosGetTouchSpotEnabled();
 void        lakatosSetTouchSpotEnabled(bool en);
 void        lakatosDevLogf(const char* fmt, ...);
+void        lakatosPollSerialFuse();
 bool        lakatosFormatLocalTime(char* buf, size_t len, const char* fmt);
 int64_t     lakatosGetUnixTime();
 bool        lakatosWifiIsConnected();

@@ -377,6 +377,19 @@ static void drawLoaderStatusBox(const char* title, const char* detail, int pct) 
   tft.setTextDatum(TL_DATUM);
 }
 
+static __attribute__((noinline)) bool verifyPayloadSha256(const uint8_t* payloadBuf,
+                                                          uint32_t payloadLen,
+                                                          const uint8_t expectedSha[32]) {
+  uint8_t calcSha[32];
+  mbedtls_sha256_context shaCtx;
+  mbedtls_sha256_init(&shaCtx);
+  mbedtls_sha256_starts(&shaCtx, 0);
+  mbedtls_sha256_update(&shaCtx, payloadBuf, payloadLen);
+  mbedtls_sha256_finish(&shaCtx, calcSha);
+  mbedtls_sha256_free(&shaCtx);
+  return memcmp(calcSha, expectedSha, 32) == 0;
+}
+
 bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErrMsg) {
   if (!gAppSlotPart) {
     if (outErrMsg) *outErrMsg = "app_slot partition missing";
@@ -386,7 +399,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   drawLoaderStatusBox("LAKATOS APP LOADER", vfsPath, 5);
 
   // 1. Read and validate 128-byte .lapp header from VFS
-  LakatosAppHeader hdr;
+  static LakatosAppHeader hdr;
   memset(&hdr, 0, sizeof(hdr));
   int32_t hdrGot = lakatosFsRead(vfsPath, 0, &hdr, sizeof(hdr));
   if (hdrGot != (int32_t)sizeof(hdr)) {
@@ -447,15 +460,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
       readOff += (uint32_t)got;
     }
 
-    uint8_t calcSha[32];
-    mbedtls_sha256_context shaCtx;
-    mbedtls_sha256_init(&shaCtx);
-    mbedtls_sha256_starts(&shaCtx, 0);
-    mbedtls_sha256_update(&shaCtx, payloadBuf, payloadLen);
-    mbedtls_sha256_finish(&shaCtx, calcSha);
-    mbedtls_sha256_free(&shaCtx);
-
-    if (memcmp(calcSha, hdr.sha256, 32) != 0) {
+    if (!verifyPayloadSha256(payloadBuf, payloadLen, hdr.sha256)) {
       if (heapAllocated) free(payloadBuf);
       if (outErrMsg) *outErrMsg = "LCode SHA-256 verification failed";
       return false;

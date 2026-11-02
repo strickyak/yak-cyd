@@ -920,6 +920,7 @@ static void launchAppAndRestoreShell(const char* appPath) {
   String errMsg;
   bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
   lakatosWaitTouchRelease();
+  refreshDirectory();
   if (ok) {
     lakatosDevLogf("App Exited: %s (code=%d)", appPath, exitCode);
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
@@ -929,8 +930,301 @@ static void launchAppAndRestoreShell(const char* appPath) {
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Err: %s", errMsg.c_str());
     lakatosSetRgbLed(true, false, false, 400);
   }
-  refreshDirectory();
   drawShellScreen();
+}
+
+// ---------------------------------------------------------------------------
+// Serial FUSE Bridge (@FUSE <seq> <op> ...) for `lakat tether` (/tmp/lakatos)
+// ---------------------------------------------------------------------------
+static const char kB64Alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static String fuseBase64Encode(const uint8_t* data, size_t len) {
+  if (!data || len == 0) return "-";
+  String out;
+  out.reserve(((len + 2) / 3) * 4 + 1);
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t v = ((uint32_t)data[i]) << 16;
+    if (i + 1 < len) v |= ((uint32_t)data[i + 1]) << 8;
+    if (i + 2 < len) v |= (uint32_t)data[i + 2];
+    out += kB64Alphabet[(v >> 18) & 0x3F];
+    out += kB64Alphabet[(v >> 12) & 0x3F];
+    out += (i + 1 < len) ? kB64Alphabet[(v >> 6) & 0x3F] : '=';
+    out += (i + 2 < len) ? kB64Alphabet[v & 0x3F] : '=';
+  }
+  return out;
+}
+
+static inline int fuseB64Val(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static size_t fuseBase64Decode(const char* in, size_t inLen, uint8_t* out, size_t maxOut) {
+  if (!in || inLen == 0 || (inLen == 1 && in[0] == '-')) return 0;
+  size_t outLen = 0;
+  uint32_t val = 0;
+  int valb = -8;
+  for (size_t i = 0; i < inLen; i++) {
+    char c = in[i];
+    if (c == '=' || c == '\r' || c == '\n' || c == ' ') continue;
+    int d = fuseB64Val(c);
+    if (d < 0) continue;
+    val = (val << 6) | (uint32_t)d;
+    valb += 6;
+    if (valb >= 0) {
+      if (outLen < maxOut) {
+        out[outLen++] = (uint8_t)((val >> valb) & 0xFF);
+      }
+      valb -= 8;
+    }
+  }
+  return outLen;
+}
+
+static String   gFuseNetWritePath;
+static uint8_t* gFuseNetWriteBuf   = nullptr;
+static size_t   gFuseNetWriteCap   = 0;
+static size_t   gFuseNetWriteLen   = 0;
+static bool     gFuseNetWriteDirty = false;
+static bool     gShellNeedsRefresh = false;
+
+static void handleFuseCommand(const String& line) {
+  // Format: @FUSE <seq> <op> [args...]
+  String rest = line.substring(6);
+  rest.trim();
+  int sp1 = rest.indexOf(' ');
+  if (sp1 <= 0) return;
+  String seq = rest.substring(0, sp1);
+  String rem = rest.substring(sp1 + 1);
+  rem.trim();
+
+  int sp2 = rem.indexOf(' ');
+  String op = (sp2 > 0) ? rem.substring(0, sp2) : rem;
+  String args = (sp2 > 0) ? rem.substring(sp2 + 1) : "";
+  args.trim();
+
+  if (op == "STAT") {
+    if (args == "/flash" || args == "/sd" || args == "/net") {
+      Serial.printf("@@FUSE %s OK 1 4096 0\r\n", seq.c_str());
+      return;
+    }
+    LakatosFsEntry st;
+    if (lakatosFsStat(args.c_str(), &st)) {
+      Serial.printf("@@FUSE %s OK %d %lld %lld\r\n",
+                    seq.c_str(), st.isDir ? 1 : 0,
+                    (long long)st.size, (long long)st.mtime);
+    } else {
+      Serial.printf("@@FUSE %s ERR ENOENT\r\n", seq.c_str());
+    }
+  } else if (op == "LS") {
+    LakatosFsEntry* entries = (LakatosFsEntry*)malloc(sizeof(LakatosFsEntry) * 64);
+    if (!entries) {
+      Serial.printf("@@FUSE %s ERR ENOMEM\r\n", seq.c_str());
+      return;
+    }
+    int n = lakatosFsLs(args.c_str(), entries, 64);
+    if (n < 0) {
+      free(entries);
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      return;
+    }
+    for (int i = 0; i < n; i++) {
+      Serial.printf("@@FUSE_ENT %s %d %lld %lld %s\r\n",
+                    seq.c_str(), entries[i].isDir ? 1 : 0,
+                    (long long)entries[i].size, (long long)entries[i].mtime,
+                    entries[i].name);
+    }
+    free(entries);
+    Serial.printf("@@FUSE %s OK %d\r\n", seq.c_str(), n);
+  } else if (op == "READ") {
+    // args: <path> <offset> <length>
+    int lastSp = args.lastIndexOf(' ');
+    if (lastSp <= 0) {
+      Serial.printf("@@FUSE %s ERR EINVAL\r\n", seq.c_str());
+      return;
+    }
+    String beforeLen = args.substring(0, lastSp);
+    beforeLen.trim();
+    int prevSp = beforeLen.lastIndexOf(' ');
+    if (prevSp <= 0) {
+      Serial.printf("@@FUSE %s ERR EINVAL\r\n", seq.c_str());
+      return;
+    }
+    String path = beforeLen.substring(0, prevSp);
+    path.trim();
+    uint32_t offset = (uint32_t)strtoul(beforeLen.substring(prevSp + 1).c_str(), nullptr, 10);
+    size_t reqLen = (size_t)strtoul(args.substring(lastSp + 1).c_str(), nullptr, 10);
+    if (reqLen > 1024) reqLen = 1024;
+    if (reqLen == 0) {
+      Serial.printf("@@FUSE %s OK 0 -\r\n", seq.c_str());
+      return;
+    }
+    uint8_t* buf = (uint8_t*)malloc(reqLen);
+    if (!buf) {
+      Serial.printf("@@FUSE %s ERR ENOMEM\r\n", seq.c_str());
+      return;
+    }
+    int32_t got = lakatosFsRead(path.c_str(), offset, buf, reqLen);
+    if (got < 0) {
+      free(buf);
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      return;
+    }
+    String b64 = fuseBase64Encode(buf, (size_t)got);
+    free(buf);
+    Serial.printf("@@FUSE %s OK %ld %s\r\n", seq.c_str(), (long)got, b64.c_str());
+  } else if (op == "WRITE") {
+    // args: <path> <mode:W|A> <offset> <b64>
+    int spB64 = args.lastIndexOf(' ');
+    if (spB64 <= 0) {
+      Serial.printf("@@FUSE %s ERR EINVAL\r\n", seq.c_str());
+      return;
+    }
+    String b64 = args.substring(spB64 + 1);
+    String beforeB64 = args.substring(0, spB64);
+    beforeB64.trim();
+
+    int spOff = beforeB64.lastIndexOf(' ');
+    if (spOff <= 0) {
+      Serial.printf("@@FUSE %s ERR EINVAL\r\n", seq.c_str());
+      return;
+    }
+    uint32_t offset = (uint32_t)strtoul(beforeB64.substring(spOff + 1).c_str(), nullptr, 10);
+    String beforeOff = beforeB64.substring(0, spOff);
+    beforeOff.trim();
+
+    int spMode = beforeOff.lastIndexOf(' ');
+    if (spMode <= 0) {
+      Serial.printf("@@FUSE %s ERR EINVAL\r\n", seq.c_str());
+      return;
+    }
+    String mode = beforeOff.substring(spMode + 1);
+    String path = beforeOff.substring(0, spMode);
+    path.trim();
+
+    size_t maxDec = (b64.length() * 3) / 4 + 4;
+    uint8_t* raw = (uint8_t*)malloc(maxDec > 0 ? maxDec : 1);
+    if (!raw) {
+      Serial.printf("@@FUSE %s ERR ENOMEM\r\n", seq.c_str());
+      return;
+    }
+    size_t decLen = fuseBase64Decode(b64.c_str(), b64.length(), raw, maxDec);
+
+    if (strncmp(path.c_str(), "/net/", 5) == 0) {
+      if (mode == "W" || gFuseNetWritePath != path) {
+        gFuseNetWritePath  = path;
+        gFuseNetWriteLen   = 0;
+        gFuseNetWriteDirty = true;
+      }
+      size_t needed = (size_t)offset + decLen;
+      if (needed > 98304) {
+        free(raw);
+        Serial.printf("@@FUSE %s ERR EFBIG\r\n", seq.c_str());
+        return;
+      }
+      if (needed > gFuseNetWriteCap) {
+        size_t nextCap = (needed < 4096) ? 4096 : needed;
+        uint8_t* nb = (uint8_t*)realloc(gFuseNetWriteBuf, nextCap);
+        if (!nb) {
+          free(raw);
+          Serial.printf("@@FUSE %s ERR ENOMEM\r\n", seq.c_str());
+          return;
+        }
+        if (nextCap > gFuseNetWriteCap) {
+          memset(nb + gFuseNetWriteCap, 0, nextCap - gFuseNetWriteCap);
+        }
+        gFuseNetWriteBuf = nb;
+        gFuseNetWriteCap = nextCap;
+      }
+      if (decLen > 0) {
+        memcpy(gFuseNetWriteBuf + offset, raw, decLen);
+      }
+      if (needed > gFuseNetWriteLen) {
+        gFuseNetWriteLen = needed;
+      }
+      gFuseNetWriteDirty = true;
+      free(raw);
+      Serial.printf("@@FUSE %s OK %u\r\n", seq.c_str(), (unsigned)decLen);
+      return;
+    }
+
+    bool ok = false;
+    if (mode == "W" && offset == 0) {
+      ok = lakatosFsWrite(path.c_str(), raw, decLen);
+    } else if (decLen == 0) {
+      ok = true;
+    } else {
+      ok = lakatosFsWriteAt(path.c_str(), offset, raw, decLen);
+    }
+    free(raw);
+    if (ok) {
+      Serial.printf("@@FUSE %s OK %u\r\n", seq.c_str(), (unsigned)decLen);
+    } else {
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+    }
+  } else if (op == "COMMIT") {
+    bool ok = true;
+    if (strncmp(args.c_str(), "/net/", 5) == 0 && gFuseNetWriteDirty && gFuseNetWritePath == args) {
+      ok = lakatosFsWrite(args.c_str(),
+                          gFuseNetWriteBuf ? gFuseNetWriteBuf : (const uint8_t*)"",
+                          gFuseNetWriteLen);
+      if (gFuseNetWriteBuf) {
+        free(gFuseNetWriteBuf);
+        gFuseNetWriteBuf = nullptr;
+      }
+      gFuseNetWriteCap   = 0;
+      gFuseNetWriteLen   = 0;
+      gFuseNetWriteDirty = false;
+      gFuseNetWritePath  = "";
+    }
+    gShellNeedsRefresh = true;
+    if (ok) {
+      Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
+    } else {
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+    }
+  } else if (op == "RM") {
+    bool ok = lakatosFsRm(args.c_str());
+    if (ok) {
+      gShellNeedsRefresh = true;
+      Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
+    } else {
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+    }
+  } else if (op == "MKDIR") {
+    bool ok = lakatosFsMkdir(args.c_str(), true);
+    if (ok) {
+      gShellNeedsRefresh = true;
+      Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
+    } else {
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+    }
+  } else if (op == "RMDIR") {
+    bool ok = lakatosFsRmdir(args.c_str());
+    if (ok) {
+      gShellNeedsRefresh = true;
+      Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
+    } else {
+      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+    }
+  } else {
+    Serial.printf("@@FUSE %s ERR ENOSYS\r\n", seq.c_str());
+  }
+}
+
+void lakatosPollSerialFuse() {
+  while (Serial.available() > 0 && Serial.peek() == '@') {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("@FUSE ")) {
+      handleFuseCommand(line);
+    }
+  }
 }
 
 static void handleSerialCommand() {
@@ -938,6 +1232,11 @@ static void handleSerialCommand() {
   String line = Serial.readStringUntil('\n');
   line.trim();
   if (line.length() == 0) return;
+
+  if (line.startsWith("@FUSE ")) {
+    handleFuseCommand(line);
+    return;
+  }
 
   if (line == "info") {
     Serial.printf("Lakatos OS v%u | ID: %s%s | Airport: %s | URL: %s | Wi-Fi: %s | Heap: %u\r\n",
@@ -952,14 +1251,17 @@ static void handleSerialCommand() {
     String path = line.substring(2);
     path.trim();
     if (path.length() == 0) path = gCurPath;
-    LakatosFsEntry entries[32];
-    int n = lakatosFsLs(path.c_str(), entries, 32);
-    Serial.printf("LS %s -> %d entries\r\n", path.c_str(), n);
-    for (int i = 0; i < n; i++) {
-      Serial.printf("  %s %-24s %lld\r\n",
-                    entries[i].isDir ? "[DIR] " : "[FILE]",
-                    entries[i].name,
-                    (long long)entries[i].size);
+    LakatosFsEntry* entries = (LakatosFsEntry*)malloc(sizeof(LakatosFsEntry) * 32);
+    if (entries) {
+      int n = lakatosFsLs(path.c_str(), entries, 32);
+      Serial.printf("LS %s -> %d entries\r\n", path.c_str(), n);
+      for (int i = 0; i < n; i++) {
+        Serial.printf("  %s %-24s %lld\r\n",
+                      entries[i].isDir ? "[DIR] " : "[FILE]",
+                      entries[i].name,
+                      (long long)entries[i].size);
+      }
+      free(entries);
     }
   } else if (line.startsWith("run ")) {
     String path = line.substring(4);
@@ -974,19 +1276,20 @@ static void handleSerialCommand() {
       String dst = args.substring(sp + 1);
       src.trim();
       dst.trim();
-      LakatosFsEntry st;
-      if (lakatosFsStat(src.c_str(), &st) && !st.isDir && st.size > 0 && st.size <= 65536) {
-        uint8_t* buf = (uint8_t*)malloc((size_t)st.size);
+      LakatosFsEntry* st = (LakatosFsEntry*)malloc(sizeof(LakatosFsEntry));
+      if (st && lakatosFsStat(src.c_str(), st) && !st->isDir && st->size > 0 && st->size <= 65536) {
+        uint8_t* buf = (uint8_t*)malloc((size_t)st->size);
         if (buf) {
-          int32_t got = lakatosFsRead(src.c_str(), 0, buf, (size_t)st.size);
-          bool ok = (got == (int32_t)st.size) && lakatosFsWrite(dst.c_str(), buf, (size_t)st.size);
+          int32_t got = lakatosFsRead(src.c_str(), 0, buf, (size_t)st->size);
+          bool ok = (got == (int32_t)st->size) && lakatosFsWrite(dst.c_str(), buf, (size_t)st->size);
           free(buf);
           Serial.printf("CP %s -> %s (%lld bytes): %s\r\n",
-                        src.c_str(), dst.c_str(), (long long)st.size, ok ? "OK" : "FAILED");
+                        src.c_str(), dst.c_str(), (long long)st->size, ok ? "OK" : "FAILED");
         }
       } else {
         Serial.printf("CP stat failed for %s\r\n", src.c_str());
       }
+      if (st) free(st);
     }
   } else if (line.startsWith("netpass ") || line.startsWith("shpass ")) {
     int pfx = line.startsWith("netpass ") ? 8 : 7;
@@ -999,11 +1302,13 @@ static void handleSerialCommand() {
   } else if (line.startsWith("preview ")) {
     String path = line.substring(8);
     path.trim();
-    LakatosFsEntry dummy;
-    memset(&dummy, 0, sizeof(dummy));
-    const char* slash = strrchr(path.c_str(), '/');
-    strncpy(dummy.name, slash ? (slash + 1) : path.c_str(), sizeof(dummy.name) - 1);
-    showFileModal(path.c_str(), dummy, false);
+    LakatosFsEntry* dummy = (LakatosFsEntry*)calloc(1, sizeof(LakatosFsEntry));
+    if (dummy) {
+      const char* slash = strrchr(path.c_str(), '/');
+      strncpy(dummy->name, slash ? (slash + 1) : path.c_str(), sizeof(dummy->name) - 1);
+      showFileModal(path.c_str(), *dummy, false);
+      free(dummy);
+    }
   } else if (line == "config") {
     runLakatosConfigScreen(false);
     refreshDirectory();
@@ -1025,6 +1330,7 @@ static void handleSerialCommand() {
 
 void setup() {
   esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+  Serial.setRxBufferSize(4096);
   Serial.begin(115200);
   delay(80);
   Serial.println("\r\n================================================");
@@ -1063,6 +1369,11 @@ void loop() {
   updateLakatosConfigBackground();
   lakatosUpdateRgbLed();
   handleSerialCommand();
+  if (gShellNeedsRefresh) {
+    gShellNeedsRefresh = false;
+    refreshDirectory();
+    drawShellScreen();
+  }
 
   // Periodically update clock and Wi-Fi indicator in top header bar
   bool wifiNow = lakatosWifiIsConnected();

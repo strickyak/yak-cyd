@@ -252,6 +252,7 @@ void updateLakatosConfigBackground() {
     gNtpStarted = true;
     configTzTime(gAirportTz, "pool.ntp.org", "time.nist.gov");
   }
+  lakatosPollSerialFuse();
 }
 
 const char* lakatosGetAirportCode() { return gAirportCode; }

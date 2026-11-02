@@ -4,6 +4,7 @@
 
 #include <HTTPClient.h>
 #include <LittleFS.h>
+#include <NetworkClientSecure.h>
 #include <SD.h>
 #include <SPI.h>
 #include <WiFi.h>
@@ -634,19 +635,44 @@ int64_t lakatosFsDu(const char* path) {
 
 int lakatosHttpGet(const char* url, void* buf, size_t maxLen) {
   if (!url || !buf || maxLen == 0 || WiFi.status() != WL_CONNECTED) return -1;
-  WiFiClient client;
+  lakatosDevLogf("HTTP GET %s (max=%u, freeHeap=%u)",
+                 url, (unsigned)maxLen, (unsigned)ESP.getFreeHeap());
+  bool isHttps = (strncmp(url, "https://", 8) == 0);
+  WiFiClient plainClient;
+  NetworkClientSecure secureClient;
   HTTPClient http;
-  if (!http.begin(client, url)) return -1;
+  http.useHTTP10(true);
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setUserAgent("Lakatos-CYD/1.0");
+
+  bool begun = false;
+  if (isHttps) {
+    secureClient.setInsecure();
+    begun = http.begin(secureClient, url);
+  } else {
+    begun = http.begin(plainClient, url);
+  }
+  if (!begun) {
+    lakatosDevLogf("HTTP GET begin failed: %s", url);
+    return -1;
+  }
+
   int code = http.GET();
   if (code < 200 || code >= 300) {
+    lakatosDevLogf("HTTP GET status=%d: %s", code, url);
     http.end();
     return -code;
   }
+  int contentLen = http.getSize();
   WiFiClient* stream = http.getStreamPtr();
   size_t total = 0;
   uint32_t startMs = millis();
-  while (http.connected() && total < maxLen && (millis() - startMs < 6000)) {
-    size_t avail = stream->available();
+  while ((http.connected() || (stream && stream->available() > 0)) &&
+         total < maxLen &&
+         (contentLen < 0 || total < (size_t)contentLen) &&
+         (millis() - startMs < 4000)) {
+    size_t avail = stream ? stream->available() : 0;
     if (avail > 0) {
       size_t chunk = (avail > (maxLen - total)) ? (maxLen - total) : avail;
       int r = stream->read((uint8_t*)buf + total, chunk);
@@ -655,10 +681,14 @@ int lakatosHttpGet(const char* url, void* buf, size_t maxLen) {
         startMs = millis();
       }
     } else {
-      delayMicroseconds(150);
+      delayMicroseconds(200);
     }
   }
+  if (total < maxLen) {
+    ((uint8_t*)buf)[total] = 0;
+  }
   http.end();
+  lakatosDevLogf("HTTP GET ok -> %u B (code=%d)", (unsigned)total, code);
   return (int)total;
 }
 

@@ -227,11 +227,11 @@ static constexpr uint32_t kNullGuardSize   = 256;
 static constexpr uint32_t kStringPoolBase  = 0x0100;
 static constexpr uint32_t kOsScratchSize   = 512;
 static constexpr uint32_t kHeapBlockHdrLen = 8;
-static constexpr int      kMaxEvalStack    = 64;
-static constexpr int      kMaxCallDepth    = 24;
-static constexpr int      kMaxFuncs        = 32;
-static constexpr int      kMaxGlobals      = 48;
-static constexpr int      kMaxVarPool      = 96;
+static constexpr int      kMaxEvalStack    = 96;
+static constexpr int      kMaxCallDepth    = 32;
+static constexpr int      kMaxFuncs        = 96;
+static constexpr int      kMaxGlobals      = 96;
+static constexpr int      kMaxVarPool      = 384;
 
 static inline __attribute__((always_inline)) uint16_t readU16LE(const uint8_t* p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -1035,6 +1035,8 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   uint32_t codeSize     = readU32LE(payload + 20);
 
   if (globalsCount > kMaxGlobals || funcCount > kMaxFuncs) {
+    Serial.printf("[Lakatos LCode] Table limits exceeded: globals=%u (max %d), funcs=%u (max %d)\r\n",
+                  (unsigned)globalsCount, kMaxGlobals, (unsigned)funcCount, kMaxFuncs);
     if (outErrMsg) *outErrMsg = "LCOD table limits exceeded";
     return false;
   }
@@ -1193,28 +1195,13 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     return false;
   }
 
-  bool codeFromScratch = false;
-  uint8_t* codeDst = nullptr;
-  if (vmFromScratch && (kTinflReserved + vmAligned + codeSize <= gLakatosPngScratchSize)) {
-    codeDst = gLakatosPngScratch + kTinflReserved + vmAligned;
-    codeFromScratch = true;
-  } else {
-    codeDst = (uint8_t*)malloc(codeSize);
-    vm->codeBuf = codeDst;
-  }
-  if (!codeDst) {
-    free(vm->mem);
-    if (!vmFromScratch) free(vm);
-    lakatosPrefetchFree();
-    if (outErrMsg) *outErrMsg = "Out of heap for LCode bytecode";
-    return false;
-  }
-  memcpy(codeDst, payload + maxMetaEnd, codeSize);
-  vm->code     = codeDst;
+  // `payload` is already resident in RAM (gLakatosAppRamArena or heap) for the entire
+  // duration of lakatosRunLCodeApp(), so point vm->code directly at payload + maxMetaEnd.
+  vm->codeBuf  = nullptr;
+  vm->code     = payload + maxMetaEnd;
   vm->codeSize = codeSize;
 
   if (vm->entryFuncIdx < 0 || vm->entryFuncIdx >= vm->funcCount) {
-    if (!codeFromScratch && vm->codeBuf) free(vm->codeBuf);
     free(vm->mem);
     if (!vmFromScratch) free(vm);
     lakatosPrefetchFree();
@@ -2000,7 +1987,7 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   }
 
   lakatosPrefetchFree();
-  if (!codeFromScratch && vm->codeBuf) free(vm->codeBuf);
+  if (vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);
   if (!vmFromScratch) free(vm);
   return !hadErr;

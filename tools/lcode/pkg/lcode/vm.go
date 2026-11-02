@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1438,6 +1439,23 @@ func (vm *VM) execSyscall(sysId byte) error {
 
 	case SysGetAirport:
 		vm.pushScratchString(vm.AirportCode)
+	case SysGetAirportInfo:
+		outAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if err := vm.checkAddr(outAddr, 68); err != nil {
+			return err
+		}
+		for i := 0; i < 68; i++ {
+			vm.Memory[int(outAddr)+i] = 0
+		}
+		copy(vm.Memory[outAddr:outAddr+3], []byte(vm.AirportCode))
+		copy(vm.Memory[outAddr+4:outAddr+27], []byte("Portland, OR"))
+		copy(vm.Memory[outAddr+28:outAddr+59], []byte("PST8PDT,M3.2.0,M11.1.0"))
+		binary.LittleEndian.PutUint32(vm.Memory[outAddr+60:outAddr+64], math.Float32bits(45.5898))
+		binary.LittleEndian.PutUint32(vm.Memory[outAddr+64:outAddr+68], math.Float32bits(-122.5951))
+		vm.push(1)
 	case SysGetDeviceName:
 		vm.pushScratchString(vm.DeviceName)
 	case SysGetSerialNumber:
@@ -2063,6 +2081,41 @@ func (vm *VM) execSyscall(sysId byte) error {
 		vm.push(0)
 	case SysWifiConnected:
 		vm.push(1)
+	case SysHttpGet:
+		maxLen, _ := vm.pop()
+		bufAddr, _ := vm.pop()
+		urlStr, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if maxLen == 0 {
+			vm.push(0)
+			return nil
+		}
+		if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
+			return err
+		}
+		client := &http.Client{Timeout: 6 * time.Second}
+		resp, err := client.Get(urlStr)
+		if err != nil {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			vm.push(uint32(int32(-resp.StatusCode)))
+			return nil
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLen)))
+		if err != nil {
+			vm.push(0xFFFFFFFF)
+			return nil
+		}
+		copy(vm.Memory[bufAddr:int(bufAddr)+len(body)], body)
+		if len(body) < int(maxLen) {
+			vm.Memory[int(bufAddr)+len(body)] = 0
+		}
+		vm.push(uint32(len(body)))
 	case SysSerialAvail:
 		vm.push(uint32(len(vm.SerialIn)))
 	case SysSerialRead:

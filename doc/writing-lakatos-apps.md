@@ -285,3 +285,27 @@ printf "info\nls /net\n" | ./bin/lakat tether -drain 2s
 
 When `DEVELOPER` mode is enabled (either via the `[x] DEVELOPER` checkbox on the `CONFIG` screen or by sending `dev on` over `tether`), the CYD renders the Core 0 white/yellow touch indicator dot and logs `[DEV]` telemetry to serial whenever buttons are pressed, VFS files or directories are opened/read/written, images are decoded, or apps are launched/exited.
 
+### 6.4 Linux FUSE Filesystem at `/tmp/lakatos/{flash,sd,net}`
+
+When `./bin/lakat tether` is running and connected to a CYD on Linux, it automatically mounts a live FUSE filesystem at `/tmp/lakatos` (customizable via `-mount`, or disabled with `-mount=""`).
+
+Beneath `/tmp/lakatos` are the three VFS directories:
+- `/tmp/lakatos/flash/` — On-board ESP32 LittleFS (`/flash`)
+- `/tmp/lakatos/sd/` — MicroSD card (`/sd`)
+- `/tmp/lakatos/net/` — Superhighway HTTP VFS (`/net`, proxied through the CYD)
+
+While `./bin/lakat tether` is running in one terminal, you can use standard Linux shell commands in another terminal to inspect, copy, edit, or delete files on the CYD:
+
+```bash
+# List files on the CYD's flash and Superhighway:
+ls -la /tmp/lakatos/flash /tmp/lakatos/net
+
+# Copy a compiled .lapp directly into the CYD's /flash:
+cp build/apps/life.lapp /tmp/lakatos/flash/life.lapp
+
+# Read or copy files out of the CYD's VFS:
+cat /tmp/lakatos/net/d1
+cp /tmp/lakatos/flash/gallery.lapp /tmp/
+```
+
+
