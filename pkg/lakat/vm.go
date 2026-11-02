@@ -88,12 +88,13 @@ type VM struct {
 	ShUrl        string
 	TouchQueue   []TouchEvent
 	CurrentTouch TouchEvent
-	SerialIn       []byte
-	Stdout         io.Writer
-	VfsRoot        string
-	PrefetchStatus int
-	PrefetchBytes  uint32
-	PrefetchBuf    []byte
+	SerialIn           []byte
+	Stdout             io.Writer
+	VfsRoot            string
+	PrefetchStatus     int
+	PrefetchBytes      uint32
+	PrefetchBuf        []byte
+	CornerExitDisabled bool
 }
 
 func NewVM(lappOrLcod []byte) (*VM, error) {
@@ -1438,10 +1439,11 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.push(uint32(rand.Intn(int(mx))))
 		}
 	case SysSetCornerExit:
-		_, err := vm.pop()
+		en, err := vm.pop()
 		if err != nil {
 			return err
 		}
+		vm.CornerExitDisabled = (en == 0)
 
 	case SysGetAirport:
 		vm.pushScratchString(vm.AirportCode)
@@ -1933,6 +1935,15 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.CurrentTouch = ev
 		}
 		if vm.CurrentTouch.Touched {
+			if !vm.CornerExitDisabled && vm.CurrentTouch.X >= 0 && vm.CurrentTouch.X < 10 && vm.CurrentTouch.Y >= 0 && vm.CurrentTouch.Y < 10 {
+				vm.CurrentTouch.Touched = false
+				vm.ExitCode = 0
+				vm.Running = false
+				vm.push(0)
+				vm.push(0)
+				vm.push(0)
+				return nil
+			}
 			vm.push(1)
 			vm.push(uint32(vm.CurrentTouch.X))
 			vm.push(uint32(vm.CurrentTouch.Y))

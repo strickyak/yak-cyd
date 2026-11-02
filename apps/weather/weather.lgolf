@@ -5,6 +5,8 @@
 //   2. https://tgftp.nws.noaa.gov/data/observations/metar/decoded/<ICAO>.TXT
 package main
 
+import "wedge"
+
 const (
 	NUM_CITIES           = 7
 	HTTP_BUF_MAX         = 6144
@@ -693,13 +695,8 @@ func conditionBadge(idx int) (string, int, int) {
 func drawTopBar(title string, cstrTitleAddr int, isTable bool) {
 	tft_fill_rect(0, 0, SCREEN_W, 24, BAR_BG)
 	tft_draw_fast_hline(0, 23, SCREEN_W, CYAN)
-
-	// Standardized top-left HOME button (x=2..60, y=2..21)
-	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
-	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	DrawExitWedge()
 	tft_set_text_datum(TL_DATUM)
-	tft_set_text_color(CYAN, BTN_HOME)
-	tft_draw_string("HOME", 15, 4, 2)
 
 	// Center/left title
 	tft_set_text_color(YELLOW, BAR_BG)
@@ -1299,10 +1296,6 @@ func handleInput() bool {
 
 	// Top bar (y < 25)
 	if ty < 25 {
-		if tx <= 64 {
-			os_exit(0)
-			return true
-		}
 		if tx >= 256 {
 			if wxMode == WX_TABLE {
 				useCelsius = !useCelsius

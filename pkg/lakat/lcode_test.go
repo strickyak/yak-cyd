@@ -601,15 +601,20 @@ func TestAllEightNewAppsCompileAndRun(t *testing.T) {
 				t.Fatalf("NewVM(%s): %v", tc.name, err)
 			}
 			vm.MaxInstructions = 400000
-			vm.TouchQueue = append(vm.TouchQueue, TouchEvent{Touched: true, X: 30, Y: 12})
+			vm.TouchQueue = append(vm.TouchQueue, TouchEvent{Touched: true, X: 5, Y: 5})
 			if _, err := vm.Run(); err != nil {
 				t.Fatalf("VM Run(%s): %v", tc.name, err)
 			}
 			if vm.Running {
-				t.Fatalf("%s did not exit on HOME tap (30,12) within 400k steps", tc.name)
+				t.Fatalf("%s did not exit on top-left corner wedge tap (5,5) within 400k steps", tc.name)
 			}
 			if vm.ExitCode != 0 {
 				t.Fatalf("%s exited with non-zero code %d", tc.name, vm.ExitCode)
+			}
+			// Verify the 10x10 top-left exit wedge was drawn via DrawExitWedge() from imported "wedge" library
+			if vm.Screen[0][0] != 0xFFFF || vm.Screen[0][9] != 0xFFFF || vm.Screen[9][0] != 0xFFFF || vm.Screen[9][9] != 0x0000 {
+				t.Fatalf("%s did not draw expected 10x10 exit wedge: (0,0)=0x%04X (9,0)=0x%04X (0,9)=0x%04X (9,9)=0x%04X",
+					tc.name, vm.Screen[0][0], vm.Screen[0][9], vm.Screen[9][0], vm.Screen[9][9])
 			}
 			litPixels := 0
 			for y := 25; y < 240; y++ {

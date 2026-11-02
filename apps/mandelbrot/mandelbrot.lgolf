@@ -3,6 +3,8 @@
 // Uses Q16.16 fixed-point math in int32 variables (16 bits integer, 16 bits fraction).
 package main
 
+import "wedge"
+
 const (
 	VIEW_Y = 24
 	VIEW_W = 320
@@ -153,12 +155,7 @@ func resetView() {
 func drawHUD() {
 	tft_fill_rect(0, 0, SCREEN_W, VIEW_Y, BAR_BG)
 	tft_draw_fast_hline(0, VIEW_Y-1, SCREEN_W, CYAN)
-
-	// Standardized top-left HOME button
-	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
-	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
-	tft_set_text_color(CYAN, BTN_HOME)
-	tft_draw_string("HOME", 15, 4, 2)
+	DrawExitWedge()
 
 	tft_set_text_color(CYAN, BAR_BG)
 	tft_draw_string("MANDEL", 66, 4, 2)
@@ -245,10 +242,6 @@ func checkInput() int32 {
 	}
 
 	if ty < 25 {
-		if tx <= 64 {
-			os_exit(0)
-			return 2
-		}
 		if tx >= 255 {
 			resetView()
 			drawHUD()

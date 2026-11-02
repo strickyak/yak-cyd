@@ -7,6 +7,8 @@
 //   - Vast Middle (25 <= y < 198): Fire twin laser torpedoes
 package main
 
+import "wedge"
+
 const (
 	TOP_BAR_H      = 24
 	BOTTOM_TOUCH_Y = 198
@@ -99,12 +101,7 @@ func clamp(v int, lo int, hi int) int {
 func drawHeader() {
 	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
 	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
-
-	// Standardized top-left HOME button
-	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
-	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
-	tft_set_text_color(CYAN, BTN_HOME)
-	tft_draw_string("HOME", 15, 4, 2)
+	DrawExitWedge()
 
 	// Top-right NEW button
 	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
@@ -601,10 +598,6 @@ func handleInput() bool {
 	}
 
 	if ty < 25 {
-		if tx <= 64 {
-			os_exit(0)
-			return true
-		}
 		if tx >= 256 && !touchHeld {
 			touchHeld = true
 			startNewGame()

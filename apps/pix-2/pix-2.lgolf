@@ -1,9 +1,11 @@
 // pix-2: Slideshow viewer for /net/pix-2/ on Lakatos OS (CYD 320x240)
 // Displays all images in /net/pix-2/ centered on the 320x240 screen for
-// 10 seconds each and repeats forever until the top-left HOME button is touched.
+// 10 seconds each and repeats forever until the top-left 10x10 exit wedge is touched.
 // Uses the Core 0 background prefetcher (os_prefetch_start / os_prefetch_status)
 // to download the next image into a 64 KB RAM buffer while the current image is shown.
 package main
+
+import "wedge"
 
 const (
 	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
@@ -70,13 +72,6 @@ func detectImageType(nameAddr int) int {
 		}
 	}
 	return 0
-}
-
-func drawHomeButton() {
-	tft_fill_rect(0, 0, 10, 10, BLACK)
-	for y := 0; y < 10; y++ {
-		tft_draw_fast_hline(0, y, 10-y, WHITE)
-	}
 }
 
 func exitCleanly() {
@@ -160,7 +155,7 @@ func buildNetPngPath(idx int) string {
 
 func showStatusMessage(line1 string, line2 string) {
 	tft_fill_screen(BLACK)
-	drawHomeButton()
+	DrawExitWedge()
 	tft_set_text_color(CYAN, BLACK)
 	tft_draw_string(line1, 40, 100, 2)
 	tft_set_text_color(LIGHTGREY, BLACK)
@@ -269,7 +264,7 @@ func displaySlide(idx int) bool {
 	}
 
 	if drawn {
-		drawHomeButton()
+		DrawExitWedge()
 	}
 
 	// Immediately start Core 0 background prefetch for the NEXT slide during the 10s wait
@@ -286,7 +281,7 @@ func displaySlide(idx int) bool {
 
 func main() {
 	tft_fill_screen(BLACK)
-	drawHomeButton()
+	DrawExitWedge()
 	tft_set_text_color(CYAN, BLACK)
 	tft_draw_string("Loading /net/pix-2/ ...", 64, 110, 2)
 

@@ -2,6 +2,9 @@
 // Autonomous 45-second Diffusion-Limited Aggregation simulation on a 156x98
 // lattice (2x2 px per cell). Brownian walkers diffuse and stick to growing
 // dendritic crystal trees, colored by crystallization epoch.
+package main
+
+import "wedge"
 
 const DEMO_DURATION_MS = 45000
 
@@ -227,9 +230,7 @@ func diffuse_one_walker(s int) {
 }
 
 func draw_header(rem_sec int) {
-	tft_fill_round_rect(2, 2, 58, 20, 3, COL_HOME_BG)
-	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
-	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+	DrawExitWedge()
 
 	tft_draw_string(66, 8, "DENDRITIC GROWTH (DLA)", COL_YELLOW, COL_BAR, 1)
 
@@ -252,10 +253,7 @@ func draw_footer() {
 }
 
 func check_exit() {
-	touched, tx, ty := os_read_touch()
-	if touched && tx <= 64 && ty < 25 {
-		os_exit(0)
-	}
+	_, _, _ = os_read_touch()
 	if os_serial_available() > 0 {
 		ch := os_serial_read()
 		if ch == 'q' || ch == 'Q' || ch == 3 {

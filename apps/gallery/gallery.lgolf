@@ -2,6 +2,8 @@
 // Uses Core 0 Background Prefetcher + Reusable 64 KB RAM Buffer
 package main
 
+import "wedge"
+
 const (
 	BUF_MAX     = 65536 // 64 KB reusable compressed image buffer
 	MAX_IMAGES  = 32
@@ -145,12 +147,7 @@ func buildFullPath(idx int) {
 func drawTopBar() {
 	tft_fill_rect(0, 0, SCREEN_W, VIEW_Y, BAR_BG)
 	tft_draw_fast_hline(0, VIEW_Y-1, SCREEN_W, CYAN)
-
-	// HOME button (x=2..50)
-	tft_fill_round_rect(2, 2, 48, 19, 3, BTN_HOME)
-	tft_draw_round_rect(2, 2, 48, 19, 3, CYAN)
-	tft_set_text_color(CYAN, BTN_HOME)
-	tft_draw_string("HOME", 9, 4, 2)
+	DrawExitWedge()
 
 	// DIR button (x=53..91)
 	tft_fill_round_rect(53, 2, 38, 19, 3, BTN_DIR)
@@ -438,12 +435,6 @@ func handleInputs() {
 	lastTouchMs = now
 
 	if ty < VIEW_Y {
-		// HOME (x=2..50)
-		if tx <= 51 {
-			os_prefetch_cancel()
-			os_exit(0)
-			return
-		}
 		// DIR (x=53..91)
 		if tx >= 52 && tx <= 93 {
 			os_prefetch_cancel()

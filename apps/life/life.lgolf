@@ -2,6 +2,8 @@
 // Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
 package main
 
+import "wedge"
+
 const (
 	COLS       = 64
 	ROWS       = 42
@@ -47,12 +49,7 @@ func drawPauseButton() {
 func drawHeader() {
 	tft_fill_rect(0, 0, SCREEN_W, 24, BAR_BG)
 	tft_draw_fast_hline(0, 24, SCREEN_W, CYAN)
-
-	// Standardized top-left HOME button (x=2..54)
-	tft_fill_round_rect(2, 2, 52, 20, 4, BTN_HOME)
-	tft_draw_round_rect(2, 2, 52, 20, 4, CYAN)
-	tft_set_text_color(CYAN, BTN_HOME)
-	tft_draw_string("HOME", 12, 4, 2)
+	DrawExitWedge()
 
 	// PAUSE button (x=136..194)
 	drawPauseButton()
@@ -243,10 +240,6 @@ func handleTouch() bool {
 		return false
 	}
 	if ty < 25 {
-		if tx < 56 {
-			os_exit(0)
-			return true
-		}
 		if tx >= 134 && tx < 196 {
 			paused = !paused
 			drawPauseButton()

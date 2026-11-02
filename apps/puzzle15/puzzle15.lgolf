@@ -2,6 +2,9 @@
 // Autonomous 45-second sliding-tile puzzle demo: starts solved, performs
 // smooth animated scrambles, and solves the puzzle back to the canonical
 // 1..15 order while displaying Manhattan distance and tile metrics.
+package main
+
+import "wedge"
 
 const DEMO_DURATION_MS = 45000
 
@@ -231,9 +234,7 @@ func draw_side_panel() {
 
 func draw_header(rem_sec int) {
 	tft_fill_rect(0, 0, 320, 24, COL_BAR)
-	tft_fill_round_rect(2, 2, 58, 20, 3, COL_HOME_BG)
-	tft_draw_round_rect(2, 2, 58, 20, 3, COL_WHITE)
-	tft_draw_string(13, 8, "HOME", COL_WHITE, COL_HOME_BG, 1)
+	DrawExitWedge()
 
 	tft_draw_string(70, 8, "15-PUZZLE AUTONOMOUS DEMO", COL_YELLOW, COL_BAR, 1)
 
@@ -243,10 +244,7 @@ func draw_header(rem_sec int) {
 }
 
 func check_exit() {
-	touched, tx, ty := os_read_touch()
-	if touched && tx <= 64 && ty < 25 {
-		os_exit(0)
-	}
+	_, _, _ = os_read_touch()
 	if os_serial_available() > 0 {
 		ch := os_serial_read()
 		if ch == 'q' || ch == 'Q' || ch == 3 {

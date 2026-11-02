@@ -3,6 +3,8 @@ package lakat
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -367,6 +369,7 @@ func isFloatType(t TypeDesc) bool {
 type Compiler struct {
 	toks        []Token
 	pos         int
+	imported    map[string]bool
 	consts      map[string]int64
 	floatConsts map[string]float64
 	strConsts   map[string]string
@@ -385,8 +388,21 @@ type Compiler struct {
 	asmOut      strings.Builder
 }
 
+var BuiltinLibraries = map[string]string{
+	"wedge": `package wedge
+
+func DrawExitWedge() {
+	tft_fill_rect(0, 0, 10, 10, BLACK)
+	for y := 0; y < 10; y++ {
+		tft_draw_fast_hline(0, y, 10-y, WHITE)
+	}
+}
+`,
+}
+
 func NewCompiler() *Compiler {
 	c := &Compiler{
+		imported:    make(map[string]bool),
 		consts:      make(map[string]int64),
 		floatConsts: make(map[string]float64),
 		strConsts:   make(map[string]string),
@@ -908,9 +924,68 @@ func (c *Compiler) parseSingleGlobalVarDecl() error {
 	return nil
 }
 
-func (c *Compiler) compileTokens(toks []Token) (string, error) {
+func (c *Compiler) loadImport(pkgPath string, line int) error {
+	if c.imported[pkgPath] {
+		return nil
+	}
+	c.imported[pkgPath] = true
+
+	var libSrc string
+	found := false
+
+	candidates := []string{
+		pkgPath,
+		pkgPath + ".lgolf",
+		filepath.Join("apps", "lib", pkgPath+".lgolf"),
+		filepath.Join("..", "..", "apps", "lib", pkgPath+".lgolf"),
+	}
+	for _, cand := range candidates {
+		if data, err := os.ReadFile(cand); err == nil {
+			libSrc = string(data)
+			found = true
+			break
+		}
+	}
+	if !found {
+		base := filepath.Base(pkgPath)
+		if src, ok := BuiltinLibraries[pkgPath]; ok {
+			libSrc = src
+			found = true
+		} else if src, ok := BuiltinLibraries[base]; ok {
+			libSrc = src
+			found = true
+		}
+	}
+	if !found {
+		switch pkgPath {
+		case "fmt", "math", "os", "tft", "fs", "http", "lakatos", "ui":
+			if src, ok := BuiltinLibraries["wedge"]; ok && (pkgPath == "lakatos" || pkgPath == "ui") {
+				libSrc = src
+				found = true
+			} else {
+				return nil
+			}
+		default:
+			return fmt.Errorf("line %d: unknown import package %q", line, pkgPath)
+		}
+	}
+
+	libToks, err := LexLGolf(libSrc)
+	if err != nil {
+		return fmt.Errorf("import %q: %w", pkgPath, err)
+	}
+	return c.parseTopLevelTokens(libToks)
+}
+
+func (c *Compiler) parseTopLevelTokens(toks []Token) error {
+	savedToks := c.toks
+	savedPos := c.pos
 	c.toks = toks
 	c.pos = 0
+	defer func() {
+		c.toks = savedToks
+		c.pos = savedPos
+	}()
 
 	// Top-level pass: collect consts, structs, globals, and function declarations
 	for c.peek().Kind != TokEOF {
@@ -920,23 +995,47 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 			break
 		}
 		if t.Kind != TokIdent {
-			return "", fmt.Errorf("line %d: unexpected top-level token %q", t.Line, t.Val)
+			return fmt.Errorf("line %d: unexpected top-level token %q", t.Line, t.Val)
 		}
 		switch t.Val {
 		case "package":
 			c.next()
 			_, err := c.expectIdent()
 			if err != nil {
-				return "", err
+				return err
 			}
 		case "import":
 			c.next()
 			if c.matchPunct("(") {
 				for !c.matchPunct(")") && c.peek().Kind != TokEOF {
+					c.skipSemicolons()
+					if c.matchPunct(")") {
+						break
+					}
+					if c.peek().Kind == TokIdent {
+						// Optional import alias
+						c.next()
+					}
+					if c.peek().Kind == TokString {
+						st := c.next()
+						if err := c.loadImport(st.Val, st.Line); err != nil {
+							return err
+						}
+					} else {
+						c.next()
+					}
+					c.skipSemicolons()
+				}
+			} else {
+				if c.peek().Kind == TokIdent {
 					c.next()
 				}
-			} else if c.peek().Kind == TokString {
-				c.next()
+				if c.peek().Kind == TokString {
+					st := c.next()
+					if err := c.loadImport(st.Val, st.Line); err != nil {
+						return err
+					}
+				}
 			}
 		case "const":
 			c.next()
@@ -947,27 +1046,27 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 						break
 					}
 					if err := c.parseSingleConstDecl(); err != nil {
-						return "", err
+						return err
 					}
 					c.skipSemicolons()
 				}
 			} else {
 				if err := c.parseSingleConstDecl(); err != nil {
-					return "", err
+					return err
 				}
 			}
 		case "type":
 			c.next()
 			typeName, err := c.expectIdent()
 			if err != nil {
-				return "", err
+				return err
 			}
 			kw, err := c.expectIdent()
 			if err != nil || kw != "struct" {
-				return "", fmt.Errorf("line %d: expected 'struct' after type %s", t.Line, typeName)
+				return fmt.Errorf("line %d: expected 'struct' after type %s", t.Line, typeName)
 			}
 			if err := c.expectPunct("{"); err != nil {
-				return "", err
+				return err
 			}
 			sd := &StructDef{Name: typeName}
 			c.structs[typeName] = sd
@@ -979,11 +1078,11 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 				}
 				fName, err := c.expectIdent()
 				if err != nil {
-					return "", err
+					return err
 				}
 				fType, err := c.parseType()
 				if err != nil {
-					return "", err
+					return err
 				}
 				fSz := fType.ByteSize
 				if fType.Kind == "scalar" {
@@ -1005,13 +1104,13 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 						break
 					}
 					if err := c.parseSingleGlobalVarDecl(); err != nil {
-						return "", err
+						return err
 					}
 					c.skipSemicolons()
 				}
 			} else {
 				if err := c.parseSingleGlobalVarDecl(); err != nil {
-					return "", err
+					return err
 				}
 			}
 
@@ -1019,20 +1118,20 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 			c.next()
 			fnName, err := c.expectIdent()
 			if err != nil {
-				return "", err
+				return err
 			}
 			if err := c.expectPunct("("); err != nil {
-				return "", err
+				return err
 			}
 			var params []VarSym
 			for !c.matchPunct(")") && c.peek().Kind != TokEOF {
 				pName, err := c.expectIdent()
 				if err != nil {
-					return "", err
+					return err
 				}
 				pType, err := c.parseType()
 				if err != nil {
-					return "", err
+					return err
 				}
 				params = append(params, VarSym{Name: pName, IsGlobal: false, Type: pType})
 				c.matchPunct(",")
@@ -1042,7 +1141,7 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 				for !c.matchPunct(")") && c.peek().Kind != TokEOF {
 					rt, err := c.parseType()
 					if err != nil {
-						return "", err
+						return err
 					}
 					retTypes = append(retTypes, rt)
 					c.matchPunct(",")
@@ -1050,12 +1149,12 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 			} else if !(c.peek().Kind == TokPunct && c.peek().Val == "{") {
 				rt, err := c.parseType()
 				if err != nil {
-					return "", err
+					return err
 				}
 				retTypes = append(retTypes, rt)
 			}
 			if err := c.expectPunct("{"); err != nil {
-				return "", err
+				return err
 			}
 			depth := 1
 			bodyStart := c.pos
@@ -1077,12 +1176,21 @@ func (c *Compiler) compileTokens(toks []Token) (string, error) {
 				ReturnType: retTypes,
 				BodyTokens: bodyToks,
 			}
+			if _, exists := c.funcs[fnName]; !exists {
+				c.funcOrder = append(c.funcOrder, fnName)
+			}
 			c.funcs[fnName] = fd
-			c.funcOrder = append(c.funcOrder, fnName)
 
 		default:
-			return "", fmt.Errorf("line %d: unexpected top-level identifier %q", t.Line, t.Val)
+			return fmt.Errorf("line %d: unexpected top-level identifier %q", t.Line, t.Val)
 		}
+	}
+	return nil
+}
+
+func (c *Compiler) compileTokens(toks []Token) (string, error) {
+	if err := c.parseTopLevelTokens(toks); err != nil {
+		return "", err
 	}
 
 	// Dead-Function Elimination starting from main
@@ -2528,7 +2636,7 @@ func (c *Compiler) compilePrimary() (TypeDesc, error) {
 			return v.Type, nil
 		}
 
-		// Support package-qualified names like os.ReadTouch(), tft.FillRect(), os.BLACK, math.Pi
+		// Support package-qualified names like os.ReadTouch(), tft.FillRect(), os.BLACK, math.Pi, wedge.DrawExitWedge()
 		if c.matchPunct(".") {
 			sub, err := c.expectIdent()
 			if err != nil {
@@ -2542,7 +2650,11 @@ func (c *Compiler) compilePrimary() (TypeDesc, error) {
 				c.emitPushFloat32(float32(fVal))
 				return ScalarFloat, nil
 			}
-			name = normalizeQualifiedName(name, sub)
+			if _, ok := c.funcs[sub]; ok {
+				name = sub
+			} else {
+				name = normalizeQualifiedName(name, sub)
+			}
 		}
 
 		// 1. Constant lookup
