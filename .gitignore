@@ -8,3 +8,5 @@ bin/
 .*.un~
 .*.swp
 .agy_conversation_id
+RCS/
+*,v
