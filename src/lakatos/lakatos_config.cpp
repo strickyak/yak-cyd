@@ -189,7 +189,6 @@ static void saveConfigToNvs() {
   prefs.putString("serialNo", gSerialNo);
   prefs.putString("shUrl", gShUrl);
   prefs.putString("shPass", gShPass);
-  prefs.putBool("tDot", gTouchSpotEnabled);
   prefs.end();
 }
 
@@ -205,8 +204,8 @@ void initLakatosConfig() {
   String savedSer  = prefs.getString("serialNo", "ing");
   String savedUrl  = prefs.getString("shUrl", "http://pizga.net:1908/");
   String savedPass = prefs.getString("shPass", "");
-  gTouchSpotEnabled = prefs.getBool("tDot", false);
   prefs.end();
+  gTouchSpotEnabled = false;
 
   strncpy(gDeviceName, savedDev.c_str(), sizeof(gDeviceName) - 1);
   strncpy(gSerialNo, savedSer.c_str(), sizeof(gSerialNo) - 1);
@@ -279,13 +278,15 @@ void lakatosSetSuperhighwayPassword(const char* pass) {
   saveConfigToNvs();
 }
 
+static bool gCanBeDeveloper = false;
+
 bool lakatosGetDeveloperMode() {
   return gTouchSpotEnabled;
 }
 
 void lakatosSetDeveloperMode(bool en) {
+  if (en) gCanBeDeveloper = true;
   gTouchSpotEnabled = en;
-  saveConfigToNvs();
 }
 
 bool lakatosGetTouchSpotEnabled() {
@@ -944,6 +945,7 @@ static bool runAboutModal() {
 // Main CONFIG Screen
 // ---------------------------------------------------------------------------
 static void drawConfigScreen() {
+  const bool isDev = gTouchSpotEnabled;
   LakatosTftGuard tftLock;
   tft.fillScreen(0x0841);
   tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
@@ -995,28 +997,36 @@ static void drawConfigScreen() {
   tft.setTextColor(TFT_WHITE, 0x18E3);
   tft.drawString(gDeviceName, 10, 90, 2);
 
-  tft.fillRoundRect(163, 70, 153, 46, 5, 0x18E3);
-  tft.drawRoundRect(163, 70, 153, 46, 5, TFT_CYAN);
-  tft.setTextColor(TFT_CYAN, 0x18E3);
+  uint16_t serBg = isDev ? 0x18E3 : 0x0841;
+  if (isDev) {
+    tft.fillRoundRect(163, 70, 153, 46, 5, serBg);
+    tft.drawRoundRect(163, 70, 153, 46, 5, TFT_CYAN);
+  }
+  tft.setTextColor(isDev ? TFT_CYAN : TFT_LIGHTGREY, serBg);
   tft.drawString("SERIAL NUMBER:", 169, 75, 1);
-  tft.setTextColor(TFT_WHITE, 0x18E3);
+  tft.setTextColor(TFT_WHITE, serBg);
   tft.drawString(gSerialNo, 169, 90, 2);
 
   // Row 3 (y: 120..168): [/net URL] (x: 4..198) & [/net PASS] (x: 204..316)
-  tft.fillRoundRect(4, 120, 194, 46, 5, 0x18E3);
-  tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
-  tft.setTextColor(TFT_MAGENTA, 0x18E3);
+  uint16_t netBg = isDev ? 0x18E3 : 0x0841;
+  if (isDev) {
+    tft.fillRoundRect(4, 120, 194, 46, 5, netBg);
+    tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
+  }
+  tft.setTextColor(isDev ? TFT_MAGENTA : TFT_LIGHTGREY, netBg);
   tft.drawString("/net SERVER URL:", 10, 125, 1);
-  tft.setTextColor(TFT_WHITE, 0x18E3);
+  tft.setTextColor(TFT_WHITE, netBg);
   String shortUrl = String(gShUrl);
   if (shortUrl.length() > 28) shortUrl = shortUrl.substring(0, 28);
   tft.drawString(shortUrl, 10, 142, 1);
 
-  tft.fillRoundRect(204, 120, 112, 46, 5, 0x18E3);
-  tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
-  tft.setTextColor(TFT_MAGENTA, 0x18E3);
+  if (isDev) {
+    tft.fillRoundRect(204, 120, 112, 46, 5, netBg);
+    tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
+  }
+  tft.setTextColor(isDev ? TFT_MAGENTA : TFT_LIGHTGREY, netBg);
   tft.drawString("/net PASSWORD:", 210, 125, 1);
-  tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, 0x18E3);
+  tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, netBg);
   tft.drawString(gShPass[0] ? "******** (SET)" : "(NOT SET)", 210, 142, 1);
 
   // Row 4 (y: 172..234): [AIRPORT] (x: 4..104), [WI-FI] (x: 109..210), [TOUCH CAL] (x: 215..316)
@@ -1035,24 +1045,26 @@ static void drawConfigScreen() {
   tft.setTextColor(TFT_WHITE, 0x18E3);
   tft.drawString((WiFi.status() == WL_CONNECTED) ? "ONLINE" : "CONFIGURE", 159, 212, 2);
 
-  // Right column (x: 215..316): [x] DEVELOPER checkbox (y: 172..201) + [CALIBRATE] (y: 205..234)
-  uint16_t spotBg = gTouchSpotEnabled ? 0x1A26 : 0x18E3;
-  uint16_t spotBorder = gTouchSpotEnabled ? TFT_GREEN : TFT_LIGHTGREY;
-  tft.fillRoundRect(215, 172, 101, 29, 5, spotBg);
-  tft.drawRoundRect(215, 172, 101, 29, 5, spotBorder);
-  // Checkbox square at (221, 179, 14, 14)
-  tft.fillRect(221, 179, 14, 14, gTouchSpotEnabled ? TFT_DARKGREEN : TFT_BLACK);
-  tft.drawRect(221, 179, 14, 14, TFT_WHITE);
-  if (gTouchSpotEnabled) {
-    // Draw checkmark
-    tft.drawLine(223, 186, 226, 190, TFT_YELLOW);
-    tft.drawLine(226, 190, 232, 181, TFT_YELLOW);
-    tft.drawLine(223, 187, 226, 191, TFT_YELLOW);
-    tft.drawLine(226, 191, 232, 182, TFT_YELLOW);
+  // Right column (x: 215..316): [x] DEVELOPER checkbox (y: 172..201, only if unlocked) + [CALIBRATE] (y: 205..234)
+  if (gCanBeDeveloper || isDev) {
+    uint16_t spotBg = isDev ? 0x1A26 : 0x18E3;
+    uint16_t spotBorder = isDev ? TFT_GREEN : TFT_LIGHTGREY;
+    tft.fillRoundRect(215, 172, 101, 29, 5, spotBg);
+    tft.drawRoundRect(215, 172, 101, 29, 5, spotBorder);
+    // Checkbox square at (221, 179, 14, 14)
+    tft.fillRect(221, 179, 14, 14, isDev ? TFT_DARKGREEN : TFT_BLACK);
+    tft.drawRect(221, 179, 14, 14, TFT_WHITE);
+    if (isDev) {
+      // Draw checkmark
+      tft.drawLine(223, 186, 226, 190, TFT_YELLOW);
+      tft.drawLine(226, 190, 232, 181, TFT_YELLOW);
+      tft.drawLine(223, 187, 226, 191, TFT_YELLOW);
+      tft.drawLine(226, 191, 232, 182, TFT_YELLOW);
+    }
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(isDev ? TFT_YELLOW : TFT_LIGHTGREY, spotBg);
+    tft.drawString("DEVELOPER", 240, 186, 1);
   }
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(gTouchSpotEnabled ? TFT_YELLOW : TFT_LIGHTGREY, spotBg);
-  tft.drawString("DEVELOPER", 240, 186, 1);
 
   tft.fillRoundRect(215, 205, 101, 29, 5, 0x18E3);
   tft.drawRoundRect(215, 205, 101, 29, 5, TFT_ORANGE);
@@ -1063,6 +1075,8 @@ static void drawConfigScreen() {
 
 void runLakatosConfigScreen(bool startInCalibration) {
   lakatosSetInConfigScreen(true);
+  int secretTitleTaps = 0;
+
   if (startInCalibration) {
     runTouchCalibrationModal();
   }
@@ -1090,7 +1104,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
         applyBacklightPercent(gManualBrightPct);
         saveConfigToNvs();
         drawConfigScreen();
-      } else if (!wasDown && (now - lastRel > 100)) {
+      } else if (!wasDown && (now - lastRel > 50)) {
         wasDown = true;
         if (t.y <= 25 && t.x <= 62) {
           lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
@@ -1103,6 +1117,12 @@ void runLakatosConfigScreen(bool startInCalibration) {
             return;
           }
           drawConfigScreen();
+        } else if (t.y <= 25 && t.x >= 90 && t.x <= 230) {
+          secretTitleTaps++;
+          if (secretTitleTaps >= 8 && !gCanBeDeveloper) {
+            gCanBeDeveloper = true;
+            drawConfigScreen();
+          }
         } else if (t.y >= 28 && t.y <= 66 && t.x >= 238) {
           gAutoBright = !gAutoBright;
           lakatosDevLogf("Button: CONFIG -> AUTO BRIGHT=%s (%d,%d)", gAutoBright ? "ON" : "OFF", t.x, t.y);
@@ -1119,26 +1139,29 @@ void runLakatosConfigScreen(bool startInCalibration) {
             if (lakatosPromptKeyboard("DEVICE NAME", gDeviceName, sizeof(gDeviceName), false, false) == 1) {
               saveConfigToNvs();
             }
-          } else {
+            drawConfigScreen();
+          } else if (lakatosGetDeveloperMode()) {
             lakatosDevLogf("Button: CONFIG -> SERIAL NUMBER (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("SERIAL NUMBER", gSerialNo, sizeof(gSerialNo), false, false) == 1) {
               saveConfigToNvs();
             }
+            drawConfigScreen();
           }
-          drawConfigScreen();
         } else if (t.y >= 120 && t.y <= 166) {
-          if (t.x < 200) {
-            lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
-              saveConfigToNvs();
+          if (lakatosGetDeveloperMode()) {
+            if (t.x < 200) {
+              lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
+              if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
+                saveConfigToNvs();
+              }
+            } else {
+              lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
+              if (lakatosPromptKeyboard("/net PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
+                saveConfigToNvs();
+              }
             }
-          } else {
-            lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("/net PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
-              saveConfigToNvs();
-            }
+            drawConfigScreen();
           }
-          drawConfigScreen();
         } else if (t.y >= 172) {
           if (t.x <= 106) {
             lakatosDevLogf("Button: CONFIG -> AIRPORT (%d,%d)", t.x, t.y);
@@ -1146,21 +1169,27 @@ void runLakatosConfigScreen(bool startInCalibration) {
               lakatosSetInConfigScreen(false);
               return;
             }
+            drawConfigScreen();
           } else if (t.x <= 212) {
             lakatosDevLogf("Button: CONFIG -> WI-FI SETUP (%d,%d)", t.x, t.y);
             if (runWifiConfigModal()) {
               lakatosSetInConfigScreen(false);
               return;
             }
+            drawConfigScreen();
           } else if (t.y < 203) {
-            bool nextDev = !lakatosGetDeveloperMode();
-            lakatosSetDeveloperMode(nextDev);
-            Serial.printf("[DEV] Developer Mode: %s\r\n", nextDev ? "ON" : "OFF");
+            if (gCanBeDeveloper || lakatosGetDeveloperMode()) {
+              bool nextDev = !lakatosGetDeveloperMode();
+              gCanBeDeveloper = true;
+              lakatosSetDeveloperMode(nextDev);
+              Serial.printf("[DEV] Developer Mode: %s\r\n", nextDev ? "ON" : "OFF");
+              drawConfigScreen();
+            }
           } else {
             lakatosDevLogf("Button: CONFIG -> CALIBRATE (%d,%d)", t.x, t.y);
             runTouchCalibrationModal();
+            drawConfigScreen();
           }
-          drawConfigScreen();
         }
       }
     } else {
