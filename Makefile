@@ -27,11 +27,17 @@ push: lakatos apps
 lakat:
 	mkdir -p build
 	GOWORK=off go build -o build/lakat ./cmd/lakat
+	GOWORK=off go build -o build/cyd-resize ./cmd/cyd-resize
 
 apps: lakat
 	mkdir -p build/apps
 	$(LAKAT) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
 	$(LAKAT) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
+	$(LAKAT) compile -title "Breakout" -o build/apps/breakout.lapp apps/breakout/breakout.lgolf
+	$(LAKAT) compile -title "Space Invaders" -o build/apps/invaders.lapp apps/invaders/invaders.lgolf
+	$(LAKAT) compile -title "Mandelbrot" -o build/apps/mandelbrot.lapp apps/mandelbrot/mandelbrot.lgolf
+	$(LAKAT) compile -title "Pix-2" -o build/apps/pix-2.lapp apps/pix-2/pix-2.lgolf
+	$(LAKAT) compile -title "NOAA Weather" -o build/apps/weather.lapp apps/weather/weather.lgolf
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload
@@ -56,4 +62,4 @@ monitor:
 
 clean:
 	$(PIO) run -t clean
-	rm -rf build/apps build/lakat
+	rm -rf build/apps build/lakat build/cyd-resize

@@ -1,0 +1,305 @@
+// pix-2: Slideshow viewer for /net/pix-2/ on Lakatos OS (CYD 320x240)
+// Displays all images in /net/pix-2/ centered on the 320x240 screen for
+// 10 seconds each and repeats forever until the top-left HOME button is touched.
+// Uses the Core 0 background prefetcher (os_prefetch_start / os_prefetch_status)
+// to download the next image into a 64 KB RAM buffer while the current image is shown.
+package main
+
+const (
+	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
+	MAX_IMAGES   = 48
+	NAME_STRIDE  = 64
+	ENTRY_SIZE   = 88 // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
+	ENTRY_SIZE_O = 64
+	ENTRY_ISDIR  = 80
+	DISPLAY_MS   = 10000
+	POLL_STEP_MS = 40
+	BTN_HOME_BG  = 0x2945
+)
+
+var (
+	imgBuf   [BUF_MAX]byte
+	imgNames [3072]byte // MAX_IMAGES * NAME_STRIDE
+	imgSizes [MAX_IMAGES]int
+	imgTypes [MAX_IMAGES]byte // 1 = PNG, 2 = JPG
+	imgCount int
+
+	pathBuf     [96]byte // "/net/pix-2/" + 64-byte filename
+	prefetchIdx int
+)
+
+func toLowerByte(c int) int {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}
+
+// Returns 1 for .png, 2 for .jpg/.jpeg, 0 otherwise.
+func detectImageType(nameAddr int) int {
+	ln := 0
+	for ln < 63 {
+		if peek1(nameAddr+ln) == 0 {
+			break
+		}
+		ln++
+	}
+	if ln < 5 {
+		return 0
+	}
+	c0 := peek1(nameAddr + ln - 4)
+	c1 := toLowerByte(peek1(nameAddr + ln - 3))
+	c2 := toLowerByte(peek1(nameAddr + ln - 2))
+	c3 := toLowerByte(peek1(nameAddr + ln - 1))
+	if c0 == '.' {
+		if c1 == 'p' && c2 == 'n' && c3 == 'g' {
+			return 1
+		}
+		if c1 == 'j' && c2 == 'p' && c3 == 'g' {
+			return 2
+		}
+	}
+	if ln >= 6 {
+		d0 := peek1(nameAddr + ln - 5)
+		d1 := toLowerByte(peek1(nameAddr + ln - 4))
+		d2 := toLowerByte(peek1(nameAddr + ln - 3))
+		d3 := toLowerByte(peek1(nameAddr + ln - 2))
+		d4 := toLowerByte(peek1(nameAddr + ln - 1))
+		if d0 == '.' && d1 == 'j' && d2 == 'p' && d3 == 'e' && d4 == 'g' {
+			return 2
+		}
+	}
+	return 0
+}
+
+func drawHomeButton() {
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME_BG)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME_BG)
+	tft_draw_string("HOME", 15, 4, 2)
+}
+
+func exitCleanly() {
+	os_prefetch_cancel()
+	os_exit(0)
+}
+
+func checkHomeExit() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			exitCleanly()
+			return true
+		}
+	}
+	clicked, cx, cy := os_read_click()
+	if clicked && cy < 25 && cx <= 64 {
+		exitCleanly()
+		return true
+	}
+	touched, tx, ty := os_read_touch()
+	if touched && ty < 25 && tx <= 64 {
+		exitCleanly()
+		return true
+	}
+	return false
+}
+
+// waitWithHomePoll waits up to durationMs while polling the HOME button.
+func waitWithHomePoll(durationMs int) bool {
+	startMs := os_millis()
+	for (os_millis() - startMs) < durationMs {
+		if checkHomeExit() {
+			return true
+		}
+		os_delay_ms(POLL_STEP_MS)
+	}
+	return checkHomeExit()
+}
+
+// buildNetPixPath writes "/net/pix-2/<entryName>" into pathBuf and returns its string slice.
+func buildNetPngPath(idx int) string {
+	// Prefix: "/net/pix-2/" (11 bytes)
+	pathBuf[0] = '/'
+	pathBuf[1] = 'n'
+	pathBuf[2] = 'e'
+	pathBuf[3] = 't'
+	pathBuf[4] = '/'
+	pathBuf[5] = 'p'
+	pathBuf[6] = 'i'
+	pathBuf[7] = 'x'
+	pathBuf[8] = '-'
+	pathBuf[9] = '2'
+	pathBuf[10] = '/'
+
+	pos := 11
+	nameAddr := int(&imgNames) + idx*NAME_STRIDE
+	for i := 0; i < NAME_STRIDE-1; i++ {
+		ch := peek1(nameAddr + i)
+		if ch == 0 {
+			break
+		}
+		pathBuf[pos] = byte(ch)
+		pos++
+	}
+	pathBuf[pos] = 0
+	return make_slice(&pathBuf[0], 96, pos)
+}
+
+func showStatusMessage(line1 string, line2 string) {
+	tft_fill_screen(BLACK)
+	drawHomeButton()
+	tft_set_text_color(CYAN, BLACK)
+	tft_draw_string(line1, 40, 100, 2)
+	tft_set_text_color(LIGHTGREY, BLACK)
+	tft_draw_string(line2, 40, 124, 2)
+}
+
+func startPrefetch(idx int) {
+	if idx < 0 || idx >= imgCount {
+		prefetchIdx = -1
+		return
+	}
+	sz := imgSizes[idx]
+	if sz > BUF_MAX {
+		// Too large for 64 KB RAM buffer; will stream directly from VFS when displayed
+		prefetchIdx = -1
+		return
+	}
+	fullPath := buildNetPngPath(idx)
+	if os_prefetch_start(fullPath, &imgBuf, BUF_MAX) != 0 {
+		prefetchIdx = idx
+	} else {
+		prefetchIdx = -1
+	}
+}
+
+func scanCatalog() int {
+	os_prefetch_cancel()
+	imgCount = 0
+	prefetchIdx = -1
+
+	// Reuse imgBuf temporarily for up to MAX_IMAGES LakatosFsEntry structs (48 * 88 = 4224 B)
+	n := fs_ls("/net/pix-2", &imgBuf, MAX_IMAGES)
+	if n <= 0 {
+		return 0
+	}
+
+	baseBuf := int(&imgBuf)
+	for i := 0; i < n; i++ {
+		if imgCount >= MAX_IMAGES {
+			break
+		}
+		entAddr := baseBuf + i*ENTRY_SIZE
+		isDir := peek1(entAddr + ENTRY_ISDIR)
+		firstCh := peek1(entAddr)
+		if isDir != 0 || firstCh == 0 || firstCh == '.' {
+			continue
+		}
+		imgType := detectImageType(entAddr)
+		if imgType == 0 {
+			continue
+		}
+		dstName := int(&imgNames) + imgCount*NAME_STRIDE
+		for c := 0; c < NAME_STRIDE-1; c++ {
+			ch := peek1(entAddr + c)
+			poke1(dstName+c, ch)
+			if ch == 0 {
+				break
+			}
+		}
+		poke1(dstName+NAME_STRIDE-1, 0)
+		imgSizes[imgCount] = peek4(entAddr + ENTRY_SIZE_O)
+		imgTypes[imgCount] = byte(imgType)
+		imgCount++
+	}
+	return imgCount
+}
+
+func displaySlide(idx int) bool {
+	imgType := int(imgTypes[idx])
+	sz := imgSizes[idx]
+	drawn := false
+
+	// Use Core 0 RAM prefetch when image fits in the 64 KB buffer
+	if sz <= BUF_MAX {
+		if prefetchIdx != idx {
+			startPrefetch(idx)
+		}
+		st, got := os_prefetch_status()
+		for st == 1 {
+			if checkHomeExit() {
+				return false
+			}
+			os_delay_ms(15)
+			st, got = os_prefetch_status()
+		}
+		if st == 2 && got > 0 {
+			tft_fill_screen(BLACK)
+			// x = -1 centers the image horizontally and vertically on the 320x240 screen
+			if imgType == 1 {
+				drawn = tft_draw_png(&imgBuf, got, -1, 0)
+			} else {
+				drawn = tft_draw_jpg(&imgBuf, got, -1, 0, 0)
+			}
+		}
+	}
+
+	// Fallback to streaming directly from VFS if not drawn from RAM buffer
+	if !drawn {
+		fullPath := buildNetPngPath(idx)
+		tft_fill_screen(BLACK)
+		if imgType == 1 {
+			drawn = tft_draw_png_file(fullPath, -1, 0)
+		} else {
+			drawn = tft_draw_jpg_file(fullPath, -1, 0, 0)
+		}
+	}
+
+	if drawn {
+		drawHomeButton()
+	}
+
+	// Immediately start Core 0 background prefetch for the NEXT slide during the 10s wait
+	if imgCount > 0 {
+		nextIdx := idx + 1
+		if nextIdx >= imgCount {
+			nextIdx = 0
+		}
+		startPrefetch(nextIdx)
+	}
+
+	return drawn
+}
+
+func main() {
+	tft_fill_screen(BLACK)
+	drawHomeButton()
+	tft_set_text_color(CYAN, BLACK)
+	tft_draw_string("Loading /net/pix-2/ ...", 64, 110, 2)
+
+	for {
+		count := scanCatalog()
+		shownInPass := 0
+
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				if displaySlide(i) {
+					shownInPass++
+					if waitWithHomePoll(DISPLAY_MS) {
+						return
+					}
+				} else if checkHomeExit() {
+					return
+				}
+			}
+		}
+
+		if shownInPass == 0 {
+			showStatusMessage("No images in /net/pix-2/", "Retrying in 3 seconds...")
+			if waitWithHomePoll(3000) {
+				return
+			}
+		}
+	}
+}

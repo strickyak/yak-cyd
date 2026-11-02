@@ -1,0 +1,824 @@
+// Space Invaders for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Controls:
+//   - Top-Left HOME button (x <= 64, y < 25): Exit to Lakatos OS
+//   - Bottom zone (y >= 198): Move gun left/right at a fixed rate
+//   - Vast middle (25 <= y < 198): Fire gun
+package main
+
+const (
+	TOP_BAR_H      = 24
+	BOTTOM_TOUCH_Y = 198
+	TRACK_Y        = 220
+
+	GUN_Y     = 203
+	GUN_W     = 18
+	GUN_H     = 11
+	GUN_MIN_X = 16
+	GUN_MAX_X = 304
+	GUN_SPEED = 4 // Fixed horizontal movement speed (pixels per tick)
+
+	ALIEN_ROWS  = 4
+	ALIEN_COLS  = 8
+	ALIEN_COUNT = 32 // ALIEN_ROWS * ALIEN_COLS
+	ALIEN_W     = 16
+	ALIEN_H     = 10
+	ALIEN_SPC_X = 28
+	ALIEN_SPC_Y = 16
+
+	BUNKER_COUNT = 4
+	BUNKER_COLS  = 6
+	BUNKER_ROWS  = 3
+	BUNKER_CELLS = 72 // BUNKER_COUNT * BUNKER_ROWS * BUNKER_COLS
+	BUNKER_Y     = 174
+	BUNKER_BLK   = 4
+
+	MAX_PLAYER_SHOTS = 3
+	MAX_ALIEN_SHOTS  = 3
+	PLAYER_SHOT_DY   = 6
+	ALIEN_SHOT_DY    = 3
+
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	BTN_NEW  = 0x03EF
+	TRACK_BG = 0x0861
+	TRACK_FG = 0x39E7
+)
+
+var (
+	score    int
+	wave     int
+	lives    int
+	gameOver bool
+
+	// Player gun state
+	gunX     int
+	prevGunX int
+	targetX  int
+	prevTgtX int
+	fireCD   int
+
+	// Invader fleet state
+	alienAlive [ALIEN_COUNT]byte
+	aliveCount int
+	fleetX     int
+	fleetY     int
+	prevFleetX int
+	prevFleetY int
+	fleetDX    int
+	animFrame  int
+	marchTimer int
+	marchDelay int
+
+	// Mystery UFO state
+	ufoActive bool
+	ufoX      int
+	prevUfoX  int
+	ufoDX     int
+	ufoTimer  int
+
+	// Player laser shots
+	pShotActive [MAX_PLAYER_SHOTS]byte
+	pShotX      [MAX_PLAYER_SHOTS]int
+	pShotY      [MAX_PLAYER_SHOTS]int
+
+	// Alien bombs
+	aShotActive [MAX_ALIEN_SHOTS]byte
+	aShotX      [MAX_ALIEN_SHOTS]int
+	aShotY      [MAX_ALIEN_SHOTS]int
+	aShotTimer  int
+
+	// Destructible bunkers (4 bunkers x 3 rows x 6 cols)
+	bunkers [BUNKER_CELLS]byte
+
+	// Touch state for clean edge/coordinate tracking
+	lastTouchX int
+	lastTouchY int
+	touchHeld  bool
+)
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	// Top-right NEW button
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NEW)
+	tft_draw_string("NEW", 275, 4, 2)
+
+	updateHUD()
+}
+
+func updateHUD() {
+	tft_fill_rect(64, 2, 192, 20, BAR_BG)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("S:", 66, 4, 2)
+	tft_draw_int(score, 84, 4, 2)
+
+	tft_set_text_color(CYAN, BAR_BG)
+	tft_draw_string("W:", 148, 4, 2)
+	tft_draw_int(wave, 168, 4, 2)
+
+	// Draw remaining lives as mini green turrets
+	tft_set_text_color(GREEN, BAR_BG)
+	tft_draw_string("L:", 198, 4, 2)
+	for i := 0; i < 3; i++ {
+		lx := 216 + i*13
+		if i < lives {
+			tft_fill_rect(lx, 12, 10, 4, GREEN)
+			tft_fill_rect(lx+3, 8, 4, 4, GREEN)
+		} else {
+			tft_fill_rect(lx, 8, 10, 8, BAR_BG)
+		}
+	}
+}
+
+func drawBottomTrack() {
+	tft_fill_rect(0, TRACK_Y, SCREEN_W, SCREEN_H-TRACK_Y, TRACK_BG)
+	tft_draw_fast_hline(0, TRACK_Y, SCREEN_W, DARKCYAN)
+
+	// Left & Right directional zones on the bottom touch bar
+	tft_fill_round_rect(4, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(4, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("< LEFT", 8, TRACK_Y+2, 2)
+
+	tft_fill_round_rect(260, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(260, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("RIGHT >", 263, TRACK_Y+2, 2)
+
+	// Center guide rail
+	tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+}
+
+func updateTrackMarkers() {
+	if prevTgtX != targetX || prevGunX != gunX {
+		// Redraw guide segment where old markers were
+		tft_fill_rect(66, TRACK_Y+6, 188, 9, TRACK_BG)
+		tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+
+		// Draw targetX marker if inside center rail
+		tx := clamp(targetX, 68, 252)
+		tft_fill_rect(tx-2, TRACK_Y+7, 5, 7, YELLOW)
+
+		// Draw gunX position marker
+		gx := clamp(gunX, 68, 252)
+		tft_fill_rect(gx-3, TRACK_Y+8, 7, 5, GREEN)
+
+		prevTgtX = targetX
+	}
+}
+
+func drawGunAt(cx int, erase bool) {
+	x := cx - (GUN_W / 2)
+	if erase {
+		tft_fill_rect(x-1, GUN_Y-1, GUN_W+2, GUN_H+2, BLACK)
+		return
+	}
+	// Classic Space Invaders laser cannon in bright green with cyan tip
+	tft_fill_rect(x, GUN_Y+6, GUN_W, 5, GREEN)
+	tft_fill_rect(x+3, GUN_Y+3, GUN_W-6, 3, GREEN)
+	tft_fill_rect(x+7, GUN_Y, 4, 3, CYAN)
+}
+
+func renderGun() {
+	if gunX != prevGunX {
+		if prevGunX > 0 {
+			drawGunAt(prevGunX, true)
+		}
+		drawGunAt(gunX, false)
+		updateTrackMarkers()
+		prevGunX = gunX
+	}
+}
+
+func bunkerScreenX(b int, col int) int {
+	return 34 + b*74 + col*BUNKER_BLK
+}
+
+func bunkerScreenY(row int) int {
+	return BUNKER_Y + row*BUNKER_BLK
+}
+
+func initBunkers() {
+	for b := 0; b < BUNKER_COUNT; b++ {
+		for r := 0; r < BUNKER_ROWS; r++ {
+			for c := 0; c < BUNKER_COLS; c++ {
+				idx := (b*BUNKER_ROWS+r)*BUNKER_COLS + c
+				// Arch cutout in bottom middle and beveled top corners
+				if r == BUNKER_ROWS-1 && (c == 2 || c == 3) {
+					bunkers[idx] = 0
+				} else {
+					bunkers[idx] = 1
+				}
+			}
+		}
+	}
+}
+
+func drawBunkers() {
+	for b := 0; b < BUNKER_COUNT; b++ {
+		for r := 0; r < BUNKER_ROWS; r++ {
+			sy := bunkerScreenY(r)
+			for c := 0; c < BUNKER_COLS; c++ {
+				idx := (b*BUNKER_ROWS+r)*BUNKER_COLS + c
+				sx := bunkerScreenX(b, c)
+				if bunkers[idx] > 0 {
+					tft_fill_rect(sx, sy, BUNKER_BLK, BUNKER_BLK, GREEN)
+				} else {
+					tft_fill_rect(sx, sy, BUNKER_BLK, BUNKER_BLK, BLACK)
+				}
+			}
+		}
+	}
+}
+
+// Check if a projectile at (px, py) hits any bunker cell; if so, destroy cell and return true.
+func checkBunkerHit(px int, py int) bool {
+	if py < BUNKER_Y || py >= BUNKER_Y+BUNKER_ROWS*BUNKER_BLK {
+		return false
+	}
+	r := (py - BUNKER_Y) / BUNKER_BLK
+	for b := 0; b < BUNKER_COUNT; b++ {
+		bx0 := 34 + b*74
+		if px >= bx0 && px < bx0+BUNKER_COLS*BUNKER_BLK {
+			c := (px - bx0) / BUNKER_BLK
+			idx := (b*BUNKER_ROWS+r)*BUNKER_COLS + c
+			if bunkers[idx] > 0 {
+				bunkers[idx] = 0
+				tft_fill_rect(bunkerScreenX(b, c), bunkerScreenY(r), BUNKER_BLK, BUNKER_BLK, BLACK)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func alienColor(row int) int {
+	if row == 0 {
+		return MAGENTA
+	}
+	if row == 1 {
+		return CYAN
+	}
+	if row == 2 {
+		return GREEN
+	}
+	return YELLOW
+}
+
+func alienScore(row int) int {
+	if row == 0 {
+		return 30
+	}
+	if row == 1 {
+		return 20
+	}
+	if row == 2 {
+		return 15
+	}
+	return 10
+}
+
+func drawAlienSprite(x int, y int, row int, frame int) {
+	col := alienColor(row)
+	if row == 0 {
+		// Squid commander
+		tft_fill_rect(x+5, y, 6, 2, col)
+		tft_fill_rect(x+3, y+2, 10, 2, col)
+		tft_fill_rect(x+1, y+4, 14, 3, col)
+		tft_fill_rect(x+4, y+4, 2, 2, BLACK)
+		tft_fill_rect(x+10, y+4, 2, 2, BLACK)
+		if frame == 0 {
+			tft_fill_rect(x+1, y+7, 3, 3, col)
+			tft_fill_rect(x+6, y+7, 4, 2, col)
+			tft_fill_rect(x+12, y+7, 3, 3, col)
+		} else {
+			tft_fill_rect(x+3, y+7, 3, 3, col)
+			tft_fill_rect(x+7, y+8, 2, 2, col)
+			tft_fill_rect(x+10, y+7, 3, 3, col)
+		}
+	} else if row == 1 {
+		// Crab invader
+		tft_fill_rect(x+3, y, 2, 2, col)
+		tft_fill_rect(x+11, y, 2, 2, col)
+		tft_fill_rect(x+2, y+2, 12, 5, col)
+		tft_fill_rect(x+4, y+3, 2, 2, BLACK)
+		tft_fill_rect(x+10, y+3, 2, 2, BLACK)
+		if frame == 0 {
+			tft_fill_rect(x, y+4, 2, 5, col)
+			tft_fill_rect(x+14, y+4, 2, 5, col)
+			tft_fill_rect(x+4, y+7, 3, 3, col)
+			tft_fill_rect(x+9, y+7, 3, 3, col)
+		} else {
+			tft_fill_rect(x, y+1, 2, 5, col)
+			tft_fill_rect(x+14, y+1, 2, 5, col)
+			tft_fill_rect(x+2, y+7, 3, 3, col)
+			tft_fill_rect(x+11, y+7, 3, 3, col)
+		}
+	} else {
+		// Octopus invader
+		tft_fill_rect(x+4, y, 8, 2, col)
+		tft_fill_rect(x+1, y+2, 14, 5, col)
+		tft_fill_rect(x+4, y+3, 2, 2, BLACK)
+		tft_fill_rect(x+10, y+3, 2, 2, BLACK)
+		if frame == 0 {
+			tft_fill_rect(x+1, y+7, 3, 3, col)
+			tft_fill_rect(x+6, y+7, 4, 3, col)
+			tft_fill_rect(x+12, y+7, 3, 3, col)
+		} else {
+			tft_fill_rect(x+3, y+7, 3, 3, col)
+			tft_fill_rect(x+7, y+7, 2, 2, col)
+			tft_fill_rect(x+10, y+7, 3, 3, col)
+		}
+	}
+}
+
+func renderFleet(eraseOld bool) {
+	for r := 0; r < ALIEN_ROWS; r++ {
+		oldY := prevFleetY + r*ALIEN_SPC_Y
+		newY := fleetY + r*ALIEN_SPC_Y
+		for c := 0; c < ALIEN_COLS; c++ {
+			idx := r*ALIEN_COLS + c
+			if alienAlive[idx] > 0 {
+				if eraseOld {
+					oldX := prevFleetX + c*ALIEN_SPC_X
+					tft_fill_rect(oldX, oldY, ALIEN_W, ALIEN_H, BLACK)
+				}
+				newX := fleetX + c*ALIEN_SPC_X
+				drawAlienSprite(newX, newY, r, animFrame)
+			}
+		}
+	}
+	prevFleetX = fleetX
+	prevFleetY = fleetY
+}
+
+func updateMarchSpeed() {
+	if aliveCount > 24 {
+		marchDelay = 9
+	} else if aliveCount > 16 {
+		marchDelay = 7
+	} else if aliveCount > 8 {
+		marchDelay = 5
+	} else if aliveCount > 3 {
+		marchDelay = 3
+	} else {
+		marchDelay = 2
+	}
+	if wave > 1 && marchDelay > 2 {
+		marchDelay--
+	}
+}
+
+func initWave() {
+	// Clear playfield between top HUD and bottom track
+	tft_fill_rect(0, TOP_BAR_H+1, SCREEN_W, TRACK_Y-TOP_BAR_H-1, BLACK)
+
+	for i := 0; i < ALIEN_COUNT; i++ {
+		alienAlive[i] = 1
+	}
+	aliveCount = ALIEN_COUNT
+
+	fleetX = 42
+	fleetY = 42 + min((wave-1)*6, 24)
+	prevFleetX = fleetX
+	prevFleetY = fleetY
+	fleetDX = 4
+	animFrame = 0
+	marchTimer = 0
+	updateMarchSpeed()
+
+	for i := 0; i < MAX_PLAYER_SHOTS; i++ {
+		pShotActive[i] = 0
+	}
+	for i := 0; i < MAX_ALIEN_SHOTS; i++ {
+		aShotActive[i] = 0
+	}
+	aShotTimer = 20
+
+	ufoActive = false
+	ufoTimer = 90
+
+	drawBunkers()
+	renderFleet(false)
+	prevGunX = -1
+	renderGun()
+	updateHUD()
+}
+
+func startNewGame() {
+	score = 0
+	wave = 1
+	lives = 3
+	gameOver = false
+
+	gunX = SCREEN_W / 2
+	targetX = gunX
+	prevGunX = -1
+	prevTgtX = -1
+	fireCD = 0
+
+	initBunkers()
+	drawHeader()
+	drawBottomTrack()
+	initWave()
+}
+
+func firePlayerShot() {
+	if fireCD > 0 || gameOver {
+		return
+	}
+	for i := 0; i < MAX_PLAYER_SHOTS; i++ {
+		if pShotActive[i] == 0 {
+			pShotActive[i] = 1
+			pShotX[i] = gunX - 1
+			pShotY[i] = GUN_Y - 7
+			tft_fill_rect(pShotX[i], pShotY[i], 2, 6, WHITE)
+			fireCD = 5
+			return
+		}
+	}
+}
+
+func stepUfo() {
+	if !ufoActive {
+		ufoTimer--
+		if ufoTimer <= 0 {
+			ufoActive = true
+			if os_rand(2) == 0 {
+				ufoX = 4
+				ufoDX = 3
+			} else {
+				ufoX = SCREEN_W - 20
+				ufoDX = -3
+			}
+			prevUfoX = ufoX
+		}
+		return
+	}
+
+	tft_fill_rect(prevUfoX, 27, 16, 8, BLACK)
+	ufoX += ufoDX
+	if ufoX < 2 || ufoX > SCREEN_W-18 {
+		ufoActive = false
+		ufoTimer = 120 + os_rand(80)
+		return
+	}
+	// Draw flying saucer
+	tft_fill_rect(ufoX+4, 27, 8, 2, PINK)
+	tft_fill_rect(ufoX+1, 29, 14, 3, RED)
+	tft_fill_rect(ufoX+3, 30, 2, 1, YELLOW)
+	tft_fill_rect(ufoX+7, 30, 2, 1, YELLOW)
+	tft_fill_rect(ufoX+11, 30, 2, 1, YELLOW)
+	tft_fill_rect(ufoX+4, 32, 8, 2, MAROON)
+	prevUfoX = ufoX
+}
+
+func stepPlayerShots() {
+	for i := 0; i < MAX_PLAYER_SHOTS; i++ {
+		if pShotActive[i] == 0 {
+			continue
+		}
+		sx := pShotX[i]
+		sy := pShotY[i]
+		tft_fill_rect(sx, sy, 2, 6, BLACK)
+
+		sy -= PLAYER_SHOT_DY
+		if sy <= TOP_BAR_H+2 {
+			pShotActive[i] = 0
+			continue
+		}
+
+		// Check bunker collision
+		if checkBunkerHit(sx, sy) {
+			pShotActive[i] = 0
+			continue
+		}
+
+		// Check UFO collision
+		if ufoActive && sy <= 35 && sy+6 >= 27 && sx+2 >= ufoX && sx <= ufoX+16 {
+			tft_fill_rect(ufoX, 27, 16, 8, BLACK)
+			ufoActive = false
+			ufoTimer = 140 + os_rand(80)
+			pShotActive[i] = 0
+			score += 100
+			updateHUD()
+			continue
+		}
+
+		// Check alien collision
+		hitAlien := false
+		for r := 0; r < ALIEN_ROWS; r++ {
+			ay := fleetY + r*ALIEN_SPC_Y
+			if sy <= ay+ALIEN_H && sy+6 >= ay {
+				for c := 0; c < ALIEN_COLS; c++ {
+					idx := r*ALIEN_COLS + c
+					if alienAlive[idx] > 0 {
+						ax := fleetX + c*ALIEN_SPC_X
+						if sx+2 >= ax && sx <= ax+ALIEN_W {
+							alienAlive[idx] = 0
+							aliveCount--
+							pShotActive[i] = 0
+							hitAlien = true
+
+							// Brief explosion flash then erase
+							tft_fill_rect(ax, ay, ALIEN_W, ALIEN_H, BLACK)
+							tft_draw_line(ax+2, ay+1, ax+13, ay+8, YELLOW)
+							tft_draw_line(ax+13, ay+1, ax+2, ay+8, ORANGE)
+							os_delay_ms(12)
+							tft_fill_rect(ax, ay, ALIEN_W, ALIEN_H, BLACK)
+
+							score += alienScore(r)
+							updateMarchSpeed()
+							updateHUD()
+							break
+						}
+					}
+				}
+			}
+			if hitAlien {
+				break
+			}
+		}
+
+		if !hitAlien && pShotActive[i] > 0 {
+			pShotY[i] = sy
+			tft_fill_rect(sx, sy, 2, 6, WHITE)
+		}
+	}
+}
+
+func spawnAlienShot() {
+	if aliveCount <= 0 {
+		return
+	}
+	slot := -1
+	for i := 0; i < MAX_ALIEN_SHOTS; i++ {
+		if aShotActive[i] == 0 {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		return
+	}
+
+	// Pick a random column and find its lowest living invader
+	startCol := os_rand(ALIEN_COLS)
+	for k := 0; k < ALIEN_COLS; k++ {
+		col := (startCol + k) % ALIEN_COLS
+		for r := ALIEN_ROWS - 1; r >= 0; r-- {
+			idx := r*ALIEN_COLS + col
+			if alienAlive[idx] > 0 {
+				aShotActive[slot] = 1
+				aShotX[slot] = fleetX + col*ALIEN_SPC_X + (ALIEN_W / 2) - 1
+				aShotY[slot] = fleetY + r*ALIEN_SPC_Y + ALIEN_H + 1
+				return
+			}
+		}
+	}
+}
+
+func triggerGameOver() {
+	gameOver = true
+	tft_fill_round_rect(50, 92, 220, 52, 6, MAROON)
+	tft_draw_round_rect(50, 92, 220, 52, 6, YELLOW)
+	tft_set_text_color(YELLOW, MAROON)
+	tft_draw_string("GAME OVER", 112, 100, 2)
+	tft_set_text_color(WHITE, MAROON)
+	tft_draw_string("TAP MIDDLE TO PLAY", 84, 120, 2)
+}
+
+func loseLife() {
+	// Flash player cannon hit
+	drawGunAt(gunX, true)
+	tft_fill_circle(gunX, GUN_Y+5, 8, ORANGE)
+	os_delay_ms(80)
+	tft_fill_circle(gunX, GUN_Y+5, 9, BLACK)
+
+	lives--
+	updateHUD()
+	if lives <= 0 {
+		triggerGameOver()
+		return
+	}
+	prevGunX = -1
+	renderGun()
+}
+
+func stepAlienShots() {
+	aShotTimer--
+	if aShotTimer <= 0 {
+		spawnAlienShot()
+		aShotTimer = max(8, 26-wave*3)
+	}
+
+	for i := 0; i < MAX_ALIEN_SHOTS; i++ {
+		if aShotActive[i] == 0 {
+			continue
+		}
+		sx := aShotX[i]
+		sy := aShotY[i]
+		tft_fill_rect(sx, sy, 3, 6, BLACK)
+
+		sy += ALIEN_SHOT_DY
+		if sy >= TRACK_Y-6 {
+			aShotActive[i] = 0
+			continue
+		}
+
+		if checkBunkerHit(sx+1, sy+5) {
+			aShotActive[i] = 0
+			continue
+		}
+
+		// Check collision with player gun
+		if sy+6 >= GUN_Y && sy <= GUN_Y+GUN_H && sx+3 >= gunX-(GUN_W/2) && sx <= gunX+(GUN_W/2) {
+			aShotActive[i] = 0
+			loseLife()
+			if gameOver {
+				return
+			}
+			continue
+		}
+
+		aShotY[i] = sy
+		tft_fill_rect(sx, sy, 3, 6, ORANGE)
+	}
+}
+
+func stepFleetMarch() {
+	marchTimer++
+	if marchTimer < marchDelay {
+		return
+	}
+	marchTimer = 0
+
+	// Find horizontal & vertical bounds of living aliens
+	minCol := ALIEN_COLS
+	maxCol := -1
+	maxRow := -1
+	for r := 0; r < ALIEN_ROWS; r++ {
+		for c := 0; c < ALIEN_COLS; c++ {
+			if alienAlive[r*ALIEN_COLS+c] > 0 {
+				if c < minCol {
+					minCol = c
+				}
+				if c > maxCol {
+					maxCol = c
+				}
+				if r > maxRow {
+					maxRow = r
+				}
+			}
+		}
+	}
+	if maxCol < 0 {
+		return
+	}
+
+	leftEdge := fleetX + minCol*ALIEN_SPC_X + fleetDX
+	rightEdge := fleetX + maxCol*ALIEN_SPC_X + ALIEN_W + fleetDX
+
+	if leftEdge < 6 || rightEdge > SCREEN_W-6 {
+		fleetDX = -fleetDX
+		fleetY += 8
+	} else {
+		fleetX += fleetDX
+	}
+	animFrame = 1 - animFrame
+	renderFleet(true)
+
+	// Check if invaders reached the bunkers/gun level
+	bottomY := fleetY + maxRow*ALIEN_SPC_Y + ALIEN_H
+	if bottomY >= GUN_Y-4 {
+		lives = 0
+		updateHUD()
+		triggerGameOver()
+	}
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+	}
+
+	touched, tx, ty := os_read_touch()
+	if !touched {
+		touchHeld = false
+		return false
+	}
+
+	// 1. Top bar (y < 25): HOME button on top-left, NEW button on top-right
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 && (!touchHeld || tx != lastTouchX || ty != lastTouchY) {
+			touchHeld = true
+			lastTouchX = tx
+			lastTouchY = ty
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	// If game over, tapping in the middle starts a new game
+	if gameOver {
+		if ty >= 25 && ty < BOTTOM_TOUCH_Y && (!touchHeld || tx != lastTouchX || ty != lastTouchY) {
+			touchHeld = true
+			lastTouchX = tx
+			lastTouchY = ty
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	// 2. Bottom zone (ty >= BOTTOM_TOUCH_Y): move the gun left or right at a fixed rate
+	if ty >= BOTTOM_TOUCH_Y {
+		if tx < 60 {
+			targetX = GUN_MIN_X
+		} else if tx > 260 {
+			targetX = GUN_MAX_X
+		} else {
+			targetX = clamp(tx, GUN_MIN_X, GUN_MAX_X)
+		}
+		updateTrackMarkers()
+		touchHeld = true
+		lastTouchX = tx
+		lastTouchY = ty
+		return false
+	}
+
+	// 3. Vast middle (25 <= ty < BOTTOM_TOUCH_Y): fire the gun!
+	firePlayerShot()
+	touchHeld = true
+	lastTouchX = tx
+	lastTouchY = ty
+	return false
+}
+
+func stepGunMovement() {
+	if gunX < targetX {
+		gunX += GUN_SPEED
+		if gunX > targetX {
+			gunX = targetX
+		}
+		renderGun()
+	} else if gunX > targetX {
+		gunX -= GUN_SPEED
+		if gunX < targetX {
+			gunX = targetX
+		}
+		renderGun()
+	}
+}
+
+func main() {
+	startNewGame()
+
+	for {
+		if handleInput() {
+			return
+		}
+
+		if !gameOver {
+			if fireCD > 0 {
+				fireCD--
+			}
+			stepGunMovement()
+			stepPlayerShots()
+			if aliveCount <= 0 {
+				wave++
+				score += 50
+				initBunkers()
+				initWave()
+				continue
+			}
+			stepUfo()
+			stepAlienShots()
+			if !gameOver {
+				stepFleetMarch()
+			}
+		}
+
+		os_delay_ms(20)
+	}
+}

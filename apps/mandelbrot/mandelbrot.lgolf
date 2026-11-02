@@ -1,0 +1,417 @@
+// Colorful Mandelbrot Set Explorer for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Uses Q16.16 fixed-point math in int32 variables (16 bits integer, 16 bits fraction).
+package main
+
+const (
+	VIEW_Y = 24
+	VIEW_W = 320
+	VIEW_H = 216
+
+	// Q16.16 Fixed-Point Constants (16 bits before and 16 bits after binary point)
+	FP_SHIFT     = 16
+	FP_ONE       = 65536  // 1.0 in Q16.16 (1 << 16)
+	FP_HALF      = 32768  // 0.5 in Q16.16
+	FP_QUARTER   = 16384  // 0.25 in Q16.16
+	FP_SIXTEENTH = 4096   // 0.0625 (1/16) in Q16.16
+	FP_FOUR      = 262144 // 4.0 in Q16.16 (escape radius squared)
+	FP_MASK      = 0xFFFF // 16-bit fractional mask
+
+	// Default full-set view centered at (-0.65, 0.0) with 1:1 aspect ratio
+	DEFAULT_CENTER_R = -42598 // -0.65 * 65536
+	DEFAULT_CENTER_I = 0      //  0.00 * 65536
+	DEFAULT_STEP     = 672    // ~0.01025 per pixel (spanR ~ 3.28, spanI ~ 2.21)
+	MIN_STEP         = 8      // Maximum zoom limit for Q16.16
+
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	BTN_PAL  = 0x03EF
+	BTN_RST  = 0x39E7
+
+	NUM_PALETTES = 3
+	PAL_SIZE     = 32
+)
+
+var (
+	centerR  int32
+	centerI  int32
+	stepFP   int32
+	zoomLvl  int32
+	palIdx   int32
+	palettes [NUM_PALETTES][PAL_SIZE]uint16
+)
+
+// Exact Q16.16 fixed-point multiplication using 32-bit int32 variables.
+// Splits a and b into 16-bit signed integer part (>> 16) and 16-bit unsigned
+// fractional part (& 0xFFFF) so intermediate products never overflow int32.
+func fpMul(a int32, b int32) int32 {
+	var ah int32 = a >> FP_SHIFT
+	var al int32 = a & FP_MASK
+	var bh int32 = b >> FP_SHIFT
+	var bl int32 = b & FP_MASK
+	return ah*b + bh*al + ((al * bl) >>> FP_SHIFT)
+}
+
+// Exact Q16.16 fixed-point squaring using 32-bit int32 variables.
+func fpSq(a int32) int32 {
+	var ah int32 = a >> FP_SHIFT
+	var al int32 = a & FP_MASK
+	return ah*(a+al) + ((al * al) >>> FP_SHIFT)
+}
+
+func initPalettes() {
+	// Palette 0: Ultra Fractal Spectrum (Deep Blue -> Cyan -> Green -> Gold -> Red -> Magenta)
+	palettes[0][0] = uint16(rgb565(0, 7, 100))
+	palettes[0][1] = uint16(rgb565(8, 25, 135))
+	palettes[0][2] = uint16(rgb565(18, 48, 170))
+	palettes[0][3] = uint16(rgb565(32, 76, 203))
+	palettes[0][4] = uint16(rgb565(50, 108, 225))
+	palettes[0][5] = uint16(rgb565(75, 142, 240))
+	palettes[0][6] = uint16(rgb565(108, 176, 248))
+	palettes[0][7] = uint16(rgb565(145, 206, 252))
+	palettes[0][8] = uint16(rgb565(180, 232, 255))
+	palettes[0][9] = uint16(rgb565(120, 240, 210))
+	palettes[0][10] = uint16(rgb565(60, 235, 150))
+	palettes[0][11] = uint16(rgb565(20, 220, 90))
+	palettes[0][12] = uint16(rgb565(60, 230, 40))
+	palettes[0][13] = uint16(rgb565(130, 240, 20))
+	palettes[0][14] = uint16(rgb565(200, 245, 10))
+	palettes[0][15] = uint16(rgb565(255, 235, 0))
+	palettes[0][16] = uint16(rgb565(255, 200, 0))
+	palettes[0][17] = uint16(rgb565(255, 165, 0))
+	palettes[0][18] = uint16(rgb565(255, 128, 0))
+	palettes[0][19] = uint16(rgb565(245, 90, 10))
+	palettes[0][20] = uint16(rgb565(235, 50, 25))
+	palettes[0][21] = uint16(rgb565(220, 20, 60))
+	palettes[0][22] = uint16(rgb565(200, 10, 110))
+	palettes[0][23] = uint16(rgb565(180, 20, 160))
+	palettes[0][24] = uint16(rgb565(155, 30, 205))
+	palettes[0][25] = uint16(rgb565(125, 25, 225))
+	palettes[0][26] = uint16(rgb565(95, 18, 210))
+	palettes[0][27] = uint16(rgb565(65, 12, 185))
+	palettes[0][28] = uint16(rgb565(40, 8, 160))
+	palettes[0][29] = uint16(rgb565(20, 6, 140))
+	palettes[0][30] = uint16(rgb565(10, 6, 125))
+	palettes[0][31] = uint16(rgb565(4, 6, 112))
+
+	// Palette 1: Fire & Solar Gold
+	for i := 0; i < PAL_SIZE; i++ {
+		var t int32 = int32(i)
+		var r int32 = 0
+		var g int32 = 0
+		var b int32 = 0
+		if t < 11 {
+			r = t * 23
+			g = 0
+			b = t * 4
+		} else if t < 22 {
+			r = 255
+			g = (t - 11) * 23
+			b = 44 - (t-11)*4
+		} else {
+			r = 255
+			g = 255
+			b = (t - 22) * 25
+		}
+		palettes[1][i] = uint16(rgb565(int(r), int(g), int(b)))
+	}
+
+	// Palette 2: Cyber Neon (Purple -> Magenta -> Cyan -> Electric Green)
+	for i := 0; i < PAL_SIZE; i++ {
+		var t int32 = int32(i)
+		var r int32 = 0
+		var g int32 = 0
+		var b int32 = 0
+		if t < 8 {
+			r = 40 + t*26
+			g = 10
+			b = 80 + t*20
+		} else if t < 16 {
+			r = 248 - (t-8)*28
+			g = 10 + (t-8)*30
+			b = 240
+		} else if t < 24 {
+			r = 20
+			g = 250
+			b = 240 - (t-16)*26
+		} else {
+			r = 20 + (t-24)*25
+			g = 250 - (t-24)*25
+			b = 32 + (t-24)*20
+		}
+		palettes[2][i] = uint16(rgb565(int(r), int(g), int(b)))
+	}
+}
+
+func resetView() {
+	centerR = DEFAULT_CENTER_R
+	centerI = DEFAULT_CENTER_I
+	stepFP = DEFAULT_STEP
+	zoomLvl = 1
+}
+
+func drawHUD() {
+	tft_fill_rect(0, 0, SCREEN_W, VIEW_Y, BAR_BG)
+	tft_draw_fast_hline(0, VIEW_Y-1, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	tft_set_text_color(CYAN, BAR_BG)
+	tft_draw_string("MANDEL", 66, 4, 2)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("Z:", 130, 4, 2)
+	tft_draw_int(int(zoomLvl), 146, 4, 2)
+	tft_draw_string("x", 168, 4, 2)
+
+	// PAL button (x: 194..251)
+	tft_fill_round_rect(194, 2, 58, 20, 4, BTN_PAL)
+	tft_draw_round_rect(194, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_PAL)
+	tft_draw_string("PAL", 210, 4, 2)
+
+	// RESET button (x: 258..315)
+	tft_fill_round_rect(258, 2, 58, 20, 4, BTN_RST)
+	tft_draw_round_rect(258, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_RST)
+	tft_draw_string("RESET", 265, 4, 2)
+}
+
+// Compute Mandelbrot escape iterations for (cr, ci) in Q16.16 fixed-point.
+func mandelIter(cr int32, ci int32, maxIter int32) int32 {
+	var zr int32 = cr
+	var zi int32 = ci
+	var iter int32 = 0
+	var zrh int32 = 0
+	var zrl int32 = 0
+	var zih int32 = 0
+	var zil int32 = 0
+	var zr2 int32 = 0
+	var zi2 int32 = 0
+
+	// Quick bounding box filter for main cardioid and period-2 bulb
+	if cr > -81920 && cr < 24576 && ci > -42598 && ci < 42598 {
+		zi2 = fpSq(ci)
+		// Period-2 bulb check: (cr + 1)^2 + ci^2 < 1/16
+		if fpSq(cr+FP_ONE)+zi2 < FP_SIXTEENTH {
+			return maxIter
+		}
+		// Main cardioid check: q * (q + (cr - 1/4)) < ci^2 / 4
+		zrh = cr - FP_QUARTER
+		zr2 = fpSq(zrh) + zi2
+		if fpMul(zr2, zr2+zrh) < (zi2 >> 2) {
+			return maxIter
+		}
+	}
+
+	for iter < maxIter {
+		zrh = zr >> FP_SHIFT
+		zrl = zr & FP_MASK
+		zr2 = zrh*(zr+zrl) + ((zrl * zrl) >>> FP_SHIFT)
+
+		zih = zi >> FP_SHIFT
+		zil = zi & FP_MASK
+		zi2 = zih*(zi+zil) + ((zil * zil) >>> FP_SHIFT)
+
+		if zr2+zi2 > FP_FOUR {
+			return iter
+		}
+
+		zi = ((zrh*zi + zih*zrl + ((zrl * zil) >>> FP_SHIFT)) << 1) + ci
+		zr = zr2 - zi2 + cr
+		iter++
+	}
+	return maxIter
+}
+
+// Poll serial and touchscreen discrete clicks (os_read_click).
+// Returns: 0 = no action, 1 = view/palette changed (restart render), 2 = exit app
+func checkInput() int32 {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return 2
+		}
+	}
+
+	clicked, tx, ty := os_read_click()
+	if !clicked {
+		return 0
+	}
+
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return 2
+		}
+		if tx >= 255 {
+			resetView()
+			drawHUD()
+			return 1
+		}
+		if tx >= 192 && tx < 255 {
+			palIdx = (palIdx + 1) % NUM_PALETTES
+			drawHUD()
+			return 1
+		}
+		return 0
+	}
+
+	// Tap on fractal canvas: recenter at tapped point and zoom in 2x
+	var dx int32 = int32(tx) - (VIEW_W / 2)
+	var dy int32 = int32(ty-VIEW_Y) - (VIEW_H / 2)
+	centerR += dx * stepFP
+	centerI += dy * stepFP
+	if stepFP >= MIN_STEP*2 {
+		stepFP = stepFP >> 1
+		zoomLvl = zoomLvl << 1
+	} else {
+		resetView()
+	}
+	drawHUD()
+	return 1
+}
+
+// Render one pass at block size `blk` (e.g. 8 -> 4 -> 2 -> 1).
+// Returns: 0 = pass completed, 1 = interrupted by user input (restart), 2 = exit
+func renderPass(blk int32, maxIter int32, pollInput bool) int32 {
+	var halfW int32 = VIEW_W / 2
+	var halfH int32 = VIEW_H / 2
+	var halfBlkStep int32 = (blk * stepFP) >> 1
+	var startR int32 = centerR - halfW*stepFP + halfBlkStep
+	var startI int32 = centerI - halfH*stepFP + halfBlkStep
+	var deltaFP int32 = blk * stepFP
+
+	var symmetric bool = (centerI == 0)
+
+	var py int32 = 0
+	var ci int32 = startI
+	for py < VIEW_H {
+		if symmetric && (py > VIEW_H-blk-py) {
+			break
+		}
+		var sampleI int32 = ci
+		if sampleI == 0 && blk > 1 {
+			sampleI = stepFP
+		}
+
+		var screenYTop int32 = VIEW_Y + py
+		var screenYBot int32 = VIEW_Y + VIEW_H - blk - py
+
+		var px int32 = 0
+		var cr int32 = startR
+		var runStartX int32 = 0
+		var runColor int32 = -1
+
+		for px < VIEW_W {
+			var it int32 = mandelIter(cr, sampleI, maxIter)
+			var col int32 = BLACK
+			if it < maxIter {
+				col = int32(palettes[palIdx][(it*2)&31])
+			}
+
+			if runColor < 0 {
+				runStartX = px
+				runColor = col
+			} else if col != runColor {
+				var runW int32 = px - runStartX
+				if blk == 1 {
+					tft_draw_fast_hline(int(runStartX), int(screenYTop), int(runW), int(runColor))
+					if symmetric && screenYBot != screenYTop {
+						tft_draw_fast_hline(int(runStartX), int(screenYBot), int(runW), int(runColor))
+					}
+				} else {
+					tft_fill_rect(int(runStartX), int(screenYTop), int(runW), int(blk), int(runColor))
+					if symmetric && screenYBot != screenYTop {
+						tft_fill_rect(int(runStartX), int(screenYBot), int(runW), int(blk), int(runColor))
+					}
+				}
+				runStartX = px
+				runColor = col
+			}
+
+			px += blk
+			cr += deltaFP
+		}
+
+		if runColor >= 0 {
+			var runW int32 = VIEW_W - runStartX
+			if blk == 1 {
+				tft_draw_fast_hline(int(runStartX), int(screenYTop), int(runW), int(runColor))
+				if symmetric && screenYBot != screenYTop {
+					tft_draw_fast_hline(int(runStartX), int(screenYBot), int(runW), int(runColor))
+				}
+			} else {
+				tft_fill_rect(int(runStartX), int(screenYTop), int(runW), int(blk), int(runColor))
+				if symmetric && screenYBot != screenYTop {
+					tft_fill_rect(int(runStartX), int(screenYBot), int(runW), int(blk), int(runColor))
+				}
+			}
+		}
+
+		os_yield()
+		if pollInput {
+			var act int32 = checkInput()
+			if act != 0 {
+				return act
+			}
+		}
+
+		py += blk
+		ci += deltaFP
+	}
+	return checkInput()
+}
+
+func main() {
+	initPalettes()
+	resetView()
+	palIdx = 0
+
+	tft_fill_screen(BLACK)
+	drawHUD()
+
+	for {
+		// Progressive refinement: 8x8 instant -> 2x2 medium -> 1x1 native
+		var act int32 = renderPass(8, 20, false)
+		if act == 2 {
+			return
+		}
+		if act == 1 {
+			continue
+		}
+
+		act = renderPass(2, 32, true)
+		if act == 2 {
+			return
+		}
+		if act == 1 {
+			continue
+		}
+
+		act = renderPass(1, 48, true)
+		if act == 2 {
+			return
+		}
+		if act == 1 {
+			continue
+		}
+
+		// Wait for touch interaction once full-resolution render is complete
+		for {
+			act = checkInput()
+			if act == 2 {
+				return
+			}
+			if act == 1 {
+				break
+			}
+			os_delay_ms(20)
+		}
+	}
+}

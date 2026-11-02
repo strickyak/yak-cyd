@@ -1,0 +1,1397 @@
+// NOAA Aviation Weather & METAR Viewer for Lakatos OS (LCode 32-bit VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Fetches live observations from NOAA Aviation Weather & NWS:
+//   1. https://aviationweather.gov/api/data/metar?ids=K...,K...&format=json
+//   2. https://tgftp.nws.noaa.gov/data/observations/metar/decoded/<ICAO>.TXT
+package main
+
+const (
+	NUM_CITIES           = 7
+	HTTP_BUF_MAX         = 6144
+	WX_CACHE_MAX_AGE_SEC = 3600
+
+	WX_TABLE         = 0
+	WX_CITY_DETAIL   = 1
+	WX_CITY_NWS_TEXT = 2
+
+	CODE_STRIDE  = 8
+	ICAO_STRIDE  = 8
+	NAME_STRIDE  = 32
+	STR16_STRIDE = 16
+	RAW_STRIDE   = 128
+
+	BG_DARK   = 0x0841
+	BAR_BG    = 0x10A2
+	ROW_HOME  = 0x1924
+	ROW_ODD   = 0x1082
+	ROW_EVEN  = 0x0841
+	BTN_HOME  = 0x2945
+	BTN_GREEN = 0x03E0
+	BTN_NAV   = 0x18E3
+	SKYBLUE   = 0x5DFF
+	WARMRED   = 0xF986
+)
+
+var (
+	// Shared 6 KB HTTP response buffer (keeps total globals < 16 KB so ESP32 TLS has >115 KB free heap)
+	httpBuf [HTTP_BUF_MAX]byte
+	urlBuf  [144]byte
+	lineBuf [64]byte
+	kbdBuf  [16]byte
+	airInfo [68]byte // LakatosAirportInfo struct: code[4], city[24], tz[32], lat(4), lon(4)
+
+	// 7-Station table metadata
+	stCode   [56]byte  // NUM_CITIES * CODE_STRIDE (8)
+	stIcao   [56]byte  // NUM_CITIES * ICAO_STRIDE (8)
+	stName   [224]byte // NUM_CITIES * NAME_STRIDE (32)
+	stIsHome [NUM_CITIES]byte
+
+	// Parsed weather observations for each of the 7 stations
+	obsValid    [NUM_CITIES]byte
+	obsTempC    [NUM_CITIES]float32
+	obsDewpC    [NUM_CITIES]float32
+	obsRelHum   [NUM_CITIES]int
+	obsWdir     [NUM_CITIES]int
+	obsWspdKt   [NUM_CITIES]int
+	obsWgstKt   [NUM_CITIES]int
+	obsAltimHpa [NUM_CITIES]float32
+	obsTendHpa  [NUM_CITIES]float32
+	obsVisib    [112]byte // NUM_CITIES * STR16_STRIDE
+	obsCover    [112]byte // NUM_CITIES * STR16_STRIDE
+	obsWx       [112]byte // NUM_CITIES * STR16_STRIDE
+	obsFltCat   [112]byte // NUM_CITIES * STR16_STRIDE
+	obsUtc      [112]byte // NUM_CITIES * STR16_STRIDE
+	obsRaw      [896]byte // NUM_CITIES * RAW_STRIDE (128)
+
+	wxMode       int
+	selectedCity int
+	useCelsius   bool
+	lastError    string
+)
+
+func toUpperChar(c int) int {
+	if c >= 'a' && c <= 'z' {
+		return c - 32
+	}
+	return c
+}
+
+func isDigitChar(c int) bool {
+	return c >= '0' && c <= '9'
+}
+
+func copyStrToAddr(dstAddr int, maxLen int, s string) {
+	n := s.Len
+	if n >= maxLen {
+		n = maxLen - 1
+	}
+	for i := 0; i < n; i++ {
+		poke1(dstAddr+i, peek1(s.Base+i))
+	}
+	poke1(dstAddr+n, 0)
+}
+
+func copyCStrToAddr(dstAddr int, maxLen int, srcAddr int) {
+	i := 0
+	for i < maxLen-1 {
+		ch := peek1(srcAddr + i)
+		if ch == 0 {
+			break
+		}
+		poke1(dstAddr+i, ch)
+		i++
+	}
+	poke1(dstAddr+i, 0)
+}
+
+func cstrLen(addr int) int {
+	n := 0
+	for n < 256 {
+		if peek1(addr+n) == 0 {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+func cstrEq(addrA int, addrB int) bool {
+	i := 0
+	for i < 64 {
+		ca := toUpperChar(peek1(addrA + i))
+		cb := toUpperChar(peek1(addrB + i))
+		if ca != cb {
+			return false
+		}
+		if ca == 0 {
+			return true
+		}
+		i++
+	}
+	return true
+}
+
+func cstrContains(hayAddr int, n0 int, n1 int) bool {
+	i := 0
+	for i < 15 {
+		c0 := toUpperChar(peek1(hayAddr + i))
+		if c0 == 0 {
+			break
+		}
+		c1 := toUpperChar(peek1(hayAddr + i + 1))
+		if c0 == n0 && c1 == n1 {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+func cstrEq3(addr int, c0 int, c1 int, c2 int) bool {
+	return toUpperChar(peek1(addr)) == c0 &&
+		toUpperChar(peek1(addr+1)) == c1 &&
+		toUpperChar(peek1(addr+2)) == c2 &&
+		peek1(addr+3) == 0
+}
+
+func stCodeAddr(idx int) int   { return int(&stCode) + idx*CODE_STRIDE }
+func stIcaoAddr(idx int) int   { return int(&stIcao) + idx*ICAO_STRIDE }
+func stNameAddr(idx int) int   { return int(&stName) + idx*NAME_STRIDE }
+func obsVisibAddr(idx int) int { return int(&obsVisib) + idx*STR16_STRIDE }
+func obsCoverAddr(idx int) int { return int(&obsCover) + idx*STR16_STRIDE }
+func obsWxAddr(idx int) int    { return int(&obsWx) + idx*STR16_STRIDE }
+func obsFltAddr(idx int) int   { return int(&obsFltCat) + idx*STR16_STRIDE }
+func obsUtcAddr(idx int) int   { return int(&obsUtc) + idx*STR16_STRIDE }
+func obsRawAddr(idx int) int   { return int(&obsRaw) + idx*RAW_STRIDE }
+
+// Maps a 3-letter IATA code (or 4-letter ICAO code) at codeAddr into 4-letter ICAO at icaoOutAddr.
+func iataToIcao(codeAddr int, icaoOutAddr int) {
+	ln := cstrLen(codeAddr)
+	c0 := toUpperChar(peek1(codeAddr))
+	c1 := toUpperChar(peek1(codeAddr + 1))
+	c2 := toUpperChar(peek1(codeAddr + 2))
+	c3 := toUpperChar(peek1(codeAddr + 3))
+
+	if ln == 4 {
+		poke1(icaoOutAddr+0, c0)
+		poke1(icaoOutAddr+1, c1)
+		poke1(icaoOutAddr+2, c2)
+		poke1(icaoOutAddr+3, c3)
+		poke1(icaoOutAddr+4, 0)
+		return
+	}
+
+	// Special US mappings: NYC -> KJFK, HNL -> PHNL, ANC -> PANC
+	if c0 == 'N' && c1 == 'Y' && c2 == 'C' {
+		copyStrToAddr(icaoOutAddr, ICAO_STRIDE, "KJFK")
+		return
+	}
+	if c0 == 'H' && c1 == 'N' && c2 == 'L' {
+		copyStrToAddr(icaoOutAddr, ICAO_STRIDE, "PHNL")
+		return
+	}
+	if c0 == 'A' && c1 == 'N' && c2 == 'C' {
+		copyStrToAddr(icaoOutAddr, ICAO_STRIDE, "PANC")
+		return
+	}
+
+	poke1(icaoOutAddr+0, 'K')
+	poke1(icaoOutAddr+1, c0)
+	poke1(icaoOutAddr+2, c1)
+	poke1(icaoOutAddr+3, c2)
+	poke1(icaoOutAddr+4, 0)
+}
+
+func setHubDefaults(slot int, hubIdx int) {
+	cAddr := stCodeAddr(slot)
+	iAddr := stIcaoAddr(slot)
+	nAddr := stNameAddr(slot)
+	if hubIdx == 0 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "NYC")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KJFK")
+		copyStrToAddr(nAddr, NAME_STRIDE, "New York (JFK), NY")
+	} else if hubIdx == 1 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "LAX")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KLAX")
+		copyStrToAddr(nAddr, NAME_STRIDE, "Los Angeles (LAX), CA")
+	} else if hubIdx == 2 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "ATL")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KATL")
+		copyStrToAddr(nAddr, NAME_STRIDE, "Atlanta (ATL), GA")
+	} else if hubIdx == 3 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "ORD")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KORD")
+		copyStrToAddr(nAddr, NAME_STRIDE, "Chicago O'Hare (ORD)")
+	} else if hubIdx == 4 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "SFO")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KSFO")
+		copyStrToAddr(nAddr, NAME_STRIDE, "San Francisco (SFO)")
+	} else if hubIdx == 5 {
+		copyStrToAddr(cAddr, CODE_STRIDE, "DEN")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KDEN")
+		copyStrToAddr(nAddr, NAME_STRIDE, "Denver (DEN), CO")
+	} else {
+		copyStrToAddr(cAddr, CODE_STRIDE, "SEA")
+		copyStrToAddr(iAddr, ICAO_STRIDE, "KSEA")
+		copyStrToAddr(nAddr, NAME_STRIDE, "Seattle-Tacoma (SEA)")
+	}
+	stIsHome[slot] = 0
+}
+
+func initStationsFromOs() {
+	ok := os_get_airport_info(&airInfo[0])
+	cAddr0 := stCodeAddr(0)
+	iAddr0 := stIcaoAddr(0)
+	nAddr0 := stNameAddr(0)
+
+	if ok != 0 && peek1(int(&airInfo)) != 0 {
+		copyCStrToAddr(cAddr0, CODE_STRIDE, int(&airInfo))
+		iataToIcao(cAddr0, iAddr0)
+		copyCStrToAddr(nAddr0, NAME_STRIDE, int(&airInfo)+4)
+	} else {
+		ap := os_get_airport()
+		if ap.Len >= 3 {
+			copyStrToAddr(cAddr0, CODE_STRIDE, ap)
+		} else {
+			copyStrToAddr(cAddr0, CODE_STRIDE, "SFO")
+		}
+		iataToIcao(cAddr0, iAddr0)
+		copyCStrToAddr(nAddr0, NAME_STRIDE, iAddr0)
+	}
+	stIsHome[0] = 1
+
+	populateRemainingHubs()
+}
+
+func setCustomHomeStation(inputAddr int) {
+	ln := cstrLen(inputAddr)
+	if ln < 3 {
+		return
+	}
+	cAddr0 := stCodeAddr(0)
+	iAddr0 := stIcaoAddr(0)
+	nAddr0 := stNameAddr(0)
+
+	for i := 0; i < ln && i < CODE_STRIDE-1; i++ {
+		poke1(cAddr0+i, toUpperChar(peek1(inputAddr+i)))
+	}
+	if ln > 4 {
+		ln = 4
+	}
+	poke1(cAddr0+ln, 0)
+	iataToIcao(cAddr0, iAddr0)
+	if ln == 4 && peek1(cAddr0) == 'K' {
+		// Display 3-letter code in table column
+		poke1(cAddr0+0, peek1(cAddr0+1))
+		poke1(cAddr0+1, peek1(cAddr0+2))
+		poke1(cAddr0+2, peek1(cAddr0+3))
+		poke1(cAddr0+3, 0)
+	}
+	copyCStrToAddr(nAddr0, NAME_STRIDE, iAddr0)
+	stIsHome[0] = 1
+
+	populateRemainingHubs()
+}
+
+func populateRemainingHubs() {
+	dst := 1
+	for h := 0; h < NUM_CITIES && dst < NUM_CITIES; h++ {
+		setHubDefaults(dst, h)
+		if cstrEq(stIcaoAddr(dst), stIcaoAddr(0)) || cstrEq(stCodeAddr(dst), stCodeAddr(0)) {
+			continue
+		}
+		dst++
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Weather Math & JSON Parsing
+// ---------------------------------------------------------------------------
+func cToF(c float32) float32 {
+	return c*1.8 + 32.0
+}
+
+func computeRelHum(tempC float32, dewpC float32) int {
+	// Accurate relative humidity approximation from temperature and dewpoint Spread:
+	// RH ~= 100 * exp((17.625 * Td)/(243.04 + Td) - (17.625 * T)/(243.04 + T))
+	// Using Pade 2nd-order exp(x) approximation for x <= 0
+	x := (17.625*dewpC)/(243.04+dewpC) - (17.625*tempC)/(243.04+tempC)
+	if x >= 0.0 {
+		return 100
+	}
+	if x < -4.5 {
+		return 1
+	}
+	num := 1.0 + 0.5*x + 0.0833333*x*x
+	den := 1.0 - 0.5*x + 0.0833333*x*x
+	if num <= 0.01 || den <= 0.01 {
+		return 5
+	}
+	rh := int(round(100.0 * (num / den)))
+	return clamp(rh, 1, 100)
+}
+
+func degToCompass(deg int) string {
+	if deg < 0 {
+		return "VRB"
+	}
+	idx := int(round(float32(deg%360)/22.5)) & 15
+	switch idx {
+	case 0:
+		return "N"
+	case 1:
+		return "NNE"
+	case 2:
+		return "NE"
+	case 3:
+		return "ENE"
+	case 4:
+		return "E"
+	case 5:
+		return "ESE"
+	case 6:
+		return "SE"
+	case 7:
+		return "SSE"
+	case 8:
+		return "S"
+	case 9:
+		return "SSW"
+	case 10:
+		return "SW"
+	case 11:
+		return "WSW"
+	case 12:
+		return "W"
+	case 13:
+		return "WNW"
+	case 14:
+		return "NW"
+	}
+	return "NNW"
+}
+
+func tempColorF(tempF float32) int {
+	if tempF < 32.0 {
+		return CYAN
+	}
+	if tempF < 50.0 {
+		return SKYBLUE
+	}
+	if tempF < 68.0 {
+		return GREEN
+	}
+	if tempF < 80.0 {
+		return YELLOW
+	}
+	if tempF < 90.0 {
+		return ORANGE
+	}
+	return WARMRED
+}
+
+// Finds `"key":` inside `httpBuf[start..end)` and returns the index right after `:`.
+func findJsonKeyValue(start int, end int, key string) int {
+	kBase := key.Base
+	kLen := key.Len
+	limit := end - (kLen + 3)
+	for p := start; p <= limit; p++ {
+		if peek1(int(&httpBuf)+p) == '"' && peek1(int(&httpBuf)+p+kLen+1) == '"' && peek1(int(&httpBuf)+p+kLen+2) == ':' {
+			match := true
+			for k := 0; k < kLen; k++ {
+				if peek1(int(&httpBuf)+p+1+k) != peek1(kBase+k) {
+					match = false
+					break
+				}
+			}
+			if match {
+				valPos := p + kLen + 3
+				for valPos < end && peek1(int(&httpBuf)+valPos) == ' ' {
+					valPos++
+				}
+				return valPos
+			}
+		}
+	}
+	return -1
+}
+
+func parseJsonStringInto(start int, end int, key string, dstAddr int, maxLen int) bool {
+	pos := findJsonKeyValue(start, end, key)
+	if pos < 0 || pos >= end {
+		poke1(dstAddr, 0)
+		return false
+	}
+	ch := peek1(int(&httpBuf) + pos)
+	outLen := 0
+	if ch == '"' {
+		pos++
+		for pos < end && outLen < maxLen-1 {
+			c := peek1(int(&httpBuf) + pos)
+			if c == '"' {
+				break
+			}
+			if c == '\\' && pos+1 < end {
+				pos++
+				c = peek1(int(&httpBuf) + pos)
+			}
+			poke1(dstAddr+outLen, c)
+			outLen++
+			pos++
+		}
+		poke1(dstAddr+outLen, 0)
+		return true
+	}
+
+	// Non-quoted primitive (number or null)
+	if ch == 'n' { // null
+		poke1(dstAddr, 0)
+		return false
+	}
+	for pos < end && outLen < maxLen-1 {
+		c := peek1(int(&httpBuf) + pos)
+		if c == ',' || c == '}' || c == ' ' || c == '\n' || c == '\r' {
+			break
+		}
+		poke1(dstAddr+outLen, c)
+		outLen++
+		pos++
+	}
+	poke1(dstAddr+outLen, 0)
+	return outLen > 0
+}
+
+func parseJsonFloat(start int, end int, key string, defVal float32) (float32, bool) {
+	pos := findJsonKeyValue(start, end, key)
+	if pos < 0 || pos >= end {
+		return defVal, false
+	}
+	ch := peek1(int(&httpBuf) + pos)
+	if ch == '"' {
+		pos++
+		ch = peek1(int(&httpBuf) + pos)
+		if ch == 'V' { // "VRB"
+			return -1.0, true
+		}
+	}
+	if ch == 'n' { // null
+		return defVal, false
+	}
+
+	sign := float32(1.0)
+	if ch == '-' {
+		sign = -1.0
+		pos++
+	} else if ch == '+' {
+		pos++
+	}
+
+	intPart := 0
+	hasDigits := false
+	for pos < end {
+		c := peek1(int(&httpBuf) + pos)
+		if c >= '0' && c <= '9' {
+			intPart = intPart*10 + (c - '0')
+			hasDigits = true
+			pos++
+		} else {
+			break
+		}
+	}
+
+	fracPart := float32(0.0)
+	fracDiv := float32(1.0)
+	if pos < end && peek1(int(&httpBuf)+pos) == '.' {
+		pos++
+		for pos < end {
+			c := peek1(int(&httpBuf) + pos)
+			if c >= '0' && c <= '9' {
+				fracPart = fracPart*10.0 + float32(c-'0')
+				fracDiv *= 10.0
+				hasDigits = true
+				pos++
+			} else {
+				break
+			}
+		}
+	}
+
+	if !hasDigits {
+		return defVal, false
+	}
+	return sign * (float32(intPart) + fracPart/fracDiv), true
+}
+
+// Extracts HH:MMZ from DDHHMMZ inside raw METAR at rawAddr into utcOutAddr.
+func extractUtcFromMetar(rawAddr int, utcOutAddr int) {
+	ln := cstrLen(rawAddr)
+	for i := 0; i <= ln-7; i++ {
+		if peek1(rawAddr+i+6) == 'Z' {
+			ok := true
+			for k := 0; k < 6; k++ {
+				if !isDigitChar(peek1(rawAddr + i + k)) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				poke1(utcOutAddr+0, peek1(rawAddr+i+2))
+				poke1(utcOutAddr+1, peek1(rawAddr+i+3))
+				poke1(utcOutAddr+2, ':')
+				poke1(utcOutAddr+3, peek1(rawAddr+i+4))
+				poke1(utcOutAddr+4, peek1(rawAddr+i+5))
+				poke1(utcOutAddr+5, 'Z')
+				poke1(utcOutAddr+6, 0)
+				return
+			}
+		}
+	}
+	poke1(utcOutAddr, 0)
+}
+
+func findIcaoObjectRange(icaoAddr int, totalLen int) (int, int) {
+	// Search for `"icaoId":"XXXX"`
+	c0 := peek1(icaoAddr + 0)
+	c1 := peek1(icaoAddr + 1)
+	c2 := peek1(icaoAddr + 2)
+	c3 := peek1(icaoAddr + 3)
+
+	start := -1
+	for p := 0; p <= totalLen-15; p++ {
+		if peek1(int(&httpBuf)+p) == '"' &&
+			peek1(int(&httpBuf)+p+1) == 'i' &&
+			peek1(int(&httpBuf)+p+2) == 'c' &&
+			peek1(int(&httpBuf)+p+3) == 'a' &&
+			peek1(int(&httpBuf)+p+4) == 'o' &&
+			peek1(int(&httpBuf)+p+5) == 'I' &&
+			peek1(int(&httpBuf)+p+6) == 'd' &&
+			peek1(int(&httpBuf)+p+10) == c0 &&
+			peek1(int(&httpBuf)+p+11) == c1 &&
+			peek1(int(&httpBuf)+p+12) == c2 &&
+			peek1(int(&httpBuf)+p+13) == c3 {
+			start = p
+			break
+		}
+	}
+	if start < 0 {
+		return -1, -1
+	}
+
+	// Find next `"icaoId":"` or end of buffer
+	end := totalLen
+	for p := start + 14; p <= totalLen-10; p++ {
+		if peek1(int(&httpBuf)+p) == '"' &&
+			peek1(int(&httpBuf)+p+1) == 'i' &&
+			peek1(int(&httpBuf)+p+2) == 'c' &&
+			peek1(int(&httpBuf)+p+3) == 'a' &&
+			peek1(int(&httpBuf)+p+4) == 'o' &&
+			peek1(int(&httpBuf)+p+5) == 'I' &&
+			peek1(int(&httpBuf)+p+6) == 'd' {
+			end = p
+			break
+		}
+	}
+	return start, end
+}
+
+func buildNoaaMetarUrl() string {
+	prefix := "https://aviationweather.gov/api/data/metar?ids="
+	pos := 0
+	for i := 0; i < prefix.Len; i++ {
+		urlBuf[pos] = byte(peek1(prefix.Base + i))
+		pos++
+	}
+	for s := 0; s < NUM_CITIES; s++ {
+		if s > 0 {
+			urlBuf[pos] = ','
+			pos++
+		}
+		iAddr := stIcaoAddr(s)
+		for k := 0; k < 4; k++ {
+			ch := peek1(iAddr + k)
+			if ch == 0 {
+				break
+			}
+			urlBuf[pos] = byte(ch)
+			pos++
+		}
+	}
+	suffix := "&format=json"
+	for i := 0; i < suffix.Len; i++ {
+		urlBuf[pos] = byte(peek1(suffix.Base + i))
+		pos++
+	}
+	urlBuf[pos] = 0
+	return make_slice(&urlBuf[0], 144, pos)
+}
+
+func buildNwsDecodedUrl(idx int) string {
+	prefix := "https://tgftp.nws.noaa.gov/data/observations/metar/decoded/"
+	pos := 0
+	for i := 0; i < prefix.Len; i++ {
+		urlBuf[pos] = byte(peek1(prefix.Base + i))
+		pos++
+	}
+	iAddr := stIcaoAddr(idx)
+	for k := 0; k < 4; k++ {
+		ch := peek1(iAddr + k)
+		if ch == 0 {
+			break
+		}
+		urlBuf[pos] = byte(ch)
+		pos++
+	}
+	suffix := ".TXT"
+	for i := 0; i < suffix.Len; i++ {
+		urlBuf[pos] = byte(peek1(suffix.Base + i))
+		pos++
+	}
+	urlBuf[pos] = 0
+	return make_slice(&urlBuf[0], 144, pos)
+}
+
+func conditionBadge(idx int) (string, int, int) {
+	wxAddr := obsWxAddr(idx)
+	if cstrContains(wxAddr, 'T', 'S') {
+		return "STORM", RED, WHITE
+	}
+	if cstrContains(wxAddr, 'S', 'N') || cstrContains(wxAddr, 'F', 'Z') || cstrContains(wxAddr, 'P', 'L') {
+		return "SNOW", WHITE, NAVY
+	}
+	if cstrContains(wxAddr, 'R', 'A') || cstrContains(wxAddr, 'D', 'Z') || cstrContains(wxAddr, 'S', 'H') {
+		return "RAIN", 0x1C9F, WHITE
+	}
+	if cstrContains(wxAddr, 'F', 'G') {
+		return "FOG", 0x52AA, YELLOW
+	}
+	if cstrContains(wxAddr, 'B', 'R') || cstrContains(wxAddr, 'H', 'Z') {
+		return "MIST", 0x52AA, YELLOW
+	}
+
+	covAddr := obsCoverAddr(idx)
+	if cstrEq3(covAddr, 'C', 'L', 'R') || cstrEq3(covAddr, 'S', 'K', 'C') || cstrContains(covAddr, 'C', 'A') {
+		return "CLEAR", 0x03E0, YELLOW
+	}
+	if cstrEq3(covAddr, 'F', 'E', 'W') {
+		return "FEW CLD", 0x0333, CYAN
+	}
+	if cstrEq3(covAddr, 'S', 'C', 'T') {
+		return "SCT CLD", 0x1A6F, WHITE
+	}
+	if cstrEq3(covAddr, 'B', 'K', 'N') {
+		return "M.CLOUDY", 0x39E7, LIGHTGREY
+	}
+	if cstrEq3(covAddr, 'O', 'V', 'C') || cstrEq3(covAddr, 'O', 'V', 'X') {
+		return "OVERCAST", 0x4208, WHITE
+	}
+	return "FAIR", 0x2104, LIGHTGREY
+}
+
+// ---------------------------------------------------------------------------
+// UI Rendering
+// ---------------------------------------------------------------------------
+func drawTopBar(title string, cstrTitleAddr int, isTable bool) {
+	tft_fill_rect(0, 0, SCREEN_W, 24, BAR_BG)
+	tft_draw_fast_hline(0, 23, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button (x=2..60, y=2..21)
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	// Center/left title
+	tft_set_text_color(YELLOW, BAR_BG)
+	if cstrTitleAddr != 0 {
+		tft_draw_cstr(cstrTitleAddr, 66, 4, 2)
+	} else {
+		tft_draw_string(title, 66, 4, 2)
+	}
+
+	// Top-right action button (x=260..318)
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NAV)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NAV)
+	if isTable {
+		if useCelsius {
+			tft_draw_string("DEG C", 270, 4, 2)
+		} else {
+			tft_draw_string("DEG F", 270, 4, 2)
+		}
+	} else {
+		tft_draw_string("TABLE", 269, 4, 2)
+	}
+}
+
+func drawWeatherTable() {
+	wxMode = WX_TABLE
+	tft_fill_screen(BG_DARK)
+	drawTopBar("NOAA WEATHER", 0, true)
+
+	// Column Header Row (y = 24..36)
+	tft_fill_rect(0, 24, SCREEN_W, 12, 0x1082)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(CYAN, 0x1082)
+	tft_draw_string("CITY", 6, 26, 1)
+	tft_draw_string("CONDITION", 48, 26, 1)
+	if useCelsius {
+		tft_draw_string("TEMP(C)", 114, 26, 1)
+	} else {
+		tft_draw_string("TEMP(F)", 114, 26, 1)
+	}
+	tft_draw_string("RH", 174, 26, 1)
+	tft_draw_string("WIND", 204, 26, 1)
+	tft_draw_string("BARO", 274, 26, 1)
+	tft_draw_fast_hline(0, 36, SCREEN_W, BTN_HOME)
+
+	// 7 City Rows (y = 37..211, 25px per row)
+	for i := 0; i < NUM_CITIES; i++ {
+		rowY := 37 + i*25
+		rowBg := ROW_EVEN
+		if (i & 1) != 0 {
+			rowBg = ROW_ODD
+		}
+		if stIsHome[i] != 0 {
+			rowBg = ROW_HOME
+		}
+		tft_fill_rect(0, rowY, SCREEN_W, 24, rowBg)
+		tft_draw_fast_hline(0, rowY+24, SCREEN_W, BTN_NAV)
+
+		tempC := obsTempC[i]
+		tempF := cToF(tempC)
+		tCol := DARKGREY
+		if obsValid[i] != 0 {
+			tCol = tempColorF(tempF)
+		}
+
+		barCol := tCol
+		if stIsHome[i] != 0 {
+			barCol = YELLOW
+		}
+		tft_fill_rect(0, rowY+2, 3, 20, barCol)
+
+		// 1. Station Code
+		tft_set_text_datum(TL_DATUM)
+		codeCol := WHITE
+		if stIsHome[i] != 0 {
+			codeCol = YELLOW
+		}
+		tft_set_text_color(codeCol, rowBg)
+		tft_draw_cstr(stCodeAddr(i), 6, rowY+4, 2)
+
+		if obsValid[i] == 0 {
+			tft_set_text_color(LIGHTGREY, rowBg)
+			tft_draw_string(lastError, 50, rowY+8, 1)
+			continue
+		}
+
+		// 2. Sky / Weather Badge (x = 46..108)
+		label, badgeBg, badgeFg := conditionBadge(i)
+		tft_fill_round_rect(46, rowY+4, 62, 16, 3, badgeBg)
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(badgeFg, badgeBg)
+		tft_draw_string(label, 77, rowY+12, 1)
+
+		// 3. Temperature (x = 112..168)
+		tft_set_text_datum(TL_DATUM)
+		tIntF := int(round(tempF))
+		tIntC := int(round(tempC))
+		tft_set_text_color(tCol, rowBg)
+		if useCelsius {
+			w := tft_draw_int(tIntC, 112, rowY+4, 2)
+			tft_draw_string("C", 112+w, rowY+4, 2)
+			tft_set_text_color(LIGHTGREY, rowBg)
+			w2 := tft_draw_int(tIntF, 146, rowY+8, 1)
+			tft_draw_string("F", 146+w2, rowY+8, 1)
+		} else {
+			w := tft_draw_int(tIntF, 112, rowY+4, 2)
+			tft_draw_string("F", 112+w, rowY+4, 2)
+			tft_set_text_color(LIGHTGREY, rowBg)
+			w2 := tft_draw_int(tIntC, 146, rowY+8, 1)
+			tft_draw_string("C", 146+w2, rowY+8, 1)
+		}
+
+		// 4. Relative Humidity (x = 172..198)
+		tft_set_text_color(SKYBLUE, rowBg)
+		wRh := tft_draw_int(obsRelHum[i], 172, rowY+8, 1)
+		tft_draw_string("%", 172+wRh, rowY+8, 1)
+
+		// 5. Wind Direction + Speed in mph (x = 202..268)
+		wspdKt := obsWspdKt[i]
+		mph := int(round(float32(wspdKt) * 1.15078))
+		windCol := WHITE
+		if mph >= 18 {
+			windCol = YELLOW
+		}
+		tft_set_text_color(windCol, rowBg)
+		if wspdKt <= 0 {
+			tft_draw_string("CALM", 202, rowY+8, 1)
+		} else {
+			dirStr := degToCompass(obsWdir[i])
+			wDir := tft_draw_string(dirStr, 202, rowY+8, 1)
+			wSpd := tft_draw_int(mph, 202+wDir+4, rowY+8, 1)
+			tft_draw_string("m", 202+wDir+4+wSpd, rowY+8, 1)
+		}
+
+		// 6. Barometer in inHg (x = 272..318)
+		tft_set_text_color(LIGHTGREY, rowBg)
+		altHpa := obsAltimHpa[i]
+		if altHpa > 800.0 {
+			inHg := altHpa * 0.02953
+			wBaro := tft_draw_float(inHg, 2, 272, rowY+8, 1)
+			tend := obsTendHpa[i]
+			if tend > 0.2 {
+				tft_set_text_color(GREEN, rowBg)
+				tft_draw_string("+", 272+wBaro, rowY+8, 1)
+			} else if tend < -0.2 {
+				tft_set_text_color(ORANGE, rowBg)
+				tft_draw_string("-", 272+wBaro, rowY+8, 1)
+			}
+		} else {
+			tft_draw_string("--", 274, rowY+8, 1)
+		}
+	}
+
+	// Bottom Toolbar (y = 213..239)
+	tft_fill_rect(0, 213, SCREEN_W, 27, 0x1082)
+	tft_draw_fast_hline(0, 213, SCREEN_W, CYAN)
+
+	// [REFRESH NOAA] (x = 4..104)
+	tft_fill_round_rect(4, 216, 100, 21, 4, DARKGREEN)
+	tft_draw_round_rect(4, 216, 100, 21, 4, GREEN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, DARKGREEN)
+	tft_draw_string("REFRESH NOAA", 54, 226, 1)
+
+	// [UNIT: F / C] (x = 108..192)
+	tft_fill_round_rect(108, 216, 84, 21, 4, BTN_HOME)
+	tft_draw_round_rect(108, 216, 84, 21, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	if useCelsius {
+		tft_draw_string("UNIT: C -> F", 150, 226, 1)
+	} else {
+		tft_draw_string("UNIT: F -> C", 150, 226, 1)
+	}
+
+	// [STATION: <IATA>] (x = 196..316)
+	tft_fill_round_rect(196, 216, 120, 21, 4, BTN_NAV)
+	tft_draw_round_rect(196, 216, 120, 21, 4, YELLOW)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(YELLOW, BTN_NAV)
+	tft_draw_string("AIRPORT:", 204, 222, 1)
+	tft_set_text_color(WHITE, BTN_NAV)
+	tft_draw_cstr(stIcaoAddr(0), 258, 222, 1)
+}
+
+// Word-wraps a C-string at srcAddr across up to maxLines lines starting at (x, yStart).
+func drawWrappedCStr(srcAddr int, x int, yStart int, maxChars int, lineStep int, maxLines int, fg int, bg int) {
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(fg, bg)
+	total := cstrLen(srcAddr)
+	pos := 0
+	lineIdx := 0
+
+	for pos < total && lineIdx < maxLines {
+		// Skip leading spaces
+		for pos < total && peek1(srcAddr+pos) == ' ' {
+			pos++
+		}
+		if pos >= total {
+			break
+		}
+		rem := total - pos
+		take := rem
+		if take > maxChars {
+			take = maxChars
+			// Find last space within maxChars
+			for k := take; k > 16; k-- {
+				if peek1(srcAddr+pos+k) == ' ' {
+					take = k
+					break
+				}
+			}
+		}
+		for i := 0; i < take && i < 62; i++ {
+			lineBuf[i] = byte(peek1(srcAddr + pos + i))
+		}
+		lineBuf[take] = 0
+		tft_draw_cstr(int(&lineBuf), x, yStart+lineIdx*lineStep, 1)
+		pos += take
+		lineIdx++
+	}
+}
+
+func drawCityDetail(idx int) {
+	wxMode = WX_CITY_DETAIL
+	selectedCity = clamp(idx, 0, NUM_CITIES-1)
+
+	tft_fill_screen(BG_DARK)
+	drawTopBar("", stNameAddr(selectedCity), false)
+
+	if obsValid[selectedCity] == 0 {
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(ORANGE, BG_DARK)
+		tft_draw_string("No observation loaded for station.", SCREEN_W/2, 110, 2)
+	} else {
+		tempC := obsTempC[selectedCity]
+		tempF := cToF(tempC)
+		dewpC := obsDewpC[selectedCity]
+		dewpF := cToF(dewpC)
+		tCol := tempColorF(tempF)
+
+		label, badgeBg, badgeFg := conditionBadge(selectedCity)
+
+		// Top summary card (y = 26..85)
+		tft_fill_round_rect(6, 26, 308, 58, 6, BAR_BG)
+		tft_draw_round_rect(6, 26, 308, 58, 6, tCol)
+
+		tft_set_text_datum(TL_DATUM)
+		tft_set_text_color(tCol, BAR_BG)
+		w1 := tft_draw_float(tempF, 1, 14, 30, 4)
+		w2 := tft_draw_string("F ", 16+w1, 36, 2)
+		tft_set_text_color(WHITE, BAR_BG)
+		w3 := tft_draw_string("(", 16+w1+w2, 36, 2)
+		w4 := tft_draw_float(tempC, 1, 16+w1+w2+w3, 36, 2)
+		tft_draw_string("C)", 16+w1+w2+w3+w4, 36, 2)
+
+		// Condition badge on right
+		tft_fill_round_rect(232, 31, 74, 20, 4, badgeBg)
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(badgeFg, badgeBg)
+		tft_draw_string(label, 269, 41, 2)
+
+		// Dewpoint & Humidity
+		tft_set_text_datum(TL_DATUM)
+		tft_set_text_color(LIGHTGREY, BAR_BG)
+		xCur := 14
+		xCur += tft_draw_string("Dewp: ", xCur, 64, 1)
+		xCur += tft_draw_float(dewpF, 1, xCur, 64, 1)
+		xCur += tft_draw_string("F (", xCur, 64, 1)
+		xCur += tft_draw_float(dewpC, 1, xCur, 64, 1)
+		xCur += tft_draw_string("C)  RH: ", xCur, 64, 1)
+		xCur += tft_draw_int(obsRelHum[selectedCity], xCur, 64, 1)
+		tft_draw_string("%", xCur, 64, 1)
+
+		// Flight Category + UTC Time on bottom-right of card
+		fltAddr := obsFltAddr(selectedCity)
+		fltCol := GREEN
+		if cstrEq3(fltAddr, 'M', 'V', 'F') {
+			fltCol = CYAN
+		} else if !cstrEq3(fltAddr, 'V', 'F', 'R') {
+			fltCol = RED
+		}
+		tft_set_text_color(fltCol, BAR_BG)
+		wFlt := tft_draw_cstr(fltAddr, 232, 64, 1)
+		tft_set_text_color(CYAN, BAR_BG)
+		tft_draw_cstr(obsUtcAddr(selectedCity), 236+wFlt, 64, 1)
+
+		// Telemetry Box (y = 88..145)
+		tft_fill_round_rect(6, 88, 308, 56, 6, 0x1082)
+		tft_draw_round_rect(6, 88, 308, 56, 6, BTN_HOME)
+
+		wspdKt := obsWspdKt[selectedCity]
+		wgstKt := obsWgstKt[selectedCity]
+		mph := int(round(float32(wspdKt) * 1.15078))
+		gustMph := int(round(float32(wgstKt) * 1.15078))
+
+		tft_set_text_color(WHITE, 0x1082)
+		if wspdKt <= 0 {
+			tft_draw_string("Wind: Calm (0 mph)", 12, 94, 1)
+		} else {
+			wx := 12
+			wx += tft_draw_string("Wind: ", wx, 94, 1)
+			wx += tft_draw_string(degToCompass(obsWdir[selectedCity]), wx, 94, 1)
+			wx += tft_draw_string(" (", wx, 94, 1)
+			wx += tft_draw_int(obsWdir[selectedCity], wx, 94, 1)
+			wx += tft_draw_string(" deg) ", wx, 94, 1)
+			wx += tft_draw_int(mph, wx, 94, 1)
+			wx += tft_draw_string(" mph (", wx, 94, 1)
+			wx += tft_draw_int(wspdKt, wx, 94, 1)
+			wx += tft_draw_string(" kt)", wx, 94, 1)
+			if wgstKt > 0 {
+				wx += tft_draw_string(" Gust ", wx, 94, 1)
+				wx += tft_draw_int(gustMph, wx, 94, 1)
+				tft_draw_string("m", wx, 94, 1)
+			}
+		}
+
+		// Barometer line
+		tft_set_text_color(CYAN, 0x1082)
+		altHpa := obsAltimHpa[selectedCity]
+		inHg := altHpa * 0.02953
+		bx := 12
+		bx += tft_draw_string("Baro: ", bx, 110, 1)
+		bx += tft_draw_float(inHg, 2, bx, 110, 1)
+		bx += tft_draw_string(" inHg (", bx, 110, 1)
+		bx += tft_draw_float(altHpa, 1, bx, 110, 1)
+		bx += tft_draw_string(" hPa)  3hr: ", bx, 110, 1)
+		tend := obsTendHpa[selectedCity]
+		if tend > 0.0 {
+			bx += tft_draw_string("+", bx, 110, 1)
+		}
+		bx += tft_draw_float(tend, 1, bx, 110, 1)
+		tft_draw_string(" hPa", bx, 110, 1)
+
+		// Visibility + Weather phenomena line
+		tft_set_text_color(YELLOW, 0x1082)
+		vx := 12
+		vx += tft_draw_string("Visibility: ", vx, 126, 1)
+		vx += tft_draw_cstr(obsVisibAddr(selectedCity), vx, 126, 1)
+		vx += tft_draw_string(" statute mi   Sky: ", vx, 126, 1)
+		vx += tft_draw_cstr(obsCoverAddr(selectedCity), vx, 126, 1)
+		if peek1(obsWxAddr(selectedCity)) != 0 {
+			vx += tft_draw_string(" ", vx, 126, 1)
+			tft_draw_cstr(obsWxAddr(selectedCity), vx, 126, 1)
+		}
+
+		// Raw NOAA METAR box (y = 148..209)
+		tft_fill_round_rect(6, 148, 308, 61, 5, BLACK)
+		tft_draw_round_rect(6, 148, 308, 61, 5, 0x3186)
+		tft_set_text_color(GREEN, BLACK)
+		tft_draw_string("NOAA RAW METAR:", 12, 152, 1)
+		drawWrappedCStr(obsRawAddr(selectedCity), 12, 165, 48, 12, 3, LIGHTGREY, BLACK)
+	}
+
+	// Bottom Navigation Toolbar (y = 213..239)
+	tft_fill_rect(0, 213, SCREEN_W, 27, 0x1082)
+	tft_draw_fast_hline(0, 213, SCREEN_W, CYAN)
+
+	// [< ALL 7] (x = 4..78)
+	tft_fill_round_rect(4, 216, 74, 21, 4, BTN_HOME)
+	tft_draw_round_rect(4, 216, 74, 21, 4, CYAN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("< ALL 7", 41, 226, 1)
+
+	// [< PREV] (x = 84..140)
+	tft_fill_round_rect(84, 216, 56, 21, 4, BTN_NAV)
+	tft_draw_round_rect(84, 216, 56, 21, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NAV)
+	tft_draw_string("< PREV", 112, 226, 1)
+
+	// [NEXT >] (x = 146..202)
+	tft_fill_round_rect(146, 216, 56, 21, 4, BTN_NAV)
+	tft_draw_round_rect(146, 216, 56, 21, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NAV)
+	tft_draw_string("NEXT >", 174, 226, 1)
+
+	// [NWS DECODED TXT] (x = 208..316)
+	tft_fill_round_rect(208, 216, 108, 21, 4, DARKGREEN)
+	tft_draw_round_rect(208, 216, 108, 21, 4, GREEN)
+	tft_set_text_color(WHITE, DARKGREEN)
+	tft_draw_string("NWS DECODED TXT", 262, 226, 1)
+}
+
+func fetchAndShowNwsDecoded(idx int) {
+	wxMode = WX_CITY_NWS_TEXT
+	selectedCity = clamp(idx, 0, NUM_CITIES-1)
+
+	tft_fill_screen(BG_DARK)
+	drawTopBar("", stNameAddr(selectedCity), false)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(CYAN, BG_DARK)
+	tft_draw_string("Fetching NWS Decoded Bulletin...", SCREEN_W/2, 105, 2)
+	url := buildNwsDecodedUrl(selectedCity)
+	tft_set_text_color(LIGHTGREY, BG_DARK)
+	tft_draw_string(url, SCREEN_W/2, 130, 1)
+
+	os_set_rgb_led(0, 0, 1, 0)
+	got := fetch_with_cache(url, &httpBuf[0], HTTP_BUF_MAX-1, WX_CACHE_MAX_AGE_SEC)
+	if got > 0 {
+		httpBuf[got] = 0
+		os_set_rgb_led(0, 1, 0, 150)
+	} else {
+		os_set_rgb_led(1, 0, 0, 250)
+		copyStrToAddr(int(&httpBuf), HTTP_BUF_MAX, "Failed to fetch NWS decoded bulletin from tgftp.nws.noaa.gov")
+		got = cstrLen(int(&httpBuf))
+	}
+
+	tft_fill_rect(0, 24, SCREEN_W, 189, BLACK)
+	tft_set_text_datum(TL_DATUM)
+
+	// Render lines of NWS decoded text
+	pos := 0
+	y := 27
+	lineNum := 0
+	for pos < got && y <= 198 {
+		// Find newline
+		nl := pos
+		for nl < got && httpBuf[nl] != '\n' {
+			nl++
+		}
+		// Strip CR and leading spaces
+		lStart := pos
+		lEnd := nl
+		for lEnd > lStart && (httpBuf[lEnd-1] == '\r' || httpBuf[lEnd-1] == ' ') {
+			lEnd--
+		}
+		for lStart < lEnd && httpBuf[lStart] == ' ' {
+			lStart++
+		}
+		pos = nl + 1
+
+		ln := lEnd - lStart
+		if ln <= 0 {
+			continue
+		}
+		// Skip "cycle:" footer line
+		if ln >= 6 && httpBuf[lStart] == 'c' && httpBuf[lStart+1] == 'y' && httpBuf[lStart+5] == ':' {
+			continue
+		}
+
+		col := WHITE
+		if lineNum == 0 {
+			col = YELLOW
+		} else if lineNum == 1 {
+			col = CYAN
+		} else if ln >= 3 && httpBuf[lStart] == 'o' && httpBuf[lStart+1] == 'b' && httpBuf[lStart+2] == ':' {
+			col = GREEN
+		}
+		tft_set_text_color(col, BLACK)
+
+		// Wrap long lines at 51 chars
+		cur := lStart
+		for cur < lEnd && y <= 198 {
+			rem := lEnd - cur
+			take := rem
+			if take > 51 {
+				take = 51
+				for k := take; k > 20; k-- {
+					if httpBuf[cur+k] == ' ' {
+						take = k
+						break
+					}
+				}
+			}
+			for i := 0; i < take && i < 62; i++ {
+				lineBuf[i] = httpBuf[cur+i]
+			}
+			lineBuf[take] = 0
+			tft_draw_cstr(int(&lineBuf), 6, y, 1)
+			cur += take
+			for cur < lEnd && httpBuf[cur] == ' ' {
+				cur++
+			}
+			y += 12
+		}
+		lineNum++
+	}
+
+	// Bottom toolbar
+	tft_fill_rect(0, 213, SCREEN_W, 27, 0x1082)
+	tft_draw_fast_hline(0, 213, SCREEN_W, CYAN)
+
+	tft_fill_round_rect(4, 216, 96, 21, 4, BTN_HOME)
+	tft_draw_round_rect(4, 216, 96, 21, 4, CYAN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("< ALL 7 CITIES", 52, 226, 1)
+
+	tft_fill_round_rect(208, 216, 108, 21, 4, BTN_NAV)
+	tft_draw_round_rect(208, 216, 108, 21, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NAV)
+	tft_draw_string("BACK TO SUMMARY", 262, 226, 1)
+}
+
+func fetchNoaaWeather() {
+	tft_fill_screen(BG_DARK)
+	drawTopBar("NOAA WEATHER", 0, true)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(CYAN, BG_DARK)
+	tft_draw_string("Querying NOAA Aviation Weather...", SCREEN_W/2, 105, 2)
+
+	url := buildNoaaMetarUrl()
+	tft_set_text_color(LIGHTGREY, BG_DARK)
+	tft_draw_string("aviationweather.gov/api/data/metar", SCREEN_W/2, 130, 1)
+
+	if os_wifi_connected() == 0 {
+		lastError = "Wi-Fi not connected"
+		drawWeatherTable()
+		return
+	}
+
+	os_set_rgb_led(0, 0, 1, 0)
+	got := fetch_with_cache(url, &httpBuf[0], HTTP_BUF_MAX-1, WX_CACHE_MAX_AGE_SEC)
+	if got <= 0 {
+		os_set_rgb_led(1, 0, 0, 250)
+		lastError = "NOAA HTTP request failed"
+		drawWeatherTable()
+		return
+	}
+	httpBuf[got] = 0
+	lastError = "No observation"
+
+	parsedCount := 0
+	for i := 0; i < NUM_CITIES; i++ {
+		obsValid[i] = 0
+		start, end := findIcaoObjectRange(stIcaoAddr(i), got)
+		if start < 0 {
+			continue
+		}
+
+		tempC, hasTemp := parseJsonFloat(start, end, "temp", 0.0)
+		dewpC, hasDewp := parseJsonFloat(start, end, "dewp", 0.0)
+		if !hasTemp {
+			continue
+		}
+		if !hasDewp {
+			dewpC = tempC - 5.0
+		}
+
+		wdirF, _ := parseJsonFloat(start, end, "wdir", -1.0)
+		wspdF, _ := parseJsonFloat(start, end, "wspd", 0.0)
+		wgstF, _ := parseJsonFloat(start, end, "wgst", 0.0)
+		altimF, _ := parseJsonFloat(start, end, "altim", 0.0)
+		tendF, _ := parseJsonFloat(start, end, "presTend", 0.0)
+
+		obsTempC[i] = tempC
+		obsDewpC[i] = dewpC
+		obsRelHum[i] = computeRelHum(tempC, dewpC)
+		obsWdir[i] = int(round(wdirF))
+		obsWspdKt[i] = int(round(wspdF))
+		obsWgstKt[i] = int(round(wgstF))
+		obsAltimHpa[i] = altimF
+		obsTendHpa[i] = tendF
+
+		parseJsonStringInto(start, end, "visib", obsVisibAddr(i), STR16_STRIDE)
+		parseJsonStringInto(start, end, "cover", obsCoverAddr(i), STR16_STRIDE)
+		parseJsonStringInto(start, end, "wxString", obsWxAddr(i), STR16_STRIDE)
+		parseJsonStringInto(start, end, "fltCat", obsFltAddr(i), STR16_STRIDE)
+		parseJsonStringInto(start, end, "rawOb", obsRawAddr(i), RAW_STRIDE)
+		extractUtcFromMetar(obsRawAddr(i), obsUtcAddr(i))
+
+		obsValid[i] = 1
+		parsedCount++
+	}
+
+	os_set_rgb_led(0, 1, 0, 180)
+	println("[WEATHER] Parsed", parsedCount, "stations from NOAA (", got, "bytes)")
+	drawWeatherTable()
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+		if ch == 'r' || ch == 'R' {
+			fetchNoaaWeather()
+			return false
+		}
+		if ch == 'u' || ch == 'U' {
+			useCelsius = !useCelsius
+			if wxMode == WX_TABLE {
+				drawWeatherTable()
+			} else {
+				drawCityDetail(selectedCity)
+			}
+			return false
+		}
+	}
+
+	clicked, tx, ty := os_read_click()
+	if !clicked {
+		return false
+	}
+
+	// Top bar (y < 25)
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 {
+			if wxMode == WX_TABLE {
+				useCelsius = !useCelsius
+				drawWeatherTable()
+			} else {
+				drawWeatherTable()
+			}
+		}
+		return false
+	}
+
+	if wxMode == WX_TABLE {
+		// 7 City Rows (y = 37..211, 25px each)
+		if ty >= 37 && ty < 37+NUM_CITIES*25 {
+			idx := (ty - 37) / 25
+			if idx >= 0 && idx < NUM_CITIES {
+				drawCityDetail(idx)
+			}
+			return false
+		}
+
+		// Bottom toolbar (y >= 212)
+		if ty >= 212 {
+			if tx <= 106 {
+				fetchNoaaWeather()
+				return false
+			}
+			if tx >= 107 && tx <= 194 {
+				useCelsius = !useCelsius
+				drawWeatherTable()
+				return false
+			}
+			if tx >= 195 {
+				copyCStrToAddr(int(&kbdBuf), 16, stCodeAddr(0))
+				res := os_prompt_keyboard("Airport IATA or ICAO", &kbdBuf[0], 8, true)
+				if res > 0 && peek1(int(&kbdBuf)) != 0 {
+					setCustomHomeStation(int(&kbdBuf))
+					fetchNoaaWeather()
+				} else {
+					drawWeatherTable()
+				}
+				return false
+			}
+		}
+		return false
+	}
+
+	if wxMode == WX_CITY_DETAIL {
+		if ty >= 212 {
+			if tx < 80 {
+				drawWeatherTable()
+			} else if tx >= 82 && tx <= 142 {
+				drawCityDetail((selectedCity + NUM_CITIES - 1) % NUM_CITIES)
+			} else if tx >= 144 && tx <= 204 {
+				drawCityDetail((selectedCity + 1) % NUM_CITIES)
+			} else if tx >= 206 {
+				fetchAndShowNwsDecoded(selectedCity)
+			}
+		} else {
+			// Tapping main card cycles to next station
+			drawCityDetail((selectedCity + 1) % NUM_CITIES)
+		}
+		return false
+	}
+
+	if wxMode == WX_CITY_NWS_TEXT {
+		if ty >= 212 && tx <= 104 {
+			drawWeatherTable()
+		} else {
+			drawCityDetail(selectedCity)
+		}
+		return false
+	}
+
+	return false
+}
+
+func main() {
+	useCelsius = false
+	selectedCity = 0
+	lastError = "No observation"
+
+	initStationsFromOs()
+	fetchNoaaWeather()
+
+	for {
+		if handleInput() {
+			return
+		}
+		os_delay_ms(25)
+	}
+}

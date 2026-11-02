@@ -1,0 +1,576 @@
+// Breakout for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+// Controls:
+//   - Top-Left HOME button (x <= 64, y < 25): Exit to Lakatos OS
+//   - Bottom zone (y >= 198): Move paddle left/right at a fixed rate
+//   - Vast middle (25 <= y < 198): Launch ball from paddle (or restart on Game Over)
+package main
+
+const (
+	TOP_BAR_H      = 24
+	BOTTOM_TOUCH_Y = 198
+	TRACK_Y        = 220
+
+	PADDLE_Y     = 204
+	PADDLE_W     = 44
+	PADDLE_H     = 6
+	PADDLE_MIN_X = 24
+	PADDLE_MAX_X = 296
+	PADDLE_SPEED = 5 // Fixed horizontal paddle speed (pixels per tick)
+
+	BALL_SIZE = 5
+
+	BRICK_ROWS  = 6
+	BRICK_COLS  = 10
+	BRICK_COUNT = 60 // BRICK_ROWS * BRICK_COLS
+	BRICK_X0    = 11
+	BRICK_Y0    = 38
+	BRICK_W     = 28
+	BRICK_H     = 9
+	BRICK_STEPX = 30
+	BRICK_STEPY = 11
+
+	BAR_BG   = 0x10A2
+	BTN_HOME = 0x2945
+	BTN_NEW  = 0x03EF
+	TRACK_BG = 0x0861
+	TRACK_FG = 0x39E7
+)
+
+var (
+	score        int
+	level        int
+	lives        int
+	bricksRemain int
+	gameOver     bool
+
+	// Paddle state
+	paddleX     int
+	prevPaddleX int
+	targetX     int
+	prevTgtX    int
+
+	// Ball state (1/2-pixel sub-stepping or integer pixel coordinates)
+	ballHeld  bool
+	hintShown bool
+	ballX     int
+	ballY     int
+	prevBallX int
+	prevBallY int
+	ballVX    int
+	ballVY    int
+
+	// Brick wall state
+	bricks [BRICK_COUNT]byte
+
+	// Touch state
+	lastTouchX int
+	lastTouchY int
+	touchHeld  bool
+)
+
+func drawHeader() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_BAR_H, BAR_BG)
+	tft_draw_fast_hline(0, TOP_BAR_H, SCREEN_W, CYAN)
+
+	// Standardized top-left HOME button
+	tft_fill_round_rect(2, 2, 58, 20, 4, BTN_HOME)
+	tft_draw_round_rect(2, 2, 58, 20, 4, CYAN)
+	tft_set_text_color(CYAN, BTN_HOME)
+	tft_draw_string("HOME", 15, 4, 2)
+
+	// Top-right NEW button
+	tft_fill_round_rect(260, 2, 58, 20, 4, BTN_NEW)
+	tft_draw_round_rect(260, 2, 58, 20, 4, WHITE)
+	tft_set_text_color(WHITE, BTN_NEW)
+	tft_draw_string("NEW", 275, 4, 2)
+
+	updateHUD()
+}
+
+func updateHUD() {
+	tft_fill_rect(64, 2, 192, 20, BAR_BG)
+
+	tft_set_text_color(YELLOW, BAR_BG)
+	tft_draw_string("S:", 66, 4, 2)
+	tft_draw_int(score, 84, 4, 2)
+
+	tft_set_text_color(CYAN, BAR_BG)
+	tft_draw_string("L:", 148, 4, 2)
+	tft_draw_int(level, 166, 4, 2)
+
+	// Draw remaining lives as mini balls + paddles
+	tft_set_text_color(GREEN, BAR_BG)
+	tft_draw_string("B:", 196, 4, 2)
+	for i := 0; i < 3; i++ {
+		lx := 214 + i*14
+		if i < lives {
+			tft_fill_rect(lx, 14, 10, 3, CYAN)
+			tft_fill_rect(lx+3, 9, 4, 4, YELLOW)
+		} else {
+			tft_fill_rect(lx, 8, 10, 9, BAR_BG)
+		}
+	}
+}
+
+func drawBottomTrack() {
+	tft_fill_rect(0, TRACK_Y, SCREEN_W, SCREEN_H-TRACK_Y, TRACK_BG)
+	tft_draw_fast_hline(0, TRACK_Y, SCREEN_W, DARKCYAN)
+
+	tft_fill_round_rect(4, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(4, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("< LEFT", 8, TRACK_Y+2, 2)
+
+	tft_fill_round_rect(260, TRACK_Y+2, 56, 16, 3, 0x18E3)
+	tft_draw_round_rect(260, TRACK_Y+2, 56, 16, 3, CYAN)
+	tft_set_text_color(CYAN, 0x18E3)
+	tft_draw_string("RIGHT >", 263, TRACK_Y+2, 2)
+
+	tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+}
+
+func updateTrackMarkers() {
+	if prevTgtX != targetX || prevPaddleX != paddleX {
+		tft_fill_rect(66, TRACK_Y+6, 188, 9, TRACK_BG)
+		tft_draw_fast_hline(66, TRACK_Y+10, 188, TRACK_FG)
+
+		tx := clamp(targetX, 68, 252)
+		tft_fill_rect(tx-2, TRACK_Y+7, 5, 7, YELLOW)
+
+		px := clamp(paddleX, 68, 252)
+		tft_fill_rect(px-4, TRACK_Y+8, 9, 5, CYAN)
+
+		prevTgtX = targetX
+	}
+}
+
+func brickColor(row int) int {
+	if row == 0 {
+		return RED
+	}
+	if row == 1 {
+		return ORANGE
+	}
+	if row == 2 {
+		return YELLOW
+	}
+	if row == 3 {
+		return GREEN
+	}
+	if row == 4 {
+		return CYAN
+	}
+	return MAGENTA
+}
+
+func brickHighlight(row int) int {
+	if row == 0 {
+		return PINK
+	}
+	if row == 1 {
+		return YELLOW
+	}
+	if row == 2 {
+		return WHITE
+	}
+	if row == 3 {
+		return GREENYELLOW
+	}
+	if row == 4 {
+		return WHITE
+	}
+	return PINK
+}
+
+func brickPoints(row int) int {
+	return (BRICK_ROWS - row) * 10
+}
+
+func drawBrick(row int, col int, alive bool) {
+	bx := BRICK_X0 + col*BRICK_STEPX
+	by := BRICK_Y0 + row*BRICK_STEPY
+	if !alive {
+		tft_fill_rect(bx, by, BRICK_W, BRICK_H, BLACK)
+		return
+	}
+	c := brickColor(row)
+	hi := brickHighlight(row)
+	tft_fill_rect(bx, by, BRICK_W, BRICK_H, c)
+	tft_draw_fast_hline(bx, by, BRICK_W, hi)
+	tft_draw_fast_vline(bx, by, BRICK_H, hi)
+}
+
+func initBricks() {
+	bricksRemain = BRICK_COUNT
+	for r := 0; r < BRICK_ROWS; r++ {
+		for c := 0; c < BRICK_COLS; c++ {
+			bricks[r*BRICK_COLS+c] = 1
+			drawBrick(r, c, true)
+		}
+	}
+}
+
+func drawPaddleAt(cx int, erase bool) {
+	x := cx - (PADDLE_W / 2)
+	if erase {
+		tft_fill_rect(x-1, PADDLE_Y, PADDLE_W+2, PADDLE_H, BLACK)
+		return
+	}
+	// Outer orange tips + bright cyan core + white top highlight
+	tft_fill_rect(x, PADDLE_Y+1, 7, PADDLE_H-1, ORANGE)
+	tft_fill_rect(x+PADDLE_W-7, PADDLE_Y+1, 7, PADDLE_H-1, ORANGE)
+	tft_fill_rect(x+7, PADDLE_Y, PADDLE_W-14, PADDLE_H, CYAN)
+	tft_draw_fast_hline(x+7, PADDLE_Y, PADDLE_W-14, WHITE)
+}
+
+func renderPaddle() {
+	if paddleX != prevPaddleX {
+		if prevPaddleX > 0 {
+			drawPaddleAt(prevPaddleX, true)
+		}
+		drawPaddleAt(paddleX, false)
+		updateTrackMarkers()
+		prevPaddleX = paddleX
+	}
+}
+
+func drawBallAt(x int, y int, erase bool) {
+	if x < 0 || y < TOP_BAR_H+1 {
+		return
+	}
+	if erase {
+		tft_fill_rect(x, y, BALL_SIZE, BALL_SIZE, BLACK)
+		return
+	}
+	tft_fill_rect(x+1, y, BALL_SIZE-2, BALL_SIZE, WHITE)
+	tft_fill_rect(x, y+1, BALL_SIZE, BALL_SIZE-2, WHITE)
+}
+
+func renderBall() {
+	if ballX != prevBallX || ballY != prevBallY {
+		if prevBallX >= 0 {
+			drawBallAt(prevBallX, prevBallY, true)
+		}
+		drawBallAt(ballX, ballY, false)
+		prevBallX = ballX
+		prevBallY = ballY
+	}
+}
+
+func showLaunchHint(show bool) {
+	if show && !hintShown {
+		tft_set_text_color(LIGHTGREY, BLACK)
+		tft_draw_string("TAP MIDDLE TO LAUNCH", 82, 148, 2)
+		hintShown = true
+	} else if !show && hintShown {
+		tft_fill_rect(76, 146, 172, 18, BLACK)
+		hintShown = false
+	}
+}
+
+func attachBallToPaddle() {
+	if prevBallX >= 0 {
+		drawBallAt(prevBallX, prevBallY, true)
+		prevBallX = -1
+	}
+	ballHeld = true
+	ballX = paddleX - (BALL_SIZE / 2)
+	ballY = PADDLE_Y - BALL_SIZE - 1
+	ballVX = 3
+	if os_rand(2) == 0 {
+		ballVX = -3
+	}
+	ballVY = -4
+	renderBall()
+	showLaunchHint(true)
+}
+
+func launchBall() {
+	if !ballHeld || gameOver {
+		return
+	}
+	showLaunchHint(false)
+	ballHeld = false
+	if ballVY >= 0 {
+		ballVY = -4
+	}
+}
+
+func initLevel() {
+	tft_fill_rect(0, TOP_BAR_H+1, SCREEN_W, TRACK_Y-TOP_BAR_H-1, BLACK)
+	hintShown = false
+	prevBallX = -1
+	prevBallY = -1
+	prevPaddleX = -1
+
+	initBricks()
+	renderPaddle()
+	attachBallToPaddle()
+	updateHUD()
+}
+
+func startNewGame() {
+	score = 0
+	level = 1
+	lives = 3
+	gameOver = false
+
+	paddleX = SCREEN_W / 2
+	targetX = paddleX
+	prevPaddleX = -1
+	prevTgtX = -1
+
+	drawHeader()
+	drawBottomTrack()
+	initLevel()
+}
+
+func triggerGameOver() {
+	gameOver = true
+	showLaunchHint(false)
+	tft_fill_round_rect(50, 118, 220, 52, 6, MAROON)
+	tft_draw_round_rect(50, 118, 220, 52, 6, YELLOW)
+	tft_set_text_color(YELLOW, MAROON)
+	tft_draw_string("GAME OVER", 112, 126, 2)
+	tft_set_text_color(WHITE, MAROON)
+	tft_draw_string("TAP MIDDLE TO PLAY", 84, 146, 2)
+}
+
+func checkBrickCollision(nx int, ny int) bool {
+	// Ball bounding box: [nx .. nx+BALL_SIZE-1], [ny .. ny+BALL_SIZE-1]
+	if ny+BALL_SIZE < BRICK_Y0 || ny >= BRICK_Y0+BRICK_ROWS*BRICK_STEPY {
+		return false
+	}
+	if nx+BALL_SIZE < BRICK_X0 || nx >= BRICK_X0+BRICK_COLS*BRICK_STEPX {
+		return false
+	}
+
+	cx := nx + (BALL_SIZE / 2)
+	cy := ny + (BALL_SIZE / 2)
+	col := (cx - BRICK_X0) / BRICK_STEPX
+	row := (cy - BRICK_Y0) / BRICK_STEPY
+
+	if row < 0 || row >= BRICK_ROWS || col < 0 || col >= BRICK_COLS {
+		return false
+	}
+
+	idx := row*BRICK_COLS + col
+	if bricks[idx] == 0 {
+		return false
+	}
+
+	bx := BRICK_X0 + col*BRICK_STEPX
+	by := BRICK_Y0 + row*BRICK_STEPY
+	if nx+BALL_SIZE < bx || nx > bx+BRICK_W || ny+BALL_SIZE < by || ny > by+BRICK_H {
+		return false
+	}
+
+	// Destroy brick
+	bricks[idx] = 0
+	bricksRemain--
+	drawBrick(row, col, false)
+
+	// Determine bounce axis using previous ball center
+	prevCX := ballX + (BALL_SIZE / 2)
+	if prevCX < bx || prevCX > bx+BRICK_W {
+		ballVX = -ballVX
+	} else {
+		ballVY = -ballVY
+	}
+
+	score += brickPoints(row)
+	updateHUD()
+	return true
+}
+
+func stepBall() {
+	if ballHeld {
+		ballX = paddleX - (BALL_SIZE / 2)
+		ballY = PADDLE_Y - BALL_SIZE - 1
+		renderBall()
+		return
+	}
+
+	nx := ballX + ballVX
+	ny := ballY + ballVY
+
+	// Left & right wall bounce
+	if nx <= 2 {
+		nx = 2
+		ballVX = -ballVX
+	} else if nx >= SCREEN_W-BALL_SIZE-2 {
+		nx = SCREEN_W - BALL_SIZE - 2
+		ballVX = -ballVX
+	}
+
+	// Ceiling bounce
+	if ny <= TOP_BAR_H+2 {
+		ny = TOP_BAR_H + 2
+		ballVY = -ballVY
+	}
+
+	// Brick collision
+	if checkBrickCollision(nx, ny) {
+		nx = ballX + ballVX
+		ny = ballY + ballVY
+	}
+
+	// Paddle collision when moving downward
+	if ballVY > 0 && ny+BALL_SIZE >= PADDLE_Y && ballY+BALL_SIZE <= PADDLE_Y+PADDLE_H+4 {
+		pLeft := paddleX - (PADDLE_W / 2)
+		pRight := paddleX + (PADDLE_W / 2)
+		if nx+BALL_SIZE >= pLeft-2 && nx <= pRight+2 {
+			ny = PADDLE_Y - BALL_SIZE - 1
+			hitOffset := (nx + (BALL_SIZE / 2)) - paddleX
+			if hitOffset < -12 {
+				ballVX = -4
+				ballVY = -3
+			} else if hitOffset < -4 {
+				ballVX = -3
+				ballVY = -4
+			} else if hitOffset <= 4 {
+				if ballVX < 0 {
+					ballVX = -2
+				} else {
+					ballVX = 2
+				}
+				ballVY = -4
+			} else if hitOffset <= 12 {
+				ballVX = 3
+				ballVY = -4
+			} else {
+				ballVX = 4
+				ballVY = -3
+			}
+			// Redraw paddle in case ball overlapped its top edge
+			drawPaddleAt(paddleX, false)
+		}
+	}
+
+	// Bottom miss check
+	if ny >= TRACK_Y-BALL_SIZE-1 {
+		if prevBallX >= 0 {
+			drawBallAt(prevBallX, prevBallY, true)
+			prevBallX = -1
+		}
+		lives--
+		updateHUD()
+		if lives <= 0 {
+			triggerGameOver()
+			return
+		}
+		attachBallToPaddle()
+		return
+	}
+
+	ballX = nx
+	ballY = ny
+	renderBall()
+}
+
+func stepPaddleMovement() {
+	if paddleX < targetX {
+		paddleX += PADDLE_SPEED
+		if paddleX > targetX {
+			paddleX = targetX
+		}
+		renderPaddle()
+	} else if paddleX > targetX {
+		paddleX -= PADDLE_SPEED
+		if paddleX < targetX {
+			paddleX = targetX
+		}
+		renderPaddle()
+	}
+}
+
+func handleInput() bool {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			os_exit(0)
+			return true
+		}
+	}
+
+	touched, tx, ty := os_read_touch()
+	if !touched {
+		touchHeld = false
+		return false
+	}
+
+	// 1. Top bar (y < 25): HOME button on top-left, NEW button on top-right
+	if ty < 25 {
+		if tx <= 64 {
+			os_exit(0)
+			return true
+		}
+		if tx >= 256 && (!touchHeld || tx != lastTouchX || ty != lastTouchY) {
+			touchHeld = true
+			lastTouchX = tx
+			lastTouchY = ty
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	// If game over, touching in the middle starts a new game
+	if gameOver {
+		if ty >= 25 && ty < BOTTOM_TOUCH_Y && (!touchHeld || tx != lastTouchX || ty != lastTouchY) {
+			touchHeld = true
+			lastTouchX = tx
+			lastTouchY = ty
+			startNewGame()
+			os_delay_ms(80)
+		}
+		return false
+	}
+
+	// 2. Bottom zone (ty >= BOTTOM_TOUCH_Y): move the paddle left or right at a fixed rate
+	if ty >= BOTTOM_TOUCH_Y {
+		if tx < 60 {
+			targetX = PADDLE_MIN_X
+		} else if tx > 260 {
+			targetX = PADDLE_MAX_X
+		} else {
+			targetX = clamp(tx, PADDLE_MIN_X, PADDLE_MAX_X)
+		}
+		updateTrackMarkers()
+		touchHeld = true
+		lastTouchX = tx
+		lastTouchY = ty
+		return false
+	}
+
+	// 3. Vast middle (25 <= ty < BOTTOM_TOUCH_Y): fire/launch ball from the paddle!
+	launchBall()
+	touchHeld = true
+	lastTouchX = tx
+	lastTouchY = ty
+	return false
+}
+
+func main() {
+	startNewGame()
+
+	for {
+		if handleInput() {
+			return
+		}
+
+		if !gameOver {
+			stepPaddleMovement()
+			stepBall()
+			if bricksRemain <= 0 {
+				level++
+				score += 100
+				initLevel()
+				continue
+			}
+		}
+
+		os_delay_ms(20)
+	}
+}
