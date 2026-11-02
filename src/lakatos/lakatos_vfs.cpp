@@ -162,7 +162,7 @@ static String buildShTargetUrl(const String& subPath, const char* query = nullpt
 }
 
 static void addShBasicAuthHeader(HTTPClient& http) {
-  String user = String(lakatosGetDeviceName()) + String(lakatosGetSerialNumber());
+  String user = String(lakatosGetDeviceName()) + "/" + String(lakatosGetSerialNumber());
   String pass = String(lakatosGetSuperhighwayPassword());
   if (user.length() > 0 || pass.length() > 0) {
     String raw = user + ":" + pass;

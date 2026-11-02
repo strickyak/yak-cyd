@@ -729,7 +729,7 @@ static void drawHeaderBar() {
   tft.drawString("YAK-CYD", 6, 11, 2);
 
   char idBuf[40];
-  snprintf(idBuf, sizeof(idBuf), "%s%s", lakatosGetDeviceName(), lakatosGetSerialNumber());
+  snprintf(idBuf, sizeof(idBuf), "%s/%s", lakatosGetDeviceName(), lakatosGetSerialNumber());
   tft.setTextColor(TFT_YELLOW, 0x10A2);
   tft.drawString(idBuf, 72, 11, 1);
 
@@ -1375,7 +1375,7 @@ static void handleSerialCommand() {
   }
 
   if (line == "info") {
-    Serial.printf("Lakatos OS v%u | ID: %s%s | Airport: %s | URL: %s | Wi-Fi: %s | Heap: %u\r\n",
+    Serial.printf("Lakatos OS v%u | ID: %s/%s | Airport: %s | URL: %s | Wi-Fi: %s | Heap: %u\r\n",
                   LAKATOS_API_VERSION,
                   lakatosGetDeviceName(),
                   lakatosGetSerialNumber(),

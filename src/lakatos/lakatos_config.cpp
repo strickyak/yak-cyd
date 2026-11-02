@@ -908,7 +908,7 @@ static bool runAboutModal() {
 
     drawRow("OS / API:", "Lakatos OS v" + String(LAKATOS_API_VERSION), TFT_WHITE);
     drawRow("Runtime:", "LCode 32-Bit VM + FPU", TFT_GREEN);
-    drawRow("Device ID:", String(gDeviceName) + String(gSerialNo), TFT_YELLOW);
+    drawRow("Device ID:", String(gDeviceName) + "/" + String(gSerialNo), TFT_YELLOW);
     drawRow("Airport:", String(gAirportCode) + " (" + String(gAirportCity) + ")", TFT_CYAN);
     drawRow("Free RAM:", String(ESP.getFreeHeap() / 1024) + " KB SRAM", TFT_WHITE);
     drawRow("/net URL:", String(gShUrl).substring(0, 24), TFT_MAGENTA);
