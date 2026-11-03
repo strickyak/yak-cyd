@@ -1,0 +1,482 @@
+// Paint App for Lakatos OS (LCode 32-bit Bytecode VM)
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display
+// Layout:
+//   - Left 20x240 minimalist toolbar (x = 0..19, y = 0..239):
+//     * Top-left 10x10 exit wedge (y = 0..13)
+//     * 9 color swatches including Black/Eraser (y = 15..176)
+//     * 3 brush size selectors: Fine, Medium, Thick (y = 180..215)
+//     * Kebab [...] menu control (y = 219..237) -> temporary modal overlay
+//       to name & save PNG to /net/paintings/<name>.png or clear canvas
+//   - Right 300x240 4-bit indexed pixel canvas (x = 20..319, y = 0..239)
+package main
+
+import "wedge"
+
+const (
+	UI_W       = 20
+	CANVAS_X   = 20
+	CANVAS_Y   = 0
+	CANVAS_W   = 300
+	CANVAS_H   = 240
+	ROW_STRIDE = 150 // 300 pixels / 2 pixels per byte
+	CANVAS_BYTES = 36000
+
+	NUM_SWATCHES = 9
+	SWATCH_Y0    = 15
+	SWATCH_H     = 18
+
+	NUM_SIZES = 3
+	SIZE_Y0   = 180
+	SIZE_H    = 12
+
+	KEBAB_Y0 = 219
+	KEBAB_H  = 19
+
+	UI_BG      = 0x18E3
+	UI_DIVIDER = 0x4A69
+)
+
+var (
+	// 16-entry RGB565 palette (index 0 is BLACK so zeroed canvas is black)
+	palette     [16]int
+	swatchToPal [NUM_SWATCHES]int
+	radii       [NUM_SIZES]int
+
+	swatchIdx int
+	sizeIdx   int
+
+	// 4-bit-per-pixel backing store (300x240 / 2 = 36,000 bytes)
+	// High nibble = even x, low nibble = odd x
+	canvas [CANVAS_BYTES]byte
+
+	nameBuf [32]byte
+	pathBuf [64]byte
+
+	penDown    bool
+	lastX      int
+	lastY      int
+	lastPenMs  int
+	lastToolMs int
+)
+
+func initPalette() {
+	palette[0] = BLACK
+	palette[1] = WHITE
+	palette[2] = RED
+	palette[3] = ORANGE
+	palette[4] = YELLOW
+	palette[5] = GREEN
+	palette[6] = CYAN
+	palette[7] = 0x2AFF // Bright sky/cobalt blue
+	palette[8] = MAGENTA
+
+	// Swatches 0..7 map to palette 1..8; Swatch 8 maps to palette 0 (Black/Eraser)
+	for i := 0; i < 8; i++ {
+		swatchToPal[i] = i + 1
+	}
+	swatchToPal[8] = 0
+
+	radii[0] = 1
+	radii[1] = 3
+	radii[2] = 5
+
+	swatchIdx = 5 // Start with Cyan
+	sizeIdx = 1   // Start with Medium brush (r=3)
+	lastToolMs = -1000
+
+	// Default painting filename: "painting"
+	nameBuf[0] = 'p'
+	nameBuf[1] = 'a'
+	nameBuf[2] = 'i'
+	nameBuf[3] = 'n'
+	nameBuf[4] = 't'
+	nameBuf[5] = 'i'
+	nameBuf[6] = 'n'
+	nameBuf[7] = 'g'
+	nameBuf[8] = 0
+}
+
+func drawToolbar() {
+	tft_fill_rect(0, 0, UI_W-1, SCREEN_H, UI_BG)
+	tft_draw_fast_vline(UI_W-1, 0, SCREEN_H, UI_DIVIDER)
+
+	// Top-left 10x10 corner exit wedge
+	DrawExitWedge()
+
+	// 9 Color Swatches (y = 15..176)
+	for i := 0; i < NUM_SWATCHES; i++ {
+		sy := SWATCH_Y0 + i*SWATCH_H
+		col := palette[swatchToPal[i]]
+
+		if i == swatchIdx {
+			hi := WHITE
+			if col == WHITE || col == YELLOW {
+				hi = CYAN
+			}
+			tft_draw_rect(0, sy-1, 18, 17, hi)
+			tft_draw_rect(1, sy, 16, 15, hi)
+			tft_fill_rect(2, sy+1, 14, 13, col)
+		} else {
+			tft_fill_rect(2, sy+1, 14, 13, col)
+			tft_draw_rect(2, sy+1, 14, 13, 0x4A69)
+		}
+
+		// Diagonal slash across Black swatch to indicate Eraser
+		if col == BLACK {
+			tft_draw_line(3, sy+12, 14, sy+2, 0x7BEF)
+		}
+	}
+
+	// 3 Brush Size Buttons (y = 180..215)
+	previewCol := palette[swatchToPal[swatchIdx]]
+	if previewCol == BLACK {
+		previewCol = WHITE
+	}
+	for s := 0; s < NUM_SIZES; s++ {
+		by := SIZE_Y0 + s*SIZE_H
+		cy := by + SIZE_H/2
+		r := radii[s]
+		if s == sizeIdx {
+			tft_fill_rect(1, by, 17, SIZE_H-1, 0x2945)
+			tft_draw_rect(1, by, 17, SIZE_H-1, CYAN)
+		} else {
+			tft_fill_rect(1, by, 17, SIZE_H-1, 0x0841)
+		}
+		tft_fill_circle(9, cy, r, previewCol)
+	}
+
+	// Kebab [...] Button (y = 219..237)
+	tft_fill_round_rect(1, KEBAB_Y0, 17, KEBAB_H, 3, 0x2945)
+	tft_draw_round_rect(1, KEBAB_Y0, 17, KEBAB_H, 3, CYAN)
+	tft_fill_rect(3, KEBAB_Y0+8, 2, 3, WHITE)
+	tft_fill_rect(8, KEBAB_Y0+8, 2, 3, WHITE)
+	tft_fill_rect(13, KEBAB_Y0+8, 2, 3, WHITE)
+}
+
+func clearCanvas() {
+	memset(&canvas[0], 0, CANVAS_BYTES)
+	tft_fill_rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, BLACK)
+}
+
+func restoreCanvas() {
+	drawToolbar()
+	os_tft_draw_pal4(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, &palette[0], &canvas[0])
+}
+
+func setCanvasSpan(py int, cx1 int, cx2 int, palIdx int) {
+	rowOff := py * ROW_STRIDE
+	x := cx1
+	if (x & 1) == 1 {
+		bIdx := rowOff + (x >> 1)
+		canvas[bIdx] = byte((int(canvas[bIdx]) & 0xF0) | (palIdx & 0x0F))
+		x = x + 1
+	}
+	pairByte := byte(((palIdx & 0x0F) << 4) | (palIdx & 0x0F))
+	for x+1 <= cx2 {
+		canvas[rowOff+(x>>1)] = pairByte
+		x = x + 2
+	}
+	if x <= cx2 {
+		bIdx := rowOff + (x >> 1)
+		canvas[bIdx] = byte((int(canvas[bIdx]) & 0x0F) | ((palIdx & 0x0F) << 4))
+	}
+}
+
+// Clamps every horizontal scanline of the circular brush nib to x >= CANVAS_X (20)
+// and updates both the TFT screen and the 4-bit canvas buffer.
+func stampBrush(cx int, cy int, r int, palIdx int) {
+	col := palette[palIdx]
+	limit := r*r + r/2
+	for dy := -r; dy <= r; dy++ {
+		py := cy + dy
+		if py < 0 || py >= CANVAS_H {
+			continue
+		}
+		dx := 0
+		for (dx+1)*(dx+1)+dy*dy <= limit {
+			dx = dx + 1
+		}
+		x1 := cx - dx
+		x2 := cx + dx
+		if x2 < CANVAS_X || x1 >= SCREEN_W {
+			continue
+		}
+		if x1 < CANVAS_X {
+			x1 = CANVAS_X
+		}
+		if x2 >= SCREEN_W {
+			x2 = SCREEN_W - 1
+		}
+		tft_draw_fast_hline(x1, py, x2-x1+1, col)
+		setCanvasSpan(py, x1-CANVAS_X, x2-CANVAS_X, palIdx)
+	}
+}
+
+func drawStroke(x0 int, y0 int, x1 int, y1 int, r int, palIdx int) {
+	dx := abs(x1 - x0)
+	dy := abs(y1 - y0)
+	steps := dx
+	if dy > steps {
+		steps = dy
+	}
+	if steps == 0 {
+		stampBrush(x0, y0, r, palIdx)
+		return
+	}
+	for i := 0; i <= steps; i++ {
+		px := x0 + (x1-x0)*i/steps
+		py := y0 + (y1-y0)*i/steps
+		stampBrush(px, py, r, palIdx)
+	}
+}
+
+func buildSavePath() int {
+	// "/net/paintings/" + nameBuf + ".png" (unless nameBuf already ends with .png)
+	prefix := "/net/paintings/"
+	pos := 0
+	for i := 0; i < 15; i++ {
+		pathBuf[pos] = prefix[i]
+		pos = pos + 1
+	}
+	nLen := 0
+	for nLen < 24 && nameBuf[nLen] != 0 {
+		ch := nameBuf[nLen]
+		if ch != '/' && ch != ' ' {
+			pathBuf[pos] = ch
+			pos = pos + 1
+		}
+		nLen = nLen + 1
+	}
+	if pos == 15 {
+		pathBuf[pos] = 'a'
+		pathBuf[pos+1] = 'r'
+		pathBuf[pos+2] = 't'
+		pos = pos + 3
+	}
+	hasExt := false
+	if pos >= 19 {
+		if pathBuf[pos-4] == '.' &&
+			(pathBuf[pos-3] == 'p' || pathBuf[pos-3] == 'P') &&
+			(pathBuf[pos-2] == 'n' || pathBuf[pos-2] == 'N') &&
+			(pathBuf[pos-1] == 'g' || pathBuf[pos-1] == 'G') {
+			hasExt = true
+		}
+	}
+	if !hasExt {
+		pathBuf[pos] = '.'
+		pathBuf[pos+1] = 'p'
+		pathBuf[pos+2] = 'n'
+		pathBuf[pos+3] = 'g'
+		pos = pos + 4
+	}
+	pathBuf[pos] = 0
+	return pos
+}
+
+func drawKebabModal(statusMsg string, statusCol int) {
+	// Centered card over the 300x240 canvas (x = 34..306, y = 22..218)
+	tft_fill_round_rect(34, 22, 272, 196, 6, 0x1082)
+	tft_draw_round_rect(34, 22, 272, 196, 6, CYAN)
+
+	// Modal Header
+	tft_fill_round_rect(36, 24, 268, 24, 4, NAVY)
+	tft_set_text_color(YELLOW, NAVY)
+	tft_draw_string("PAINTING MENU", 46, 28, 2)
+
+	// [BACK] button in header (x = 246..300, y = 26..46)
+	tft_fill_round_rect(246, 26, 54, 20, 4, 0x2945)
+	tft_draw_round_rect(246, 26, 54, 20, 4, WHITE)
+	tft_set_text_color(WHITE, 0x2945)
+	tft_draw_string("BACK", 257, 28, 2)
+
+	// Name box + [NAME] button (y = 56..98)
+	tft_set_text_color(LIGHTGREY, 0x1082)
+	tft_draw_string("SAVE PATH:", 46, 54, 1)
+
+	tft_fill_round_rect(44, 66, 184, 28, 4, BLACK)
+	tft_draw_round_rect(44, 66, 184, 28, 4, CYAN)
+	buildSavePath()
+	tft_set_text_color(WHITE, BLACK)
+	tft_draw_cstr(&pathBuf[0], 50, 76, 1)
+
+	tft_fill_round_rect(234, 66, 62, 28, 4, 0x2945)
+	tft_draw_round_rect(234, 66, 62, 28, 4, YELLOW)
+	tft_set_text_color(YELLOW, 0x2945)
+	tft_draw_string("RENAME", 244, 76, 1)
+
+	// [ SAVE TO /net/paintings ] button (x = 44..296, y = 104..138)
+	tft_fill_round_rect(44, 104, 252, 34, 5, DARKGREEN)
+	tft_draw_round_rect(44, 104, 252, 34, 5, GREEN)
+	tft_set_text_color(WHITE, DARKGREEN)
+	tft_draw_string("SAVE PNG TO /net/paintings", 68, 113, 2)
+
+	// [ CLEAR CANVAS ] (x = 44..164, y = 148..182) & [ RESUME ] (x = 174..296, y = 148..182)
+	tft_fill_round_rect(44, 148, 120, 34, 5, 0x4800)
+	tft_draw_round_rect(44, 148, 120, 34, 5, RED)
+	tft_set_text_color(WHITE, 0x4800)
+	tft_draw_string("CLEAR CANVAS", 56, 157, 2)
+
+	tft_fill_round_rect(174, 148, 122, 34, 5, 0x2945)
+	tft_draw_round_rect(174, 148, 122, 34, 5, CYAN)
+	tft_set_text_color(CYAN, 0x2945)
+	tft_draw_string("RESUME", 208, 157, 2)
+
+	// Status line at bottom of modal (y = 192..210)
+	tft_fill_rect(44, 190, 252, 22, 0x1082)
+	tft_set_text_color(statusCol, 0x1082)
+	tft_draw_string(statusMsg, 46, 196, 1)
+}
+
+func waitRelease() {
+	for {
+		touched, _, _ := os_read_touch()
+		if !touched {
+			return
+		}
+		os_delay_ms(15)
+	}
+}
+
+func runKebabModal() {
+	drawKebabModal("Tap RENAME to set filename, or SAVE PNG.", LIGHTGREY)
+	waitRelease()
+
+	wasDown := false
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+				return
+			}
+		}
+
+		touched, tx, ty := os_read_touch()
+		if touched {
+			if !wasDown {
+				wasDown = true
+				// [BACK] button (top-right of modal) or [RESUME] button
+				if (ty >= 24 && ty <= 48 && tx >= 244 && tx <= 302) ||
+					(ty >= 148 && ty <= 182 && tx >= 174 && tx <= 296) {
+					waitRelease()
+					restoreCanvas()
+					return
+				}
+
+				// Filename box or [RENAME] button (y = 64..96, x = 44..296)
+				if ty >= 64 && ty <= 96 && tx >= 44 && tx <= 296 {
+					waitRelease()
+					os_prompt_keyboard("PAINTING NAME", &nameBuf[0], 24, false)
+					restoreCanvas()
+					drawKebabModal("Filename updated. Tap SAVE PNG to upload.", CYAN)
+					waitRelease()
+					wasDown = false
+				} else if ty >= 104 && ty <= 138 && tx >= 44 && tx <= 296 {
+					// [ SAVE PNG TO /net/paintings ]
+					pathLen := buildSavePath()
+					drawKebabModal("Saving to /net/paintings ...", YELLOW)
+					os_fs_mkdir("/net/paintings", true)
+					ok := os_save_png_pal4(make_slice(&pathBuf[0], 64, pathLen), CANVAS_W, CANVAS_H, &palette[0], &canvas[0])
+					if ok {
+						drawKebabModal("SAVED OK!", GREEN)
+					} else {
+						drawKebabModal("SAVE FAILED (Check Wi-Fi & /net config)", RED)
+					}
+					waitRelease()
+					wasDown = false
+				} else if ty >= 148 && ty <= 182 && tx >= 44 && tx <= 164 {
+					// [ CLEAR CANVAS ]
+					waitRelease()
+					drawToolbar()
+					clearCanvas()
+					return
+				}
+			}
+		} else {
+			wasDown = false
+		}
+		os_delay_ms(15)
+	}
+}
+
+func handleToolbarTap(ty int) {
+	now := os_millis()
+	if now-lastToolMs < 140 {
+		return
+	}
+	lastToolMs = now
+
+	if ty >= SWATCH_Y0 && ty < SWATCH_Y0+NUM_SWATCHES*SWATCH_H {
+		idx := (ty - SWATCH_Y0) / SWATCH_H
+		if idx >= 0 && idx < NUM_SWATCHES && idx != swatchIdx {
+			swatchIdx = idx
+			drawToolbar()
+		}
+		return
+	}
+
+	if ty >= SIZE_Y0 && ty < SIZE_Y0+NUM_SIZES*SIZE_H {
+		idx := (ty - SIZE_Y0) / SIZE_H
+		if idx >= 0 && idx < NUM_SIZES && idx != sizeIdx {
+			sizeIdx = idx
+			drawToolbar()
+		}
+		return
+	}
+
+	if ty >= KEBAB_Y0 && ty < KEBAB_Y0+KEBAB_H {
+		runKebabModal()
+		lastToolMs = os_millis()
+		return
+	}
+}
+
+func main() {
+	initPalette()
+	tft_fill_screen(BLACK)
+	drawToolbar()
+	clearCanvas()
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+				return
+			}
+			if ch == 'c' || ch == 'C' {
+				clearCanvas()
+			}
+		}
+
+		touched, tx, ty := os_read_touch()
+		now := os_millis()
+
+		if touched {
+			if tx < CANVAS_X {
+				penDown = false
+				if ty >= 14 {
+					handleToolbarTap(ty)
+				}
+			} else {
+				palIdx := swatchToPal[swatchIdx]
+				r := radii[sizeIdx]
+				if penDown && (now-lastPenMs < 80) && (abs(tx-lastX)+abs(ty-lastY) < 64) {
+					drawStroke(lastX, lastY, tx, ty, r, palIdx)
+				} else {
+					stampBrush(tx, ty, r, palIdx)
+				}
+				penDown = true
+				lastX = tx
+				lastY = ty
+				lastPenMs = now
+			}
+		} else {
+			if penDown && (now-lastPenMs >= 50) {
+				penDown = false
+			}
+		}
+
+		os_delay_ms(8)
+	}
+}

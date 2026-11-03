@@ -1926,6 +1926,80 @@ func (vm *VM) execSyscall(sysId byte) error {
 	case SysPrefetchCancel:
 		vm.PrefetchStatus = 0
 		vm.PrefetchBytes = 0
+	case SysTftDrawPal4:
+		pixAddr, _ := vm.pop()
+		palAddr, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		y, _ := vm.pop()
+		x, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 {
+			return nil
+		}
+		if err := vm.checkAddr(palAddr, 16*4); err != nil {
+			return err
+		}
+		totalBytes := int(w*h) / 2
+		if err := vm.checkAddr(pixAddr, totalBytes); err != nil {
+			return err
+		}
+		var pal [16]uint16
+		for i := 0; i < 16; i++ {
+			pal[i] = uint16(binary.LittleEndian.Uint32(vm.Memory[palAddr+uint32(i*4):]))
+		}
+		rowBytes := int(w) / 2
+		for row := 0; row < int(h); row++ {
+			py := int(int32(y)) + row
+			if py < 0 || py >= 240 {
+				continue
+			}
+			rowOff := int(pixAddr) + row*rowBytes
+			for col := 0; col < int(w); col++ {
+				px := int(int32(x)) + col
+				if px < 0 || px >= 320 {
+					continue
+				}
+				b := vm.Memory[rowOff+(col>>1)]
+				var nib uint8
+				if (col & 1) == 0 {
+					nib = (b >> 4) & 0x0F
+				} else {
+					nib = b & 0x0F
+				}
+				vm.Screen[py][px] = pal[nib]
+			}
+		}
+	case SysSavePngPal4:
+		pixAddr, _ := vm.pop()
+		palAddr, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 ||
+			vm.checkAddr(palAddr, 16*4) != nil ||
+			vm.checkAddr(pixAddr, int(w*h)/2) != nil {
+			vm.push(0)
+			return nil
+		}
+		var pal [16]uint16
+		for i := 0; i < 16; i++ {
+			pal[i] = uint16(binary.LittleEndian.Uint32(vm.Memory[palAddr+uint32(i*4):]))
+		}
+		totalBytes := int(w*h) / 2
+		pngBytes := encodePngPal4(int(w), int(h), pal, vm.Memory[pixAddr:int(pixAddr)+totalBytes])
+		hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+		_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
+		if err := os.WriteFile(hostPath, pngBytes, 0o644); err != nil {
+			vm.push(0)
+		} else {
+			vm.push(1)
+		}
 
 	// Touch, Keyboard, LED & Sensors
 	case SysReadTouch, SysReadClick:
@@ -2113,6 +2187,39 @@ func (vm *VM) execSyscall(sysId byte) error {
 			hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
 			_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
 			if err := os.WriteFile(hostPath, vm.Memory[bufAddr:bufAddr+ln], 0o644); err == nil {
+				vm.push(1)
+				return nil
+			}
+		}
+		vm.push(0)
+	case SysFsMkdir:
+		parents, _ := vm.pop()
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if vm.VfsRoot != "" {
+			hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+			var mkErr error
+			if parents != 0 {
+				mkErr = os.MkdirAll(hostPath, 0o755)
+			} else {
+				mkErr = os.Mkdir(hostPath, 0o755)
+			}
+			if mkErr == nil {
+				vm.push(1)
+				return nil
+			}
+		}
+		vm.push(0)
+	case SysFsRmdir, SysFsRm:
+		path, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if vm.VfsRoot != "" {
+			hostPath := filepath.Join(vm.VfsRoot, filepath.Clean("/"+path))
+			if err := os.Remove(hostPath); err == nil {
 				vm.push(1)
 				return nil
 			}
@@ -2760,4 +2867,188 @@ func CityHash32(s []byte) uint32 {
 	h = h*5 + 0xe6546b64
 	h = cityRotate32(h, 17) * c1
 	return h
+}
+
+// encodePngPal4 encodes a 4-bit indexed-color PNG (colorType=3, bitDepth=4)
+// using Filter Type 2 (Up) and RFC 1951 Fixed-Huffman RLE (dist=1) compression,
+// matching the exact algorithm in src/lakatos/lakatos_png.cpp.
+func encodePngPal4(w, h int, pal565 [16]uint16, pix4bpp []byte) []byte {
+	var bitBuf uint32
+	var bitCnt uint
+	var idat bytes.Buffer
+
+	// Zlib header (CMF=0x78, FLG=0x01)
+	idat.WriteByte(0x78)
+	idat.WriteByte(0x01)
+
+	emitBits := func(val uint32, nbits uint) {
+		bitBuf |= (val & ((1 << nbits) - 1)) << bitCnt
+		bitCnt += nbits
+		for bitCnt >= 8 {
+			idat.WriteByte(byte(bitBuf & 0xFF))
+			bitBuf >>= 8
+			bitCnt -= 8
+		}
+	}
+	emitHuff := func(code uint32, nbits uint) {
+		var rev uint32
+		for i := uint(0); i < nbits; i++ {
+			rev = (rev << 1) | ((code >> i) & 1)
+		}
+		emitBits(rev, nbits)
+	}
+	emitLit := func(b int) {
+		if b < 144 {
+			emitHuff(uint32(0x30+b), 8)
+		} else {
+			emitHuff(uint32(0x190+(b-144)), 9)
+		}
+	}
+	baseLen := [29]int{
+		3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+		35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+	}
+	extraBits := [29]uint{
+		0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+		3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+	}
+	emitLenDist1 := func(length int) {
+		idx := 28
+		for i := 0; i < 28; i++ {
+			if length >= baseLen[i] && length < baseLen[i+1] {
+				idx = i
+				break
+			}
+		}
+		sym := 257 + idx
+		if sym <= 279 {
+			emitHuff(uint32(sym-256), 7)
+		} else {
+			emitHuff(uint32(0xC0+(sym-280)), 8)
+		}
+		if extraBits[idx] > 0 {
+			emitBits(uint32(length-baseLen[idx]), extraBits[idx])
+		}
+		// Distance = 1 -> distance code 0 (5 zero bits)
+		emitBits(0, 5)
+	}
+
+	// Block header: BFINAL=1 (1 bit), BTYPE=01 Fixed Huffman (2 bits)
+	emitBits(1, 1)
+	emitBits(1, 2)
+
+	var s1 uint32 = 1
+	var s2 uint32 = 0
+	prevByte := -1
+	runLen := 0
+
+	flushRun := func() {
+		for runLen >= 3 {
+			take := runLen
+			if take > 258 {
+				take = 258
+			}
+			emitLenDist1(take)
+			runLen -= take
+		}
+		for runLen > 0 {
+			emitLit(prevByte)
+			runLen--
+		}
+	}
+	feedByte := func(b byte) {
+		s1 = (s1 + uint32(b)) % 65521
+		s2 = (s2 + s1) % 65521
+		if int(b) == prevByte {
+			runLen++
+			if runLen == 258 {
+				emitLenDist1(258)
+				runLen = 0
+			}
+		} else {
+			flushRun()
+			emitLit(int(b))
+			prevByte = int(b)
+			runLen = 0
+		}
+	}
+
+	rowBytes := w / 2
+	for y := 0; y < h; y++ {
+		curOff := y * rowBytes
+		if y == 0 {
+			feedByte(0) // Filter 0 (None)
+			for i := 0; i < rowBytes; i++ {
+				feedByte(pix4bpp[curOff+i])
+			}
+		} else {
+			prevOff := (y - 1) * rowBytes
+			feedByte(2) // Filter 2 (Up)
+			for i := 0; i < rowBytes; i++ {
+				feedByte(pix4bpp[curOff+i] - pix4bpp[prevOff+i])
+			}
+		}
+	}
+	flushRun()
+	// EOB (256)
+	emitHuff(0, 7)
+	if bitCnt > 0 {
+		idat.WriteByte(byte(bitBuf & 0xFF))
+	}
+	adler := (s2 << 16) | s1
+	var adlerBytes [4]byte
+	binary.BigEndian.PutUint32(adlerBytes[:], adler)
+	idat.Write(adlerBytes[:])
+
+	pngCrc32 := func(data []byte) uint32 {
+		c := uint32(0xFFFFFFFF)
+		for _, b := range data {
+			c ^= uint32(b)
+			for k := 0; k < 8; k++ {
+				if (c & 1) != 0 {
+					c = (c >> 1) ^ 0xEDB88320
+				} else {
+					c >>= 1
+				}
+			}
+		}
+		return ^c
+	}
+
+	var out bytes.Buffer
+	out.Write([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A})
+	writeChunk := func(typ string, payload []byte) {
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
+		out.Write(lenBuf[:])
+		var body bytes.Buffer
+		body.WriteString(typ)
+		body.Write(payload)
+		out.Write(body.Bytes())
+		var crcBuf [4]byte
+		binary.BigEndian.PutUint32(crcBuf[:], pngCrc32(body.Bytes()))
+		out.Write(crcBuf[:])
+	}
+
+	var ihdr [13]byte
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8] = 4 // bit depth = 4
+	ihdr[9] = 3 // color type = 3 (Indexed-color)
+	writeChunk("IHDR", ihdr[:])
+
+	var plte [16 * 3]byte
+	for i := 0; i < 16; i++ {
+		c := pal565[i]
+		r5 := (c >> 11) & 0x1F
+		g6 := (c >> 5) & 0x3F
+		b5 := c & 0x1F
+		plte[i*3+0] = byte((r5 << 3) | (r5 >> 2))
+		plte[i*3+1] = byte((g6 << 2) | (g6 >> 4))
+		plte[i*3+2] = byte((b5 << 3) | (b5 >> 2))
+	}
+	writeChunk("PLTE", plte[:])
+	writeChunk("IDAT", idat.Bytes())
+	writeChunk("IEND", nil)
+	return out.Bytes()
 }

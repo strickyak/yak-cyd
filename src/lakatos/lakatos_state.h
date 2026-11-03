@@ -159,6 +159,8 @@ bool lakatosPngInfo(const char* vfsPath, int* outWidth, int* outHeight);
 bool lakatosDrawPngFile(const char* vfsPath, int x, int y);
 bool lakatosDrawPngFileCentered(const char* vfsPath, int boxX, int boxY, int boxW, int boxH);
 bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y);
+void lakatosTftDrawPal4(int x, int y, int w, int h, const uint32_t* pal565, const uint8_t* pix4bpp);
+bool lakatosSavePngPal4(const char* vfsPath, int w, int h, const uint32_t* pal565, const uint8_t* pix4bpp);
 
 // ---------------------------------------------------------------------------
 // JPEG Image Decoder & Renderer via ROM tjpgd (implemented in lakatos_jpg.cpp)

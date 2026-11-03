@@ -224,6 +224,8 @@ enum LCodeSyscall : uint8_t {
   SysPrefetchStart  = 0x43,
   SysPrefetchStatus = 0x44,
   SysPrefetchCancel = 0x45,
+  SysTftDrawPal4    = 0x46,
+  SysSavePngPal4    = 0x47,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -911,6 +913,30 @@ struct LCodeVM {
       case SysPrefetchCancel: {
         lakatosPrefetchCancel();
         return true;
+      }
+      case SysTftDrawPal4: {
+        uint32_t pixAddr = 0, palAddr = 0, h = 0, w = 0, y = 0, x = 0;
+        if (!pop(pixAddr) || !pop(palAddr) || !pop(h) || !pop(w) || !pop(y) || !pop(x))
+          return false;
+        if (w == 0 || h == 0 || (w & 1u) != 0) return true;
+        uint32_t totalBytes = (w * h) / 2u;
+        if (!checkAddr(palAddr, 16 * 4) || !checkAddr(pixAddr, totalBytes)) return false;
+        lakatosTftDrawPal4((int)(int32_t)x, (int)(int32_t)y,
+                           (int)(int32_t)w, (int)(int32_t)h,
+                           (const uint32_t*)(mem + palAddr), mem + pixAddr);
+        return true;
+      }
+      case SysSavePngPal4: {
+        uint32_t pixAddr = 0, palAddr = 0, h = 0, w = 0;
+        if (!pop(pixAddr) || !pop(palAddr) || !pop(h) || !pop(w)) return false;
+        char pathBuf[128];
+        if (!popSliceAsCStr(pathBuf, sizeof(pathBuf))) return false;
+        if (w == 0 || h == 0 || (w & 1u) != 0) return push(0);
+        uint32_t totalBytes = (w * h) / 2u;
+        if (!checkAddr(palAddr, 16 * 4) || !checkAddr(pixAddr, totalBytes)) return push(0);
+        bool ok = lakatosSavePngPal4(pathBuf, (int)(int32_t)w, (int)(int32_t)h,
+                                     (const uint32_t*)(mem + palAddr), mem + pixAddr);
+        return push(ok ? 1 : 0);
       }
 
       // Touch, Keyboard, LED & Sensors

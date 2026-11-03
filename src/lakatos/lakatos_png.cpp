@@ -666,3 +666,278 @@ bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y) {
   }
   return decodeAndRenderPng(reader, x, y);
 }
+
+void lakatosTftDrawPal4(int x, int y, int w, int h,
+                        const uint32_t* pal565, const uint8_t* pix4bpp) {
+  if (!pal565 || !pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) return;
+  if (w > LAKATOS_SCREEN_W) w = LAKATOS_SCREEN_W;
+
+  uint16_t pal[16];
+  for (int i = 0; i < 16; i++) {
+    pal[i] = (uint16_t)(pal565[i] & 0xFFFFu);
+  }
+
+  uint16_t line565[LAKATOS_SCREEN_W];
+  int rowBytes = w / 2;
+
+  LakatosTftGuard tftLock;
+  for (int row = 0; row < h; row++) {
+    int sy = y + row;
+    if (sy < 0 || sy >= LAKATOS_SCREEN_H) continue;
+    const uint8_t* src = pix4bpp + row * rowBytes;
+    for (int i = 0; i < rowBytes; i++) {
+      uint8_t b = src[i];
+      line565[i * 2]     = pal[(b >> 4) & 0x0F];
+      line565[i * 2 + 1] = pal[b & 0x0F];
+    }
+    tft.pushImage(x, sy, w, 1, line565);
+  }
+}
+
+namespace {
+
+static uint32_t calcPngCrc32(const uint8_t* data, size_t len) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < len; i++) {
+    c ^= data[i];
+    for (int k = 0; k < 8; k++) {
+      c = (c & 1u) ? ((c >> 1) ^ 0xEDB88320u) : (c >> 1);
+    }
+  }
+  return ~c;
+}
+
+static inline void writeBE32(uint8_t* dst, uint32_t v) {
+  dst[0] = (uint8_t)(v >> 24);
+  dst[1] = (uint8_t)(v >> 16);
+  dst[2] = (uint8_t)(v >> 8);
+  dst[3] = (uint8_t)v;
+}
+
+struct PngPal4Encoder {
+  uint8_t* buf      = nullptr;
+  size_t   cap      = 0;
+  size_t   len      = 0;
+  bool     overflow = false;
+
+  uint32_t bitBuf   = 0;
+  uint32_t bitCnt   = 0;
+  uint32_t s1       = 1;
+  uint32_t s2       = 0;
+  int      prevByte = -1;
+  int      runLen   = 0;
+
+  void putByte(uint8_t b) {
+    if (len < cap) {
+      buf[len++] = b;
+    } else {
+      overflow = true;
+    }
+  }
+
+  void putBytes(const void* src, size_t n) {
+    if (len + n <= cap) {
+      memcpy(buf + len, src, n);
+      len += n;
+    } else {
+      overflow = true;
+    }
+  }
+
+  void emitBits(uint32_t val, uint32_t nbits) {
+    bitBuf |= (val & ((1u << nbits) - 1u)) << bitCnt;
+    bitCnt += nbits;
+    while (bitCnt >= 8) {
+      putByte((uint8_t)(bitBuf & 0xFFu));
+      bitBuf >>= 8;
+      bitCnt -= 8;
+    }
+  }
+
+  void emitHuff(uint32_t code, uint32_t nbits) {
+    uint32_t rev = 0;
+    for (uint32_t i = 0; i < nbits; i++) {
+      rev = (rev << 1) | ((code >> i) & 1u);
+    }
+    emitBits(rev, nbits);
+  }
+
+  void emitLit(int b) {
+    if (b < 144) {
+      emitHuff((uint32_t)(0x30 + b), 8);
+    } else {
+      emitHuff((uint32_t)(0x190 + (b - 144)), 9);
+    }
+  }
+
+  void emitLenDist1(int length) {
+    static const uint16_t kBaseLen[29] = {
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+      35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
+    };
+    static const uint8_t kExtraBits[29] = {
+      0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+      3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
+    };
+    int idx = 28;
+    for (int i = 0; i < 28; i++) {
+      if (length >= kBaseLen[i] && length < kBaseLen[i + 1]) {
+        idx = i;
+        break;
+      }
+    }
+    int sym = 257 + idx;
+    if (sym <= 279) {
+      emitHuff((uint32_t)(sym - 256), 7);
+    } else {
+      emitHuff((uint32_t)(0xC0 + (sym - 280)), 8);
+    }
+    if (kExtraBits[idx] > 0) {
+      emitBits((uint32_t)(length - kBaseLen[idx]), kExtraBits[idx]);
+    }
+    emitBits(0, 5);  // distance = 1 -> distance code 0 (5 zero bits)
+  }
+
+  void flushRun() {
+    while (runLen >= 3) {
+      int take = (runLen > 258) ? 258 : runLen;
+      emitLenDist1(take);
+      runLen -= take;
+    }
+    while (runLen > 0) {
+      emitLit(prevByte);
+      runLen--;
+    }
+  }
+
+  void feedByte(uint8_t b) {
+    s1 = (s1 + b) % 65521u;
+    s2 = (s2 + s1) % 65521u;
+    if ((int)b == prevByte) {
+      runLen++;
+      if (runLen == 258) {
+        emitLenDist1(258);
+        runLen = 0;
+      }
+    } else {
+      flushRun();
+      emitLit((int)b);
+      prevByte = (int)b;
+      runLen = 0;
+    }
+  }
+
+  void writeChunk(const char typ[4], const uint8_t* payload, size_t plen) {
+    uint8_t lenBytes[4];
+    writeBE32(lenBytes, (uint32_t)plen);
+    putBytes(lenBytes, 4);
+    size_t typePos = len;
+    putBytes(typ, 4);
+    if (plen > 0 && payload) {
+      putBytes(payload, plen);
+    }
+    if (!overflow) {
+      uint32_t crc = calcPngCrc32(buf + typePos, 4 + plen);
+      uint8_t crcBytes[4];
+      writeBE32(crcBytes, crc);
+      putBytes(crcBytes, 4);
+    }
+  }
+};
+
+}  // namespace
+
+bool lakatosSavePngPal4(const char* vfsPath, int w, int h,
+                        const uint32_t* pal565, const uint8_t* pix4bpp) {
+  if (!vfsPath || !vfsPath[0] || !pal565 || !pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) {
+    return false;
+  }
+
+  PngPal4Encoder enc;
+  enc.buf = gLakatosAppRamArena;
+  enc.cap = LAKATOS_APP_DRAM_SIZE;
+
+  // 1. PNG Signature
+  enc.putBytes(kPngSig, 8);
+
+  // 2. IHDR Chunk (bitDepth = 4, colorType = 3 Indexed-color)
+  uint8_t ihdr[13];
+  memset(ihdr, 0, sizeof(ihdr));
+  writeBE32(ihdr + 0, (uint32_t)w);
+  writeBE32(ihdr + 4, (uint32_t)h);
+  ihdr[8] = 4;
+  ihdr[9] = 3;
+  enc.writeChunk("IHDR", ihdr, sizeof(ihdr));
+
+  // 3. PLTE Chunk (16 RGB triples converted from RGB565)
+  uint8_t plte[16 * 3];
+  for (int i = 0; i < 16; i++) {
+    uint16_t c = (uint16_t)(pal565[i] & 0xFFFFu);
+    uint8_t r5 = (c >> 11) & 0x1F;
+    uint8_t g6 = (c >> 5) & 0x3F;
+    uint8_t b5 = c & 0x1F;
+    plte[i * 3 + 0] = (uint8_t)((r5 << 3) | (r5 >> 2));
+    plte[i * 3 + 1] = (uint8_t)((g6 << 2) | (g6 >> 4));
+    plte[i * 3 + 2] = (uint8_t)((b5 << 3) | (b5 >> 2));
+  }
+  enc.writeChunk("PLTE", plte, sizeof(plte));
+
+  // 4. IDAT Chunk streamed directly into enc.buf
+  size_t idatLenPos  = enc.len;
+  uint8_t zero4[4]   = {0, 0, 0, 0};
+  enc.putBytes(zero4, 4);
+  size_t idatTypePos = enc.len;
+  enc.putBytes("IDAT", 4);
+  size_t idatDataPos = enc.len;
+
+  // Zlib header (0x78, 0x01) + Fixed-Huffman block header (BFINAL=1, BTYPE=01)
+  enc.putByte(0x78);
+  enc.putByte(0x01);
+  enc.emitBits(1, 1);
+  enc.emitBits(1, 2);
+
+  int rowBytes = w / 2;
+  for (int y = 0; y < h; y++) {
+    const uint8_t* cur = pix4bpp + y * rowBytes;
+    if (y == 0) {
+      enc.feedByte(0);  // Filter 0 (None)
+      for (int i = 0; i < rowBytes; i++) {
+        enc.feedByte(cur[i]);
+      }
+    } else {
+      const uint8_t* prev = pix4bpp + (y - 1) * rowBytes;
+      enc.feedByte(2);  // Filter 2 (Up)
+      for (int i = 0; i < rowBytes; i++) {
+        enc.feedByte((uint8_t)(cur[i] - prev[i]));
+      }
+    }
+  }
+  enc.flushRun();
+  enc.emitHuff(0, 7);  // EOB (256)
+  if (enc.bitCnt > 0) {
+    enc.putByte((uint8_t)(enc.bitBuf & 0xFFu));
+  }
+  uint32_t adler = (enc.s2 << 16) | enc.s1;
+  uint8_t adlerBytes[4];
+  writeBE32(adlerBytes, adler);
+  enc.putBytes(adlerBytes, 4);
+
+  if (enc.overflow) {
+    return false;
+  }
+
+  size_t idatPayloadLen = enc.len - idatDataPos;
+  writeBE32(enc.buf + idatLenPos, (uint32_t)idatPayloadLen);
+  uint32_t idatCrc = calcPngCrc32(enc.buf + idatTypePos, 4 + idatPayloadLen);
+  uint8_t idatCrcBytes[4];
+  writeBE32(idatCrcBytes, idatCrc);
+  enc.putBytes(idatCrcBytes, 4);
+
+  // 5. IEND Chunk
+  enc.writeChunk("IEND", nullptr, 0);
+  if (enc.overflow) {
+    return false;
+  }
+
+  return lakatosFsWrite(vfsPath, enc.buf, enc.len);
+}

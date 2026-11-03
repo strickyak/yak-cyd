@@ -3525,6 +3525,12 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "os_prefetch_cancel", "prefetch_cancel":
 		c.emitOp("SYSCALL", "SYS_PREFETCH_CANCEL")
 		return VoidType, nil
+	case "os_tft_draw_pal4", "tft_draw_pal4":
+		c.emitOp("SYSCALL", "SYS_TFT_DRAW_PAL4")
+		return VoidType, nil
+	case "os_save_png_pal4", "save_png_pal4", "os_save_png_4bpp", "save_png_4bpp":
+		c.emitOp("SYSCALL", "SYS_SAVE_PNG_PAL4")
+		return ScalarInt, nil
 
 	// Touch, Keyboard, LED & Sensors
 	case "os_read_touch", "read_touch", "os_poll_touch", "poll_touch":

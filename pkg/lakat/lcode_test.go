@@ -584,6 +584,7 @@ func TestAllEightNewAppsCompileAndRun(t *testing.T) {
 		{"ising", "../../apps/ising/ising.lgolf", "Ising Spin", true},
 		{"puzzle15", "../../apps/puzzle15/puzzle15.lgolf", "15-Puzzle", true},
 		{"dendrite", "../../apps/dendrite/dendrite.lgolf", "Dendrite DLA", true},
+		{"paint", "../../apps/paint/paint.lgolf", "Paint", false},
 	}
 
 	for _, tc := range apps {
@@ -628,5 +629,72 @@ func TestAllEightNewAppsCompileAndRun(t *testing.T) {
 				t.Fatalf("%s rendered too few pixels below header: %d", tc.name, litPixels)
 			}
 		})
+	}
+}
+
+func TestPaintKebabSavePngPal4(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/paint/paint.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(paint.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("Paint", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	tmpDir := t.TempDir()
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 400000
+
+	// 1. Draw a stroke on the canvas at (100, 80) -> (120, 80)
+	// 2. Tap the Kebab [...] button at (9, 228)
+	// 3. Release touch, then tap [SAVE PNG TO /net/paintings] at (160, 120)
+	// 4. Release touch, then tap [RESUME] at (220, 165)
+	// 5. Release touch, then tap top-left corner exit wedge at (5, 5)
+	vm.TouchQueue = []TouchEvent{
+		{Touched: true, X: 100, Y: 80},
+		{Touched: true, X: 110, Y: 80},
+		{Touched: true, X: 120, Y: 80},
+		{Touched: false},
+		{Touched: true, X: 9, Y: 228},
+		{Touched: false},
+		{Touched: true, X: 160, Y: 120},
+		{Touched: false},
+		{Touched: true, X: 220, Y: 165},
+		{Touched: false},
+		{Touched: true, X: 5, Y: 5},
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("paint did not exit cleanly")
+	}
+
+	// Verify /net/paintings/painting.png was created and is a valid 300x240 PNG
+	savedFile := filepath.Join(tmpDir, "net", "paintings", "painting.png")
+	pngData, err := os.ReadFile(savedFile)
+	if err != nil {
+		t.Fatalf("expected saved PNG at %s: %v", savedFile, err)
+	}
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		t.Fatalf("png.Decode(%s, %d bytes) failed: %v", savedFile, len(pngData), err)
+	}
+	if img.Bounds().Dx() != 300 || img.Bounds().Dy() != 240 {
+		t.Fatalf("expected 300x240 PNG, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+	// Verify stroke at canvas (80, 80) (screen x=100 -> canvas x=80, y=80) is Cyan (R=0, G=255, B=255)
+	r, g, b, _ := img.At(80, 80).RGBA()
+	if r != 0 || g == 0 || b == 0 {
+		t.Fatalf("expected Cyan pixel at canvas (80,80), got RGBA=(%d,%d,%d)", r>>8, g>>8, b>>8)
+	}
+	// Verify canvas pixel on VM screen at (100, 80) was restored after closing modal
+	if vm.Screen[80][100] != 0x07FF {
+		t.Fatalf("expected restored screen pixel (100,80)=0x07FF after modal resume, got 0x%04X", vm.Screen[80][100])
 	}
 }

@@ -545,6 +545,7 @@ func cmdPush(args []string) {
 	if !*quiet {
 		fmt.Printf("Pushed %s (%d bytes) -> %s\n", srcPath, len(data), targetPath)
 	}
+	os.Exit(0)
 }
 
 func cmdTether(args []string) {
