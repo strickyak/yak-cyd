@@ -245,18 +245,32 @@ static inline bool isTopLeftExitCorner(int x, int y) {
   return x >= 0 && x < 10 && y >= 0 && y < 10;
 }
 
+static LakatosTouchSample gCore0LiveTouch = {false, 0, 0, 0, 0, 0};
+static volatile uint32_t  gCore0LiveTouchMs = 0;
+
 LakatosTouchSample lakatosReadTouch() {
   if (digitalRead(XPT2046_IRQ) == HIGH) {
     return {false, 0, 0, 0, 0, 0};
+  }
+  // When an app is running, if Core 0's 5ms scanner just sampled the touch
+  // within the last 18ms, return that sample without Core 1 stalling on SPI.
+  if (gLCodeAppRunning || lakatosIsNativeAppRunning()) {
+    uint32_t now = millis();
+    if (gCore0LiveTouch.touched && (uint32_t)(now - gCore0LiveTouchMs) <= 18u) {
+      return gCore0LiveTouch;
+    }
   }
   bool triggeredCornerExit = false;
   if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
   LakatosTouchSample out = readTouchHardwareUnlocked();
   if (out.touched) {
+    uint32_t tNow = millis();
     gTouchPenDown = true;
     gTouchPressConsumed = true;
     gHasLatchedTouch = false;
-    gLastTouchDownMs = millis();
+    gLastTouchDownMs = tNow;
+    gCore0LiveTouch = out;
+    gCore0LiveTouchMs = tNow;
     if (lakatosIsCornerExitActive() && isTopLeftExitCorner(out.x, out.y)) {
       gPleaseExitApp = true;
       gTouchClickConsumed = true;
@@ -348,6 +362,8 @@ void lakatosPollTouchLatch() {
   if (s.touched) {
     uint32_t tNow = millis();
     gLastTouchDownMs = tNow;
+    gCore0LiveTouch = s;
+    gCore0LiveTouchMs = tNow;
     if (lakatosIsCornerExitActive() && isTopLeftExitCorner(s.x, s.y)) {
       if (!gPleaseExitApp) {
         triggeredCornerExit = true;

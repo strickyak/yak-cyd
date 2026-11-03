@@ -78,6 +78,9 @@ static void api_exit(int code) {
 }
 
 static void api_yield(void) {
+  if (gAppRunning && lakatosShouldExitApp()) {
+    api_exit(0);
+  }
   updateLakatosConfigBackground();
   lakatosUpdateRgbLed();
   yield();
@@ -94,6 +97,9 @@ static uint32_t api_micros(void) {
 static void api_delay_ms(uint32_t ms) {
   uint32_t start = millis();
   while ((uint32_t)(millis() - start) < ms) {
+    if (gAppRunning && lakatosShouldExitApp()) {
+      api_exit(0);
+    }
     updateLakatosConfigBackground();
     lakatosUpdateRgbLed();
     uint32_t rem = ms - (uint32_t)(millis() - start);
@@ -214,6 +220,14 @@ static void api_tft_push_rgb565(int x, int y, int w, int h, const uint16_t* pixe
   tft.pushImage(x, y, w, h, (uint16_t*)pixels);
 }
 
+static LakatosTouchSample api_read_touch(void) {
+  LakatosTouchSample ts = lakatosReadTouch();
+  if (gAppRunning && lakatosShouldExitApp()) {
+    api_exit(0);
+  }
+  return ts;
+}
+
 static int api_prompt_keyboard(const char* title, char* buf, size_t max_len, bool allow_ctrl_c) {
   return lakatosPromptKeyboard(title, buf, max_len, allow_ctrl_c, false);
 }
@@ -271,7 +285,7 @@ static const LakatosApi gLakatosApi = {
     .tft_set_text_datum   = api_tft_set_text_datum,
     .tft_draw_string      = api_tft_draw_string,
     .tft_push_rgb565      = api_tft_push_rgb565,
-    .read_touch           = lakatosReadTouch,
+    .read_touch           = api_read_touch,
     .prompt_keyboard      = api_prompt_keyboard,
     .set_rgb_led          = api_set_rgb_led,
     .read_ldr             = lakatosReadLdrRaw,
@@ -588,6 +602,17 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
 
   // 6. Jump to app entry point and catch os->exit(code) via setjmp/longjmp
   cleanupAppHeap();
+  lakatosWaitTouchRelease();
+  {
+    LakatosTftGuard tftGuard;
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  }
+  // Pre-configure GPIO 26 (CYD speaker pin) as a digital push-pull output (LOW)
+  pinMode(26, OUTPUT);
+  digitalWrite(26, LOW);
+
+  lakatosBeginAppSession();
   gAppLastExitCode = 0;
   gAppRunning = true;
 
@@ -602,6 +627,8 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   }
 
   gAppRunning = false;
+  pinMode(26, OUTPUT);
+  digitalWrite(26, LOW);
   lakatosPrefetchFree();
   cleanupAppHeap();
   lakatosEndAppSession();

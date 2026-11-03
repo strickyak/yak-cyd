@@ -51,6 +51,7 @@ apps: lakat
 	$(LAKAT) compile -title "15-Puzzle" -o build/apps/puzzle15.lapp apps/puzzle15/puzzle15.lgolf
 	$(LAKAT) compile -title "Dendrite DLA" -o build/apps/dendrite.lapp apps/dendrite/dendrite.lgolf
 	$(LAKAT) compile -title "Paint" -o build/apps/paint.lapp apps/paint/paint.lgolf
+	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps
 	$(PIO) run -e lakatos -t upload
