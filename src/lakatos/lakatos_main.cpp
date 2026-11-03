@@ -1374,24 +1374,21 @@ static void handleFuseCommand(const String& line) {
       Serial.printf("@@FUSE %s ERR ENOENT\r\n", seq.c_str());
     }
   } else if (op == "LS") {
-    LakatosFsEntry* entries = (LakatosFsEntry*)malloc(sizeof(LakatosFsEntry) * 64);
-    if (!entries) {
-      Serial.printf("@@FUSE %s ERR ENOMEM\r\n", seq.c_str());
-      return;
-    }
-    int n = lakatosFsLs(args.c_str(), entries, 64);
+    const char* seqStr = seq.c_str();
+    int n = lakatosFsLsEach(
+        args.c_str(),
+        [](const LakatosFsEntry& e, void* ud) {
+          const char* sq = (const char*)ud;
+          Serial.printf("@@FUSE_ENT %s %d %lld %lld %s\r\n",
+                        sq, e.isDir ? 1 : 0,
+                        (long long)e.size, (long long)e.mtime,
+                        e.name);
+        },
+        (void*)seqStr);
     if (n < 0) {
-      free(entries);
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
       return;
     }
-    for (int i = 0; i < n; i++) {
-      Serial.printf("@@FUSE_ENT %s %d %lld %lld %s\r\n",
-                    seq.c_str(), entries[i].isDir ? 1 : 0,
-                    (long long)entries[i].size, (long long)entries[i].mtime,
-                    entries[i].name);
-    }
-    free(entries);
     Serial.printf("@@FUSE %s OK %d\r\n", seq.c_str(), n);
   } else if (op == "READ") {
     // args: <path> <offset> <length>
@@ -1517,7 +1514,7 @@ static void handleFuseCommand(const String& line) {
     if (ok) {
       Serial.printf("@@FUSE %s OK %u\r\n", seq.c_str(), (unsigned)decLen);
     } else {
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
     }
   } else if (op == "COMMIT") {
     bool ok = true;
@@ -1538,7 +1535,7 @@ static void handleFuseCommand(const String& line) {
     if (ok) {
       Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
     } else {
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
     }
   } else if (op == "RM") {
     bool ok = lakatosFsRm(args.c_str());
@@ -1546,7 +1543,7 @@ static void handleFuseCommand(const String& line) {
       gShellNeedsRefresh = true;
       Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
     } else {
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
     }
   } else if (op == "MKDIR") {
     bool ok = lakatosFsMkdir(args.c_str(), true);
@@ -1554,7 +1551,7 @@ static void handleFuseCommand(const String& line) {
       gShellNeedsRefresh = true;
       Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
     } else {
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
     }
   } else if (op == "RMDIR") {
     bool ok = lakatosFsRmdir(args.c_str());
@@ -1562,7 +1559,7 @@ static void handleFuseCommand(const String& line) {
       gShellNeedsRefresh = true;
       Serial.printf("@@FUSE %s OK\r\n", seq.c_str());
     } else {
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
     }
   } else {
     Serial.printf("@@FUSE %s ERR ENOSYS\r\n", seq.c_str());

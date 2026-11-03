@@ -112,7 +112,10 @@ void runLakatosAboutScreen();
 void initLakatosVfs();
 bool lakatosSdIsMounted();
 
+typedef void (*LakatosFsEntryCallback)(const LakatosFsEntry& entry, void* userData);
+
 int     lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries);
+int     lakatosFsLsEach(const char* path, LakatosFsEntryCallback cb, void* userData);
 bool    lakatosFsStat(const char* path, LakatosFsEntry* outEntry);
 int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len);
 bool    lakatosFsWrite(const char* path, const void* buf, size_t len);
@@ -120,6 +123,7 @@ bool    lakatosFsWriteAt(const char* path, uint32_t offset, const void* buf, siz
 bool    lakatosFsMkdir(const char* path, bool parents);
 bool    lakatosFsRmdir(const char* path);
 bool    lakatosFsRm(const char* path);
+const char* lakatosFsLastError();
 int64_t lakatosFsDu(const char* path);
 int     lakatosHttpGet(const char* url, void* buf, size_t maxLen);
 int     lakatosHttpGetCached(const char* url, void* buf, size_t maxLen, uint32_t maxAgeSec);

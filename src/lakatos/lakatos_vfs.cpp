@@ -19,6 +19,27 @@ static uint32_t gLastSdRetryMs = 0;
 static WiFiClient gShClient;
 static HTTPClient gShHttp;
 static bool       gShStreamBusy = false;
+static const char* gLastVfsErr = "EIO";
+
+const char* lakatosFsLastError() {
+  return gLastVfsErr ? gLastVfsErr : "EIO";
+}
+
+static void setShHttpError(const char* op, const String& subPath, int code) {
+  if (code == 403 || code == 401 || code == 418) {
+    gLastVfsErr = "EACCES";
+  } else if (code == 404) {
+    gLastVfsErr = "ENOENT";
+  } else if (code == 409) {
+    gLastVfsErr = "EEXIST";
+  } else if (code == 400) {
+    gLastVfsErr = "EINVAL";
+  } else {
+    gLastVfsErr = "EIO";
+  }
+  Serial.printf("[Lakatos VFS] /net %s %s failed: HTTP %d (%s)\r\n",
+                op, subPath.c_str(), code, gLastVfsErr);
+}
 
 enum VfsBackend {
   VFS_NONE = 0,
@@ -251,7 +272,9 @@ static bool readShStreamLine(WiFiClient* stream, HTTPClient& http,
 //   Final line: ";"
 static int parseShLsStream(WiFiClient* stream, HTTPClient& http,
                            LakatosFsEntry* outEntries, int maxEntries,
-                           int* outTotalCount = nullptr) {
+                           int* outTotalCount = nullptr,
+                           LakatosFsEntryCallback cb = nullptr,
+                           void* cbUser = nullptr) {
   if (outTotalCount) *outTotalCount = 0;
   char lineBuf[160];
   if (!readShStreamLine(stream, http, lineBuf, sizeof(lineBuf))) {
@@ -294,13 +317,16 @@ static int parseShLsStream(WiFiClient* stream, HTTPClient& http,
     }
     if (outEntries && storedCount < maxEntries) {
       outEntries[storedCount++] = tmp;
+    } else if (!outEntries && cb) {
+      cb(tmp, cbUser);
+      storedCount++;
     }
     seenCount++;
   }
 
   if (!sawTerminator || seenCount != expectedCount) {
     Serial.printf("[Lakatos VFS] LS stream: framing mismatch (sawTerm=%d, seen=%d, expected=%d)\r\n",
-                  sawTerminator ? 1 : 0, seenCount, expectedCount);
+                   sawTerminator ? 1 : 0, seenCount, expectedCount);
     return -1;
   }
   if (outTotalCount) *outTotalCount = expectedCount;
@@ -311,7 +337,9 @@ static int parseShLsStream(WiFiClient* stream, HTTPClient& http,
 // Unified VFS Implementation
 // ---------------------------------------------------------------------------
 static int lsFsImpl(fs::FS& fs, const String& subPath,
-                    LakatosFsEntry* outEntries, int maxEntries) {
+                    LakatosFsEntry* outEntries, int maxEntries,
+                    LakatosFsEntryCallback cb = nullptr,
+                    void* cbUser = nullptr) {
   File dir = fs.open(subPath.c_str());
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -319,8 +347,8 @@ static int lsFsImpl(fs::FS& fs, const String& subPath,
   }
   int count = 0;
   File f = dir.openNextFile();
-  while (f && count < maxEntries) {
-    LakatosFsEntry& e = outEntries[count];
+  while (f && (!outEntries || count < maxEntries)) {
+    LakatosFsEntry e;
     memset(&e, 0, sizeof(e));
     const char* nm = f.name();
     const char* slash = strrchr(nm, '/');
@@ -329,23 +357,32 @@ static int lsFsImpl(fs::FS& fs, const String& subPath,
     e.size = f.size();
     e.mtime = f.getLastWrite();
     e.isDir = f.isDirectory();
-    if (e.name[0] != '\0') count++;
+    if (e.name[0] != '\0') {
+      if (outEntries) {
+        outEntries[count] = e;
+      } else if (cb) {
+        cb(e, cbUser);
+      }
+      count++;
+    }
     f.close();
     f = dir.openNextFile();
   }
+  if (f) f.close();
   dir.close();
   return count;
 }
 
-int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
-  if (!outEntries || maxEntries <= 0) return -1;
+static int lakatosFsLsCommon(const char* path, LakatosFsEntry* outEntries, int maxEntries,
+                             LakatosFsEntryCallback cb, void* cbUser) {
+  gLastVfsErr = "EIO";
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   int count = -1;
   if (b == VFS_LO) {
-    if (gLoMounted) count = lsFsImpl(LittleFS, subPath, outEntries, maxEntries);
+    if (gLoMounted) count = lsFsImpl(LittleFS, subPath, outEntries, maxEntries, cb, cbUser);
   } else if (b == VFS_SD) {
-    if (ensureSdMounted()) count = lsFsImpl(SD, subPath, outEntries, maxEntries);
+    if (ensureSdMounted()) count = lsFsImpl(SD, subPath, outEntries, maxEntries, cb, cbUser);
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
     WiFiClient cli;
@@ -359,10 +396,11 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
     addShBasicAuthHeader(http);
     int code = http.sendRequest("LS");
     if (code < 200 || code >= 300) {
+      setShHttpError("LS", subPath, code);
       http.end();
       return -1;
     }
-    count = parseShLsStream(http.getStreamPtr(), http, outEntries, maxEntries);
+    count = parseShLsStream(http.getStreamPtr(), http, outEntries, maxEntries, nullptr, cb, cbUser);
     http.end();
 
     if (count < 0) {
@@ -371,6 +409,16 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
   }
   lakatosDevLogf("VFS ls %s -> %d entries", path ? path : "", count);
   return count;
+}
+
+int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
+  if (!outEntries || maxEntries <= 0) return -1;
+  return lakatosFsLsCommon(path, outEntries, maxEntries, nullptr, nullptr);
+}
+
+int lakatosFsLsEach(const char* path, LakatosFsEntryCallback cb, void* userData) {
+  if (!cb) return -1;
+  return lakatosFsLsCommon(path, nullptr, 0, cb, userData);
 }
 
 bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
@@ -500,6 +548,7 @@ int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) 
 }
 
 bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
+  gLastVfsErr = "EIO";
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   bool ok = false;
@@ -524,6 +573,9 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
     httpCode = http.sendRequest("PUT", (uint8_t*)buf, len);
     http.end();
     ok = (httpCode >= 200 && httpCode < 300);
+    if (!ok) {
+      setShHttpError("PUT", subPath, httpCode);
+    }
   }
   if (b == VFS_SH) {
     lakatosDevLogf("VFS write %s (%u B) -> %s (HTTP %d)",
@@ -536,6 +588,7 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
 }
 
 bool lakatosFsWriteAt(const char* path, uint32_t offset, const void* buf, size_t len) {
+  gLastVfsErr = "EIO";
   if (!buf || len == 0) return false;
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
@@ -560,6 +613,7 @@ bool lakatosFsWriteAt(const char* path, uint32_t offset, const void* buf, size_t
 }
 
 bool lakatosFsMkdir(const char* path, bool parents) {
+  gLastVfsErr = "EIO";
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   if (b == VFS_LO) {
@@ -570,17 +624,21 @@ bool lakatosFsMkdir(const char* path, bool parents) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
     HTTPClient http;
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath, parents ? "p=1" : nullptr);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);
     int code = http.sendRequest("MKDIR");
     http.end();
-    return (code >= 200 && code < 300);
+    if (code >= 200 && code < 300) return true;
+    setShHttpError("MKDIR", subPath, code);
+    return false;
   }
   return false;
 }
 
 bool lakatosFsRmdir(const char* path) {
+  gLastVfsErr = "EIO";
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   if (b == VFS_LO) {
@@ -597,12 +655,15 @@ bool lakatosFsRmdir(const char* path) {
     addShBasicAuthHeader(http);
     int code = http.sendRequest("RMDIR");
     http.end();
-    return (code >= 200 && code < 300);
+    if (code >= 200 && code < 300) return true;
+    setShHttpError("RMDIR", subPath, code);
+    return false;
   }
   return false;
 }
 
 bool lakatosFsRm(const char* path) {
+  gLastVfsErr = "EIO";
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
   if (b == VFS_LO) {
@@ -619,7 +680,9 @@ bool lakatosFsRm(const char* path) {
     addShBasicAuthHeader(http);
     int code = http.sendRequest("RM");
     http.end();
-    return (code >= 200 && code < 300);
+    if (code >= 200 && code < 300) return true;
+    setShHttpError("RM", subPath, code);
+    return false;
   }
   return false;
 }

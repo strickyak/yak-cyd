@@ -75,10 +75,22 @@ func startTetherFuse(mountPoint string, bridge *TetherBridge) (func(), error) {
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
-			_ = fuse.Unmount(mountPoint)
-			_ = exec.Command("fusermount3", "-u", "-z", mountPoint).Run()
-			_ = exec.Command("fusermount", "-u", "-z", mountPoint).Run()
-			_ = conn.Close()
+			// Note: Do NOT call conn.Close() here; bazil.org/fuse holds Conn.rio.RLock()
+			// inside blocking syscall.Read(/dev/fuse) in ReadRequest(), so Conn.Close()
+			// deadlocks on Conn.rio.Lock() whenever another process (e.g. a shell cwd)
+			// keeps the mount busy and forces a lazy (-z) unmount. Letting os.Exit close
+			// the /dev/fuse descriptor in the kernel avoids the mutex deadlock.
+			done := make(chan struct{})
+			go func() {
+				_ = fuse.Unmount(mountPoint)
+				_ = exec.Command("fusermount3", "-u", "-z", mountPoint).Run()
+				_ = exec.Command("fusermount", "-u", "-z", mountPoint).Run()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(800 * time.Millisecond):
+			}
 		})
 	}
 	return cleanup, nil
@@ -333,6 +345,29 @@ func (n *lakatosNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	return out, nil
 }
 
+func fuseErrno(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.HasSuffix(msg, "EACCES"), strings.HasSuffix(msg, "EPERM"):
+		return syscall.EACCES
+	case strings.HasSuffix(msg, "ENOENT"):
+		return syscall.ENOENT
+	case strings.HasSuffix(msg, "EEXIST"):
+		return syscall.EEXIST
+	case strings.HasSuffix(msg, "EINVAL"):
+		return syscall.EINVAL
+	case strings.HasSuffix(msg, "EFBIG"):
+		return syscall.EFBIG
+	case strings.HasSuffix(msg, "ENOMEM"):
+		return syscall.ENOMEM
+	default:
+		return syscall.EIO
+	}
+}
+
 func (n *lakatosNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	if n.isDir {
 		return n, nil
@@ -341,7 +376,7 @@ func (n *lakatosNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fus
 	dirty := false
 	if writable && (req.Flags&fuse.OpenTruncate != 0) {
 		if err := n.fs.bridge.FuseWriteChunk(n.vfsPath, "W", 0, nil); err != nil {
-			return nil, syscall.EIO
+			return nil, fuseErrno(err)
 		}
 		n.fs.putEntryCache(n.vfsPath, FuseRemoteEntry{
 			Name:  path.Base(n.vfsPath),
@@ -364,7 +399,7 @@ func (n *lakatosNode) Create(ctx context.Context, req *fuse.CreateRequest, resp 
 	}
 	childPath := path.Join(n.vfsPath, req.Name)
 	if err := n.fs.bridge.FuseWriteChunk(childPath, "W", 0, nil); err != nil {
-		return nil, nil, syscall.EIO
+		return nil, nil, fuseErrno(err)
 	}
 	ent := FuseRemoteEntry{
 		Name:  req.Name,
@@ -387,7 +422,7 @@ func (n *lakatosNode) Create(ctx context.Context, req *fuse.CreateRequest, resp 
 func (n *lakatosNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	if req.Valid.Size() && req.Size == 0 && !n.isDir {
 		if err := n.fs.bridge.FuseWriteChunk(n.vfsPath, "W", 0, nil); err != nil {
-			return syscall.EIO
+			return fuseErrno(err)
 		}
 		n.fs.putEntryCache(n.vfsPath, FuseRemoteEntry{
 			Name:  path.Base(n.vfsPath),
@@ -409,7 +444,7 @@ func (n *lakatosNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error
 		err = n.fs.bridge.FuseRm(childPath)
 	}
 	if err != nil {
-		return syscall.EIO
+		return fuseErrno(err)
 	}
 	n.fs.deleteEntryCache(childPath)
 	n.fs.invalidateDir(n.vfsPath)
@@ -419,7 +454,7 @@ func (n *lakatosNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error
 func (n *lakatosNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	childPath := path.Join(n.vfsPath, req.Name)
 	if err := n.fs.bridge.FuseMkdir(childPath); err != nil {
-		return nil, syscall.EIO
+		return nil, fuseErrno(err)
 	}
 	ent := FuseRemoteEntry{
 		Name:  req.Name,
@@ -460,7 +495,7 @@ func (fh *lakatosFileHandle) Read(ctx context.Context, req *fuse.ReadRequest, re
 		}
 		data, err := fh.node.fs.bridge.FuseReadChunk(fh.node.vfsPath, offset, uint32(chunk))
 		if err != nil {
-			return syscall.EIO
+			return fuseErrno(err)
 		}
 		if len(data) == 0 {
 			break
@@ -495,7 +530,7 @@ func (fh *lakatosFileHandle) Write(ctx context.Context, req *fuse.WriteRequest, 
 			mode = "W"
 		}
 		if err := fh.node.fs.bridge.FuseWriteChunk(fh.node.vfsPath, mode, offset, data[written:written+chunk]); err != nil {
-			return syscall.EIO
+			return fuseErrno(err)
 		}
 		fh.wroteAny = true
 		fh.dirty = true
@@ -524,7 +559,10 @@ func (fh *lakatosFileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) 
 		return nil
 	}
 	if err := fh.node.fs.bridge.FuseCommit(fh.node.vfsPath); err != nil {
-		return syscall.EIO
+		fh.dirty = false
+		fh.node.fs.deleteEntryCache(fh.node.vfsPath)
+		fh.node.fs.invalidateDir(path.Dir(fh.node.vfsPath))
+		return fuseErrno(err)
 	}
 	fh.dirty = false
 	fh.node.fs.invalidateDir(path.Dir(fh.node.vfsPath))

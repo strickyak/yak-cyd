@@ -190,7 +190,7 @@ func (b *TetherBridge) FuseStat(vfsPath string) (FuseRemoteEntry, error) {
 }
 
 func (b *TetherBridge) FuseLs(vfsPath string) ([]FuseRemoteEntry, error) {
-	rep, err := b.callFuse("LS "+vfsPath, 8*time.Second)
+	rep, err := b.callFuse("LS "+vfsPath, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -589,13 +589,24 @@ func cmdTether(args []string) {
 	}
 
 	bridge := NewTetherBridge()
+	var cleanupMu sync.Mutex
 	cleanupFuse := func() {}
+	runCleanup := func() {
+		// Note: Do NOT call activePort.Close() here before os.Exit(0); the serial
+		// *os.File is in blocking mode (SetNonblock(false)), so Go's internal/poll
+		// fdMutex makes Close() block until ReadPortLoop's blocking Read() returns.
+		bridge.SetPort(nil)
+		cleanupMu.Lock()
+		cf := cleanupFuse
+		cleanupMu.Unlock()
+		cf()
+	}
 
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		cleanupFuse()
+		runCleanup()
 		fmt.Fprintln(os.Stderr, "\n[tether exiting]")
 		os.Exit(0)
 	}()
@@ -611,7 +622,9 @@ func cmdTether(args []string) {
 				fmt.Fprintf(os.Stderr, "[tether FUSE warning: %v]\n", err)
 				return
 			}
+			cleanupMu.Lock()
 			cleanupFuse = cf
+			cleanupMu.Unlock()
 			fmt.Fprintf(os.Stderr, "[tether FUSE mounted at %s/{flash,sd,net}]\n", *mount)
 		})
 	}
@@ -639,6 +652,11 @@ func cmdTether(args []string) {
 				}
 			}
 			for _, initCmd := range initCmds {
+				if strings.EqualFold(strings.TrimSpace(initCmd), "bye") {
+					runCleanup()
+					fmt.Fprintln(os.Stderr, "[tether exiting]")
+					os.Exit(0)
+				}
 				_ = bridge.WriteLine(initCmd)
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -649,7 +667,7 @@ func cmdTether(args []string) {
 		if len(fs.Args()) > 0 && *drain > 0 {
 			if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
 				time.Sleep(*drain)
-				cleanupFuse()
+				runCleanup()
 				os.Exit(0)
 			}
 		}
@@ -658,6 +676,16 @@ func cmdTether(args []string) {
 		for {
 			line, err := reader.ReadString('\n')
 			if len(line) > 0 {
+				trimmed := strings.TrimSpace(line)
+				if strings.EqualFold(trimmed, "bye") {
+					runCleanup()
+					fmt.Fprintln(os.Stderr, "[tether exiting]")
+					os.Exit(0)
+				}
+				if strings.EqualFold(trimmed, "exit") || strings.EqualFold(trimmed, "quit") {
+					fmt.Fprintln(os.Stderr, "[tether: type 'bye' (or press ^C) to shut down lakat tether]")
+					continue
+				}
 				if werr := bridge.WriteLine(line); werr != nil {
 					fmt.Fprintf(os.Stderr, "[tether write error: %v]\n", werr)
 				}
@@ -665,7 +693,7 @@ func cmdTether(args []string) {
 			if err != nil {
 				if *drain > 0 {
 					time.Sleep(*drain)
-					cleanupFuse()
+					runCleanup()
 					os.Exit(0)
 				}
 				return
@@ -694,7 +722,7 @@ func cmdTether(args []string) {
 		_ = port.Close()
 
 		if !*reconnect {
-			cleanupFuse()
+			runCleanup()
 			fmt.Fprintln(os.Stderr, "\n[tether disconnected]")
 			return
 		}
