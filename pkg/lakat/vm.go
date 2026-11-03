@@ -1433,10 +1433,12 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		if mx <= 1 {
+		if mx == 0 {
+			vm.push(rand.Uint32())
+		} else if mx == 1 {
 			vm.push(0)
 		} else {
-			vm.push(uint32(rand.Intn(int(mx))))
+			vm.push(rand.Uint32() % mx)
 		}
 	case SysSetCornerExit:
 		en, err := vm.pop()

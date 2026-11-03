@@ -1,5 +1,7 @@
 #include "lakatos_state.h"
 #include <WiFi.h>
+#include <bootloader_random.h>
+#include <esp_random.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
@@ -128,7 +130,7 @@ static float  gAirportLon      = -122.3790f;
 static bool   gNtpStarted      = false;
 
 static char   gDeviceName[32]  = "test";
-static char   gSerialNo[32]    = "ing";
+static char   gSerialNo[32]    = "";
 static char   gShUrl[96]       = "http://pizga.net:1908/";
 static char   gShPass[64]      = "";  // Never stored in source code; loaded from NVS
 static bool   gTouchSpotEnabled = false;
@@ -201,18 +203,26 @@ void initLakatosConfig() {
   gManualBrightPct = constrain((int)prefs.getInt("manB", 85), 5, 100);
   String savedIata = prefs.getString("iata", "SFO");
   String savedDev  = prefs.getString("devName", "test");
-  String savedSer  = prefs.getString("serialNo", "ing");
+  String savedSer  = prefs.getString("serialNo", "");
   String savedUrl  = prefs.getString("shUrl", "http://pizga.net:1908/");
   String savedPass = prefs.getString("shPass", "");
   prefs.end();
   gTouchSpotEnabled = false;
 
   strncpy(gDeviceName, savedDev.c_str(), sizeof(gDeviceName) - 1);
-  strncpy(gSerialNo, savedSer.c_str(), sizeof(gSerialNo) - 1);
   strncpy(gShUrl, savedUrl.c_str(), sizeof(gShUrl) - 1);
   strncpy(gShPass, savedPass.c_str(), sizeof(gShPass) - 1);
-
   applyAirportCode(savedIata.c_str());
+
+  if (savedSer.length() == 0 || savedSer == "ing") {
+    bootloader_random_enable();
+    uint32_t rnd = (esp_random() % 99999999u) + 1u;
+    bootloader_random_disable();
+    snprintf(gSerialNo, sizeof(gSerialNo), "%08u", (unsigned)rnd);
+    saveConfigToNvs();
+  } else {
+    strncpy(gSerialNo, savedSer.c_str(), sizeof(gSerialNo) - 1);
+  }
 
   int raw = analogRead(LDR_PIN);
   gSmoothedLdr = (float)raw;
@@ -231,7 +241,11 @@ void initLakatosConfig() {
   if (ssid.length() > 0) {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    if (pass.length() > 0) {
+      WiFi.begin(ssid.c_str(), pass.c_str());
+    } else {
+      WiFi.begin(ssid.c_str());
+    }
     Serial.printf("[Lakatos] Auto-connecting Wi-Fi to '%s'...\n", ssid.c_str());
   }
 }
@@ -272,13 +286,65 @@ const char* lakatosGetSerialNumber() { return gSerialNo; }
 const char* lakatosGetSuperhighwayUrl() { return gShUrl; }
 const char* lakatosGetSuperhighwayPassword() { return gShPass; }
 
+static bool gCanBeDeveloper = false;
+static bool gConfigNeedsRedraw = false;
+
+bool lakatosConsumeConfigRedraw() {
+  if (!gConfigNeedsRedraw) return false;
+  gConfigNeedsRedraw = false;
+  return true;
+}
+
+void lakatosSetDeviceName(const char* name) {
+  strncpy(gDeviceName, name ? name : "", sizeof(gDeviceName) - 1);
+  gDeviceName[sizeof(gDeviceName) - 1] = '\0';
+  saveConfigToNvs();
+  gConfigNeedsRedraw = true;
+}
+
+void lakatosSetSerialNumber(const char* sn) {
+  strncpy(gSerialNo, sn ? sn : "", sizeof(gSerialNo) - 1);
+  gSerialNo[sizeof(gSerialNo) - 1] = '\0';
+  saveConfigToNvs();
+  gConfigNeedsRedraw = true;
+}
+
+void lakatosSetSuperhighwayUrl(const char* url) {
+  strncpy(gShUrl, url ? url : "", sizeof(gShUrl) - 1);
+  gShUrl[sizeof(gShUrl) - 1] = '\0';
+  saveConfigToNvs();
+  gConfigNeedsRedraw = true;
+}
+
 void lakatosSetSuperhighwayPassword(const char* pass) {
   strncpy(gShPass, pass ? pass : "", sizeof(gShPass) - 1);
   gShPass[sizeof(gShPass) - 1] = '\0';
   saveConfigToNvs();
+  gConfigNeedsRedraw = true;
 }
 
-static bool gCanBeDeveloper = false;
+void lakatosSetAirportCode(const char* code) {
+  applyAirportCode(code);
+  saveConfigToNvs();
+  gConfigNeedsRedraw = true;
+}
+
+void lakatosSetWifiCredentials(const char* ssid, const char* pass) {
+  prefs.begin("cyd_wifi", false);
+  prefs.putString("ssid", ssid ? ssid : "");
+  prefs.putString("pass", pass ? pass : "");
+  prefs.end();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false, false);
+  delay(80);
+  WiFi.setSleep(false);
+  if (pass && pass[0]) {
+    WiFi.begin(ssid, pass);
+  } else {
+    WiFi.begin(ssid);
+  }
+  gConfigNeedsRedraw = true;
+}
 
 bool lakatosGetDeveloperMode() {
   return gTouchSpotEnabled;
@@ -287,6 +353,7 @@ bool lakatosGetDeveloperMode() {
 void lakatosSetDeveloperMode(bool en) {
   if (en) gCanBeDeveloper = true;
   gTouchSpotEnabled = en;
+  gConfigNeedsRedraw = true;
 }
 
 bool lakatosGetTouchSpotEnabled() {
@@ -536,8 +603,13 @@ static void runTouchCalibrationModal() {
       drawCrosshair(tx[step], ty[step], cols[step], labels[step]);
     }
 
-    while (lakatosReadTouch().touched) delay(20);
+    while (lakatosReadTouch().touched) {
+      updateLakatosConfigBackground();
+      delay(20);
+    }
     while (true) {
+      updateLakatosConfigBackground();
+      if (lakatosShouldExitApp()) return;
       LakatosTouchSample t = lakatosReadTouch();
       if (t.touched) {
         rawX[step] = t.rawX;
@@ -892,7 +964,7 @@ static bool runAboutModal() {
     tft.drawString("Lakatos Operating System", 160, 38, 2);
 
     tft.setTextColor(TFT_YELLOW, 0x1082);
-    tft.drawString("YAK-CYD  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
+    tft.drawString("YAKimono  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
 
     tft.drawFastHLine(16, 72, 288, 0x39E7);
 
@@ -980,13 +1052,23 @@ static void drawConfigScreen() {
   tft.fillRoundRect(trackX, 41, fillW, 12, 4, gAutoBright ? TFT_CYAN : TFT_ORANGE);
   tft.drawRoundRect(trackX, 41, trackW, 12, 4, TFT_WHITE);
 
-  // [AUTO] button (x: 240..310, y: 33..61)
-  uint16_t autoBg = gAutoBright ? TFT_DARKGREEN : 0x2945;
+  // [x] Auto checkbox (x: 240..310, y: 33..61)
+  uint16_t autoBg = gAutoBright ? 0x1A26 : 0x18E3;
+  uint16_t autoBorder = gAutoBright ? TFT_GREEN : TFT_LIGHTGREY;
   tft.fillRoundRect(240, 33, 70, 28, 4, autoBg);
-  tft.drawRoundRect(240, 33, 70, 28, 4, gAutoBright ? TFT_GREEN : TFT_LIGHTGREY);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, autoBg);
-  tft.drawString(gAutoBright ? "AUTO:ON" : "AUTO:OFF", 275, 47, 1);
+  tft.drawRoundRect(240, 33, 70, 28, 4, autoBorder);
+  // Checkbox square at (246, 40, 14, 14)
+  tft.fillRect(246, 40, 14, 14, gAutoBright ? TFT_DARKGREEN : TFT_BLACK);
+  tft.drawRect(246, 40, 14, 14, TFT_WHITE);
+  if (gAutoBright) {
+    tft.drawLine(248, 47, 251, 51, TFT_YELLOW);
+    tft.drawLine(251, 51, 257, 42, TFT_YELLOW);
+    tft.drawLine(248, 48, 251, 52, TFT_YELLOW);
+    tft.drawLine(251, 52, 257, 43, TFT_YELLOW);
+  }
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(gAutoBright ? TFT_YELLOW : TFT_LIGHTGREY, autoBg);
+  tft.drawString("Auto", 265, 47, 1);
 
   // Row 2 (y: 70..118): [DEV NAME] (x: 4..157) & [SERIAL #] (x: 163..316)
   tft.fillRoundRect(4, 70, 153, 46, 5, 0x18E3);
@@ -1008,26 +1090,23 @@ static void drawConfigScreen() {
   tft.drawString(gSerialNo, 169, 90, 2);
 
   // Row 3 (y: 120..168): [/net URL] (x: 4..198) & [/net PASS] (x: 204..316)
-  uint16_t netBg = isDev ? 0x18E3 : 0x0841;
-  if (isDev) {
-    tft.fillRoundRect(4, 120, 194, 46, 5, netBg);
-    tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
-  }
-  tft.setTextColor(isDev ? TFT_MAGENTA : TFT_LIGHTGREY, netBg);
+  tft.fillRoundRect(4, 120, 194, 46, 5, 0x18E3);
+  tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
+  tft.setTextColor(TFT_MAGENTA, 0x18E3);
   tft.drawString("/net SERVER URL:", 10, 125, 1);
-  tft.setTextColor(TFT_WHITE, netBg);
+  tft.setTextColor(TFT_WHITE, 0x18E3);
   String shortUrl = String(gShUrl);
   if (shortUrl.length() > 28) shortUrl = shortUrl.substring(0, 28);
   tft.drawString(shortUrl, 10, 142, 1);
 
-  if (isDev) {
-    tft.fillRoundRect(204, 120, 112, 46, 5, netBg);
-    tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
-  }
-  tft.setTextColor(isDev ? TFT_MAGENTA : TFT_LIGHTGREY, netBg);
+  tft.fillRoundRect(204, 120, 112, 46, 5, 0x18E3);
+  tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
+  tft.setTextColor(TFT_MAGENTA, 0x18E3);
   tft.drawString("/net PASSWORD:", 210, 125, 1);
-  tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, netBg);
-  tft.drawString(gShPass[0] ? "******** (SET)" : "(NOT SET)", 210, 142, 1);
+  tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, 0x18E3);
+  String shortPass = gShPass[0] ? String(gShPass) : String("(NOT SET)");
+  if (shortPass.length() > 17) shortPass = shortPass.substring(0, 17);
+  tft.drawString(shortPass, 210, 142, 1);
 
   // Row 4 (y: 172..234): [AIRPORT] (x: 4..104), [WI-FI] (x: 109..210), [TOUCH CAL] (x: 215..316)
   tft.fillRoundRect(4, 172, 100, 62, 6, 0x18E3);
@@ -1092,6 +1171,9 @@ void runLakatosConfigScreen(bool startInCalibration) {
       lakatosSetInConfigScreen(false);
       return;
     }
+    if (lakatosConsumeConfigRedraw()) {
+      drawConfigScreen();
+    }
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
 
@@ -1109,7 +1191,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
         if (t.y <= 25 && t.x <= 62) {
           lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
           lakatosSetInConfigScreen(false);
-          return;  // HOME -> Exit Config back to YAK-CYD index page
+          return;  // HOME -> Exit Config back to YAKimono index page
         } else if (t.y <= 25 && t.x >= 254) {
           lakatosDevLogf("Button: CONFIG -> ABOUT (%d,%d)", t.x, t.y);
           if (runAboutModal()) {
@@ -1148,20 +1230,21 @@ void runLakatosConfigScreen(bool startInCalibration) {
             drawConfigScreen();
           }
         } else if (t.y >= 120 && t.y <= 166) {
-          if (lakatosGetDeveloperMode()) {
-            if (t.x < 200) {
-              lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
-              if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
-                saveConfigToNvs();
-              }
-            } else {
-              lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
-              if (lakatosPromptKeyboard("/net PASSWORD", gShPass, sizeof(gShPass), false, true) == 1) {
-                saveConfigToNvs();
-              }
+          if (t.x < 200) {
+            lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
+            if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
+              saveConfigToNvs();
             }
-            drawConfigScreen();
+          } else {
+            lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
+            char passBuf[sizeof(gShPass)] = "";
+            if (lakatosPromptKeyboard("/net PASSWORD", passBuf, sizeof(passBuf), false, false) == 1) {
+              strncpy(gShPass, passBuf, sizeof(gShPass) - 1);
+              gShPass[sizeof(gShPass) - 1] = '\0';
+              saveConfigToNvs();
+            }
           }
+          drawConfigScreen();
         } else if (t.y >= 172) {
           if (t.x <= 106) {
             lakatosDevLogf("Button: CONFIG -> AIRPORT (%d,%d)", t.x, t.y);

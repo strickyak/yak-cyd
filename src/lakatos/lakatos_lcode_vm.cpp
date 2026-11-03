@@ -3,6 +3,7 @@
 #include "lakatos_state.h"
 
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -571,7 +572,7 @@ struct LCodeVM {
       case SysRand: {
         uint32_t mx = 0;
         if (!pop(mx)) return false;
-        return push(mx <= 1 ? 0 : (uint32_t)random(mx));
+        return push(mx == 0 ? esp_random() : (mx == 1 ? 0u : (esp_random() % mx)));
       }
       case SysSetCornerExit: {
         uint32_t en = 0;

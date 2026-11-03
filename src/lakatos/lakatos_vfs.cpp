@@ -205,67 +205,88 @@ static bool parseShLsLine(const String& rawLine, LakatosFsEntry* out) {
   return out->name[0] != '\0';
 }
 
-// Parses a complete Superhighway LS response body:
+// Reads one '\n'-terminated line from stream (stripping trailing '\r').
+// Returns false on EOF/timeout before any byte or if line exceeds maxLen-1.
+static bool readShStreamLine(WiFiClient* stream, HTTPClient& http,
+                             char* lineBuf, size_t maxLen, uint32_t timeoutMs = 6000) {
+  if (!stream || !lineBuf || maxLen < 2) return false;
+  size_t pos = 0;
+  uint32_t startMs = millis();
+  while (!lakatosShouldExitApp() && (millis() - startMs < timeoutMs)) {
+    int avail = stream->available();
+    if (avail > 0) {
+      int ch = stream->read();
+      if (ch < 0) continue;
+      startMs = millis();
+      if (ch == '\n') {
+        while (pos > 0 && lineBuf[pos - 1] == '\r') pos--;
+        lineBuf[pos] = '\0';
+        return true;
+      }
+      if (pos + 1 >= maxLen) {
+        return false; // Line too long
+      }
+      lineBuf[pos++] = (char)ch;
+    } else if (!http.connected() && stream->available() <= 0) {
+      break;
+    } else {
+      delayMicroseconds(200);
+    }
+  }
+  if (pos > 0) {
+    while (pos > 0 && lineBuf[pos - 1] == '\r') pos--;
+    lineBuf[pos] = '\0';
+    return true;
+  }
+  return false;
+}
+
+// Streams and parses a Superhighway LS response directly from the TCP socket
+// without buffering the entire response body in heap:
 //   Line 1: <expected_count> (decimal integer >= 0)
 //   Next <expected_count> lines: "<YYYY-mm-dd> <HH:MM:SS> <size> <name>[/]"
 //   Final line: ";"
-// Returns the number of entries stored into outEntries (0..maxEntries),
-// or -1 if the body is empty, truncated, malformed, or the entry count
-// does not match <expected_count> followed by ";".
-static int parseShLsBody(const String& body, LakatosFsEntry* outEntries,
-                         int maxEntries, int* outTotalCount = nullptr) {
+static int parseShLsStream(WiFiClient* stream, HTTPClient& http,
+                           LakatosFsEntry* outEntries, int maxEntries,
+                           int* outTotalCount = nullptr) {
   if (outTotalCount) *outTotalCount = 0;
-  int len = body.length();
-  if (len <= 0) return -1;
-
-  int nl = body.indexOf('\n', 0);
-  if (nl < 0) return -1;
-  String countLine = body.substring(0, nl);
-  while (countLine.endsWith("\r")) {
-    countLine.remove(countLine.length() - 1);
+  char lineBuf[160];
+  if (!readShStreamLine(stream, http, lineBuf, sizeof(lineBuf))) {
+    Serial.println("[Lakatos VFS] LS stream: empty response");
+    return -1;
   }
-  countLine.trim();
-  if (countLine.length() == 0) return -1;
-  for (size_t i = 0; i < countLine.length(); i++) {
-    char c = countLine.charAt(i);
-    if (c < '0' || c > '9') return -1;
+  size_t cLen = strlen(lineBuf);
+  while (cLen > 0 && (lineBuf[cLen - 1] == ' ' || lineBuf[cLen - 1] == '\t')) {
+    lineBuf[--cLen] = '\0';
   }
-  int expectedCount = atoi(countLine.c_str());
+  if (cLen == 0) return -1;
+  for (size_t i = 0; i < cLen; i++) {
+    if (lineBuf[i] < '0' || lineBuf[i] > '9') {
+      Serial.printf("[Lakatos VFS] LS stream: bad count line '%s'\r\n", lineBuf);
+      return -1;
+    }
+  }
+  int expectedCount = atoi(lineBuf);
   if (expectedCount < 0) return -1;
 
-  int start = nl + 1;
   int seenCount = 0;
   int storedCount = 0;
   bool sawTerminator = false;
 
-  while (start <= len) {
-    if (start == len) break;
-    nl = body.indexOf('\n', start);
-    if (nl < 0) nl = len;
-    String line = body.substring(start, nl);
-    start = nl + 1;
-
-    while (line.endsWith("\r")) {
-      line.remove(line.length() - 1);
-    }
-
-    if (line == ";") {
+  while (readShStreamLine(stream, http, lineBuf, sizeof(lineBuf))) {
+    if (strcmp(lineBuf, ";") == 0) {
       sawTerminator = true;
-      while (start < len) {
-        char c = body.charAt(start++);
-        if (c != '\r' && c != '\n' && c != ' ' && c != '\t') {
-          return -1;
-        }
-      }
       break;
     }
-
     if (seenCount >= expectedCount) {
+      Serial.printf("[Lakatos VFS] LS stream: extra line after %d entries: '%s'\r\n",
+                    expectedCount, lineBuf);
       return -1;
     }
-
     LakatosFsEntry tmp;
-    if (!parseShLsLine(line, &tmp)) {
+    if (!parseShLsLine(String(lineBuf), &tmp)) {
+      Serial.printf("[Lakatos VFS] LS stream: bad entry line %d: '%s'\r\n",
+                    seenCount, lineBuf);
       return -1;
     }
     if (outEntries && storedCount < maxEntries) {
@@ -275,6 +296,8 @@ static int parseShLsBody(const String& body, LakatosFsEntry* outEntries,
   }
 
   if (!sawTerminator || seenCount != expectedCount) {
+    Serial.printf("[Lakatos VFS] LS stream: framing mismatch (sawTerm=%d, seen=%d, expected=%d)\r\n",
+                  sawTerminator ? 1 : 0, seenCount, expectedCount);
     return -1;
   }
   if (outTotalCount) *outTotalCount = expectedCount;
@@ -325,6 +348,7 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
     WiFiClient cli;
     HTTPClient http;
     cli.setNoDelay(true);
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath);
     if (!http.begin(cli, url)) {
       return -1;
@@ -335,18 +359,11 @@ int lakatosFsLs(const char* path, LakatosFsEntry* outEntries, int maxEntries) {
       http.end();
       return -1;
     }
-    String body = http.getString();
+    count = parseShLsStream(http.getStreamPtr(), http, outEntries, maxEntries);
     http.end();
 
-    count = parseShLsBody(body, outEntries, maxEntries);
     if (count < 0) {
-      int nl = body.indexOf('\n');
-      String firstLine = (nl >= 0) ? body.substring(0, nl) : body;
-      String tail = (body.length() > 20) ? body.substring(body.length() - 20) : body;
-      tail.replace("\n", "\\n");
-      tail.replace("\r", "\\r");
-      Serial.printf("[Lakatos VFS] LS %s failed framing/count check (len=%u, first='%s', tail='%s')\r\n",
-                    subPath.c_str(), (unsigned)body.length(), firstLine.c_str(), tail.c_str());
+      Serial.printf("[Lakatos VFS] LS %s failed framing/count check\r\n", subPath.c_str());
     }
   }
   lakatosDevLogf("VFS ls %s -> %d entries", path ? path : "", count);
@@ -377,6 +394,7 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
     HTTPClient http;
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);
@@ -385,12 +403,11 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
       http.end();
       return false;
     }
-    String body = http.getString();
-    http.end();
     const char* slash = strrchr(subPath.c_str(), '/');
     const char* baseName = slash ? (slash + 1) : subPath.c_str();
     int totalCount = 0;
-    int parsed = parseShLsBody(body, outEntry, 1, &totalCount);
+    int parsed = parseShLsStream(http.getStreamPtr(), http, outEntry, 1, &totalCount);
+    http.end();
     if (parsed >= 0) {
       if (totalCount == 1 && parsed == 1 && !outEntry->isDir &&
           strcmp(outEntry->name, baseName) == 0) {
@@ -401,9 +418,6 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
       outEntry->size = 4096;
       outEntry->isDir = true;
       return true;
-    }
-    if (body.endsWith("\n") && body.indexOf('\n') == (int)body.length() - 1) {
-      return parseShLsLine(body, outEntry);
     }
     return false;
   }
@@ -500,6 +514,7 @@ bool lakatosFsWrite(const char* path, const void* buf, size_t len) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
     HTTPClient http;
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);
@@ -573,6 +588,7 @@ bool lakatosFsRmdir(const char* path) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
     HTTPClient http;
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);
@@ -594,6 +610,7 @@ bool lakatosFsRm(const char* path) {
     if (WiFi.status() != WL_CONNECTED) return false;
     WiFiClient client;
     HTTPClient http;
+    http.useHTTP10(true);
     String url = buildShTargetUrl(subPath);
     if (!http.begin(client, url)) return false;
     addShBasicAuthHeader(http);

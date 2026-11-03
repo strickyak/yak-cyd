@@ -123,7 +123,7 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | | `os_millis() int` | Milliseconds since boot |
 | | `os_micros() int` | Microseconds since boot |
 | | `os_delay_ms(ms int)` | Sleeps `ms` milliseconds while servicing background tasks |
-| | `os_rand(max int) int` | Pseudo-random integer in `[0, max)` |
+| | `os_rand(max uint) uint` | True random `uint` in `[0, max)` via ESP32 hardware TRNG (`esp_random()`; full 32-bit word if `max == 0`) |
 | **Display** | `rgb565(r int, g int, b int) int` | Packs 8-bit `(r, g, b)` into 16-bit `RGB565` color |
 | | `tft_fill_screen(color int)` | Fills entire `320×240` screen |
 | | `tft_fill_rect(x, y, w, h, color int)` | Fills rectangle |
@@ -181,7 +181,7 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 
 ## 5. Minimal Game Skeleton
 
-Every YAK-CYD / Lakatos game must provide a standardized `HOME` button in the **top-left corner** (`x <= 64, y < 25`, button box `(2, 2, 58, 20)`) labeled `"HOME"` that calls `os_exit(0)` so the user can return to the YAK-CYD index page at any time.
+Every YAKimono / Lakatos game must provide a standardized `HOME` button in the **top-left corner** (`x <= 64, y < 25`, button box `(2, 2, 58, 20)`) labeled `"HOME"` that calls `os_exit(0)` so the user can return to the YAKimono index page at any time.
 
 ```go
 package main

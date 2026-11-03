@@ -9,7 +9,7 @@ BOOT_APP0 ?= $(HOME)/.platformio/packages/framework-arduinoespressif32/tools/par
 
 all:
 	@echo "================================================================"
-	@echo "  Yak-CYD Makefile Targets"
+	@echo "  YAKimono Makefile Targets"
 	@echo "================================================================"
 	@echo "  make push           Build and push: lakatos & apps"
 	@echo "  make lakatos        Build LCode .lapp apps, compile & upload Lakatos OS"

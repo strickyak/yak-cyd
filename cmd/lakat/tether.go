@@ -606,9 +606,19 @@ func cmdTether(args []string) {
 		}
 
 		// Send any positional arguments as initial commands
-		for _, initCmd := range fs.Args() {
-			_ = bridge.WriteLine(initCmd)
-			time.Sleep(100 * time.Millisecond)
+		if len(fs.Args()) > 0 {
+			_ = bridge.WaitUntilReady("/flash", 5*time.Second)
+			initCmds := fs.Args()
+			if len(initCmds) > 1 {
+				switch strings.ToLower(initCmds[0]) {
+				case "netpass", "shpass", "run", "preview", "cp", "ls", "dev", "spot", "wifi", "devname", "serial", "neturl", "airport":
+					initCmds = []string{strings.Join(initCmds, " ")}
+				}
+			}
+			for _, initCmd := range initCmds {
+				_ = bridge.WriteLine(initCmd)
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
 
 		// If positional commands were supplied with -drain and stdin is a terminal,

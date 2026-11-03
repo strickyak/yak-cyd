@@ -3243,8 +3243,11 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		c.emitOp("SYSCALL", "SYS_DELAY_MS")
 		return VoidType, nil
 	case "os_rand", "rand":
+		if len(argTypes) == 0 {
+			c.emitOp("PUSH_0")
+		}
 		c.emitOp("SYSCALL", "SYS_RAND")
-		return ScalarInt, nil
+		return TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}, nil
 	case "os_set_corner_exit", "set_corner_exit":
 		c.emitOp("SYSCALL", "SYS_SET_CORNER_EXIT")
 		return VoidType, nil

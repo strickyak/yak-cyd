@@ -726,12 +726,12 @@ static void drawHeaderBar() {
 
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_CYAN, 0x10A2);
-  tft.drawString("YAK-CYD", 6, 11, 2);
+  tft.drawString("YAKimono", 6, 11, 2);
 
   char idBuf[40];
   snprintf(idBuf, sizeof(idBuf), "%s/%s", lakatosGetDeviceName(), lakatosGetSerialNumber());
   tft.setTextColor(TFT_YELLOW, 0x10A2);
-  tft.drawString(idBuf, 72, 11, 1);
+  tft.drawString(idBuf, 76, 11, 1);
 
   char timeBuf[16];
   char clkStr[32];
@@ -1335,6 +1335,8 @@ static void handleFuseCommand(const String& line) {
   }
 }
 
+static void handleSerialCommandLine(const String& line);
+
 void lakatosPollSerialFuse() {
   while (Serial.available() > 0) {
     int pk = Serial.peek();
@@ -1350,23 +1352,28 @@ void lakatosPollSerialFuse() {
       }
       continue;
     }
-    if (pk == 'q' || pk == 'Q' || pk == 3) {
-      Serial.read();
-      gPleaseExitApp = true;
-      continue;
-    }
-    if (gInConfigScreen) {
-      Serial.read();
+    if (!gLCodeAppRunning) {
+      String line = Serial.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) {
+        handleSerialCommandLine(line);
+      }
       continue;
     }
     break;
   }
 }
 
-static void handleSerialCommand() {
-  if (!Serial.available()) return;
-  String line = Serial.readStringUntil('\n');
-  line.trim();
+static void refreshShellOrMarkDirty() {
+  if (gInConfigScreen) {
+    gShellNeedsRefresh = true;
+  } else {
+    refreshDirectory();
+    drawShellScreen();
+  }
+}
+
+static void handleSerialCommandLine(const String& line) {
   if (line.length() == 0) return;
 
   if (line.startsWith("@FUSE ")) {
@@ -1374,16 +1381,23 @@ static void handleSerialCommand() {
     return;
   }
 
+  if ((line == "q" || line == "Q" || (line.length() == 1 && line[0] == 3)) && gInConfigScreen) {
+    gPleaseExitApp = true;
+    return;
+  }
+
   if (line == "info") {
-    Serial.printf("Lakatos OS v%u | ID: %s/%s | Airport: %s | URL: %s | Wi-Fi: %s | Heap: %u\r\n",
+    const char* pw = lakatosGetSuperhighwayPassword();
+    Serial.printf("Lakatos OS v%u | ID: %s/%s | Airport: %s | URL: %s | /net PW: %s | Wi-Fi: %s | Heap: %u\r\n",
                   LAKATOS_API_VERSION,
                   lakatosGetDeviceName(),
                   lakatosGetSerialNumber(),
                   lakatosGetAirportCode(),
                   lakatosGetSuperhighwayUrl(),
+                  (pw && pw[0]) ? pw : "(NOT SET)",
                   lakatosWifiIsConnected() ? "CONNECTED" : "OFFLINE",
                   (unsigned)ESP.getFreeHeap());
-  } else if (line.startsWith("ls")) {
+  } else if (line == "ls" || line.startsWith("ls ")) {
     String path = line.substring(2);
     path.trim();
     if (path.length() == 0) path = gCurPath;
@@ -1400,6 +1414,10 @@ static void handleSerialCommand() {
       free(entries);
     }
   } else if (line.startsWith("run ")) {
+    if (gInConfigScreen) {
+      Serial.println("Exit CONFIG screen first before running an app.");
+      return;
+    }
     String path = line.substring(4);
     path.trim();
     launchAppAndRestoreShell(path.c_str());
@@ -1427,15 +1445,60 @@ static void handleSerialCommand() {
       }
       if (st) free(st);
     }
-  } else if (line.startsWith("netpass ") || line.startsWith("shpass ")) {
-    int pfx = line.startsWith("netpass ") ? 8 : 7;
-    String pass = line.substring(pfx);
+  } else if (line == "netpass" || line == "shpass" ||
+             line.startsWith("netpass ") || line.startsWith("shpass ")) {
+    int sp = line.indexOf(' ');
+    if (sp < 0) {
+      const char* cur = lakatosGetSuperhighwayPassword();
+      Serial.printf("Usage: netpass <password>  (current /net password: %s)\r\n",
+                    (cur && cur[0]) ? "SET" : "NOT SET");
+    } else {
+      String pass = line.substring(sp + 1);
+      pass.trim();
+      lakatosSetSuperhighwayPassword(pass.c_str());
+      Serial.printf("Saved /net password to NVS (cyd_cfg) for Device ID %s/%s.\r\n",
+                    lakatosGetDeviceName(), lakatosGetSerialNumber());
+      refreshShellOrMarkDirty();
+    }
+  } else if (line.startsWith("neturl ")) {
+    String url = line.substring(7);
+    url.trim();
+    lakatosSetSuperhighwayUrl(url.c_str());
+    Serial.printf("Saved /net URL: %s\r\n", lakatosGetSuperhighwayUrl());
+    refreshShellOrMarkDirty();
+  } else if (line.startsWith("devname ")) {
+    String nm = line.substring(8);
+    nm.trim();
+    lakatosSetDeviceName(nm.c_str());
+    Serial.printf("Saved Device ID: %s/%s\r\n", lakatosGetDeviceName(), lakatosGetSerialNumber());
+    refreshShellOrMarkDirty();
+  } else if (line.startsWith("serial ")) {
+    String sn = line.substring(7);
+    sn.trim();
+    lakatosSetSerialNumber(sn.c_str());
+    Serial.printf("Saved Device ID: %s/%s\r\n", lakatosGetDeviceName(), lakatosGetSerialNumber());
+    refreshShellOrMarkDirty();
+  } else if (line.startsWith("airport ")) {
+    String code = line.substring(8);
+    code.trim();
+    lakatosSetAirportCode(code.c_str());
+    Serial.printf("Saved Airport: %s\r\n", lakatosGetAirportCode());
+    refreshShellOrMarkDirty();
+  } else if (line.startsWith("wifi ")) {
+    String rest = line.substring(5);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    String ssid = (sp > 0) ? rest.substring(0, sp) : rest;
+    String pass = (sp > 0) ? rest.substring(sp + 1) : "";
+    ssid.trim();
     pass.trim();
-    lakatosSetSuperhighwayPassword(pass.c_str());
-    Serial.println("Saved /net password to NVS (cyd_cfg).");
-    refreshDirectory();
-    drawShellScreen();
+    lakatosSetWifiCredentials(ssid.c_str(), pass.c_str());
+    Serial.printf("Saved Wi-Fi SSID '%s' to NVS (cyd_wifi) and connecting...\r\n", ssid.c_str());
   } else if (line.startsWith("preview ")) {
+    if (gInConfigScreen) {
+      Serial.println("Exit CONFIG screen first before previewing a file.");
+      return;
+    }
     String path = line.substring(8);
     path.trim();
     LakatosFsEntry* dummy = (LakatosFsEntry*)calloc(1, sizeof(LakatosFsEntry));
@@ -1446,10 +1509,13 @@ static void handleSerialCommand() {
       free(dummy);
     }
   } else if (line == "config") {
-    runLakatosConfigScreen(false);
-    refreshDirectory();
-    drawShellScreen();
-  } else if (line.startsWith("dev") || line.startsWith("spot")) {
+    if (!gInConfigScreen) {
+      runLakatosConfigScreen(false);
+      refreshDirectory();
+      drawShellScreen();
+    }
+  } else if (line == "dev" || line == "spot" ||
+             line.startsWith("dev ") || line.startsWith("spot ")) {
     int pfx = line.startsWith("spot") ? 4 : 3;
     String arg = line.substring(pfx);
     arg.trim();
@@ -1460,8 +1526,14 @@ static void handleSerialCommand() {
     }
     Serial.printf("Developer Mode: %s\r\n", lakatosGetDeveloperMode() ? "ON" : "OFF");
   } else if (line == "help" || line == "?") {
-    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | netpass <pw> | config | dev [on|off]");
+    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | netpass <pw> | neturl <url> | devname <name> | serial <sn> | airport <iata> | wifi <ssid> [pw] | config | dev [on|off]");
+  } else {
+    Serial.printf("Unknown command '%s'. Type 'help' for commands.\r\n", line.c_str());
   }
+}
+
+static void handleSerialCommand() {
+  lakatosPollSerialFuse();
 }
 
 void setup() {

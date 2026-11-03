@@ -1,32 +1,28 @@
-// pix-2: Slideshow viewer for /net/pix-2/ on Lakatos OS (CYD 320x240)
-// Displays all images in /net/pix-2/ centered on the 320x240 screen for
-// 10 seconds each and repeats forever until the top-left 10x10 exit wedge is touched.
-// Uses the Core 0 background prefetcher (os_prefetch_start / os_prefetch_status)
-// to download the next image into a 64 KB RAM buffer while the current image is shown.
+// pix-2: Slideshow viewer for /net/pix-2/ on Lakatos OS (320x240)
+// Remembers up to 500 .jpg basenames (<= 8 bytes each without the .jpg extension),
+// shuffles them using the ESP32 hardware TRNG (os_rand), and displays each image
+// centered on the 320x240 screen for 10 seconds using Core 0 background prefetching.
 package main
 
 import "wedge"
 
 const (
 	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
-	MAX_IMAGES   = 32
-	NAME_STRIDE  = 64
-	ENTRY_SIZE   = 88 // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
-	ENTRY_SIZE_O = 64
+	MAX_SCAN     = 700   // 700 * 88 = 61,600 B fits inside 64 KB imgBuf during scanCatalog()
+	MAX_IMAGES   = 500   // Up to 500 .jpg basenames remembered
+	NAME_STRIDE  = 8     // Up to 8 bytes per basename (without ".jpg")
+	ENTRY_SIZE   = 88    // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
 	ENTRY_ISDIR  = 80
 	DISPLAY_MS   = 10000
 	POLL_STEP_MS = 40
-	BTN_HOME_BG  = 0x2945
 )
 
 var (
 	imgBuf   [BUF_MAX]byte
-	imgNames [2048]byte // MAX_IMAGES * NAME_STRIDE
-	imgSizes [MAX_IMAGES]int
-	imgTypes [MAX_IMAGES]byte // 1 = PNG, 2 = JPG
+	imgNames [4000]byte // MAX_IMAGES (500) * NAME_STRIDE (8)
 	imgCount int
 
-	pathBuf     [96]byte // "/net/pix-2/" + 64-byte filename
+	pathBuf     [32]byte // "/net/pix-2/" (11) + basename (<=8) + ".jpg" (4) + NUL
 	prefetchIdx int
 )
 
@@ -37,8 +33,9 @@ func toLowerByte(c int) int {
 	return c
 }
 
-// Returns 1 for .png, 2 for .jpg/.jpeg, 0 otherwise.
-func detectImageType(nameAddr int) int {
+// Returns the basename length (1..8) if the entry name ends with ".jpg" (case-insensitive)
+// and its basename (without ".jpg") is 1..8 bytes; returns 0 otherwise.
+func jpgBasenameLen(nameAddr int) int {
 	ln := 0
 	for ln < 63 {
 		if peek1(nameAddr+ln) == 0 {
@@ -46,30 +43,17 @@ func detectImageType(nameAddr int) int {
 		}
 		ln++
 	}
-	if ln < 5 {
+	// Need at least 1 basename byte + ".jpg" (4 bytes) = 5 bytes,
+	// and at most 8 basename bytes + ".jpg" (4 bytes) = 12 bytes.
+	if ln < 5 || ln > 12 {
 		return 0
 	}
 	c0 := peek1(nameAddr + ln - 4)
 	c1 := toLowerByte(peek1(nameAddr + ln - 3))
 	c2 := toLowerByte(peek1(nameAddr + ln - 2))
 	c3 := toLowerByte(peek1(nameAddr + ln - 1))
-	if c0 == '.' {
-		if c1 == 'p' && c2 == 'n' && c3 == 'g' {
-			return 1
-		}
-		if c1 == 'j' && c2 == 'p' && c3 == 'g' {
-			return 2
-		}
-	}
-	if ln >= 6 {
-		d0 := peek1(nameAddr + ln - 5)
-		d1 := toLowerByte(peek1(nameAddr + ln - 4))
-		d2 := toLowerByte(peek1(nameAddr + ln - 3))
-		d3 := toLowerByte(peek1(nameAddr + ln - 2))
-		d4 := toLowerByte(peek1(nameAddr + ln - 1))
-		if d0 == '.' && d1 == 'j' && d2 == 'p' && d3 == 'e' && d4 == 'g' {
-			return 2
-		}
+	if c0 == '.' && c1 == 'j' && c2 == 'p' && c3 == 'g' {
+		return ln - 4
 	}
 	return 0
 }
@@ -124,8 +108,8 @@ func waitWithHomePoll(durationMs int) bool {
 	return waitSlideAction(durationMs) == 99
 }
 
-// buildNetPixPath writes "/net/pix-2/<entryName>" into pathBuf and returns its string slice.
-func buildNetPngPath(idx int) string {
+// buildNetJpgPath writes "/net/pix-2/<basename>.jpg" into pathBuf and returns its string slice.
+func buildNetJpgPath(idx int) string {
 	// Prefix: "/net/pix-2/" (11 bytes)
 	pathBuf[0] = '/'
 	pathBuf[1] = 'n'
@@ -141,7 +125,7 @@ func buildNetPngPath(idx int) string {
 
 	pos := 11
 	nameAddr := int(&imgNames) + idx*NAME_STRIDE
-	for i := 0; i < NAME_STRIDE-1; i++ {
+	for i := 0; i < NAME_STRIDE; i++ {
 		ch := peek1(nameAddr + i)
 		if ch == 0 {
 			break
@@ -149,8 +133,13 @@ func buildNetPngPath(idx int) string {
 		pathBuf[pos] = byte(ch)
 		pos++
 	}
+	pathBuf[pos] = '.'
+	pathBuf[pos+1] = 'j'
+	pathBuf[pos+2] = 'p'
+	pathBuf[pos+3] = 'g'
+	pos += 4
 	pathBuf[pos] = 0
-	return make_slice(&pathBuf[0], 96, pos)
+	return make_slice(&pathBuf[0], 32, pos)
 }
 
 func showStatusMessage(line1 string, line2 string) {
@@ -167,17 +156,32 @@ func startPrefetch(idx int) {
 		prefetchIdx = -1
 		return
 	}
-	sz := imgSizes[idx]
-	if sz > BUF_MAX {
-		// Too large for 64 KB RAM buffer; will stream directly from VFS when displayed
-		prefetchIdx = -1
-		return
-	}
-	fullPath := buildNetPngPath(idx)
+	fullPath := buildNetJpgPath(idx)
 	if os_prefetch_start(fullPath, &imgBuf, BUF_MAX) != 0 {
 		prefetchIdx = idx
 	} else {
 		prefetchIdx = -1
+	}
+}
+
+func swapCatalogEntries(i int, j int) {
+	if i == j {
+		return
+	}
+	addrI := int(&imgNames) + i*NAME_STRIDE
+	addrJ := int(&imgNames) + j*NAME_STRIDE
+	w0 := peek4(addrI)
+	w1 := peek4(addrI + 4)
+	poke4(addrI, peek4(addrJ))
+	poke4(addrI+4, peek4(addrJ+4))
+	poke4(addrJ, w0)
+	poke4(addrJ+4, w1)
+}
+
+func shuffleCatalog() {
+	for i := imgCount - 1; i > 0; i-- {
+		j := int(os_rand(uint(i + 1)))
+		swapCatalogEntries(i, j)
 	}
 }
 
@@ -186,8 +190,8 @@ func scanCatalog() int {
 	imgCount = 0
 	prefetchIdx = -1
 
-	// Reuse imgBuf temporarily for up to MAX_IMAGES LakatosFsEntry structs (48 * 88 = 4224 B)
-	n := fs_ls("/net/pix-2", &imgBuf, MAX_IMAGES)
+	// Reuse imgBuf temporarily for up to MAX_SCAN (700) LakatosFsEntry structs (700 * 88 = 61,600 B)
+	n := fs_ls("/net/pix-2", &imgBuf, MAX_SCAN)
 	if n <= 0 {
 		return 0
 	}
@@ -203,64 +207,47 @@ func scanCatalog() int {
 		if isDir != 0 || firstCh == 0 || firstCh == '.' {
 			continue
 		}
-		imgType := detectImageType(entAddr)
-		if imgType == 0 {
+		baseLen := jpgBasenameLen(entAddr)
+		if baseLen <= 0 {
 			continue
 		}
 		dstName := int(&imgNames) + imgCount*NAME_STRIDE
-		for c := 0; c < NAME_STRIDE-1; c++ {
-			ch := peek1(entAddr + c)
-			poke1(dstName+c, ch)
-			if ch == 0 {
-				break
-			}
+		poke4(dstName, 0)
+		poke4(dstName+4, 0)
+		for c := 0; c < baseLen; c++ {
+			poke1(dstName+c, peek1(entAddr+c))
 		}
-		poke1(dstName+NAME_STRIDE-1, 0)
-		imgSizes[imgCount] = peek4(entAddr + ENTRY_SIZE_O)
-		imgTypes[imgCount] = byte(imgType)
 		imgCount++
 	}
+	shuffleCatalog()
 	return imgCount
 }
 
 func displaySlide(idx int) bool {
-	imgType := int(imgTypes[idx])
-	sz := imgSizes[idx]
 	drawn := false
 
-	// Use Core 0 RAM prefetch when image fits in the 64 KB buffer
-	if sz <= BUF_MAX {
-		if prefetchIdx != idx {
-			startPrefetch(idx)
+	if prefetchIdx != idx {
+		startPrefetch(idx)
+	}
+	st, got := os_prefetch_status()
+	for st == 1 {
+		if checkHomeExit() {
+			return false
 		}
-		st, got := os_prefetch_status()
-		for st == 1 {
-			if checkHomeExit() {
-				return false
-			}
-			os_delay_ms(15)
-			st, got = os_prefetch_status()
-		}
-		if st == 2 && got > 0 {
-			tft_fill_screen(BLACK)
-			// x = -1 centers the image horizontally and vertically on the 320x240 screen
-			if imgType == 1 {
-				drawn = tft_draw_png(&imgBuf, got, -1, 0)
-			} else {
-				drawn = tft_draw_jpg(&imgBuf, got, -1, 0, 0)
-			}
-		}
+		os_delay_ms(15)
+		st, got = os_prefetch_status()
+	}
+	if st == 2 && got > 0 {
+		tft_fill_screen(BLACK)
+		// x = -1 centers the image horizontally and vertically on the 320x240 screen
+		drawn = tft_draw_jpg(&imgBuf, got, -1, 0, 0)
 	}
 
 	// Fallback to streaming directly from VFS if not drawn from RAM buffer
 	if !drawn {
-		fullPath := buildNetPngPath(idx)
+		fullPath := buildNetJpgPath(idx)
 		tft_fill_screen(BLACK)
-		if imgType == 1 {
-			drawn = tft_draw_png_file(fullPath, -1, 0)
-		} else {
-			drawn = tft_draw_jpg_file(fullPath, -1, 0, 0)
-		}
+		drawn = tft_draw_jpg_file(fullPath, -1, 0, 0)
 	}
 
 	if drawn {
