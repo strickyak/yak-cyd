@@ -468,46 +468,68 @@ func cmdPush(args []string) {
 	baud := fs.Uint("baud", 115200, "Serial baud rate")
 	quiet := fs.Bool("q", false, "Suppress output on success")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: lakat push [-wire /dev/ttyUSB0] [-baud 115200] [-q] SRC_FILEPATH VFS_DEST\n\n")
-		fmt.Fprintf(os.Stderr, "Uploads SRC_FILEPATH from the Linux PC to VFS_DEST (/flash/..., /sd/..., or /net/...)\n")
+		fmt.Fprintf(os.Stderr, "Usage: lakat push [-wire /dev/ttyUSB0] [-baud 115200] [-q] SRC_FILEPATH... VFS_DEST\n\n")
+		fmt.Fprintf(os.Stderr, "Uploads one or more SRC_FILEPATH files from the Linux PC to VFS_DEST (/flash/..., /sd/..., or /net/...)\n")
 		fmt.Fprintf(os.Stderr, "in the Lakatos VFS.\n\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
 
-	if fs.NArg() != 2 {
+	if fs.NArg() < 2 {
 		fs.Usage()
 		os.Exit(2)
 	}
 
-	srcPath := fs.Arg(0)
-	vfsDest := fs.Arg(1)
-
-	st, err := os.Stat(srcPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
-		os.Exit(1)
-	}
-	if st.IsDir() {
-		fmt.Fprintf(os.Stderr, "lakat push: %s is a directory (expected a single file)\n", srcPath)
-		os.Exit(1)
+	srcPaths := fs.Args()[:fs.NArg()-1]
+	vfsDest := fs.Arg(fs.NArg() - 1)
+	if len(srcPaths) > 1 && !strings.HasSuffix(vfsDest, "/") &&
+		vfsDest != "/flash" && vfsDest != "/sd" && vfsDest != "/net" {
+		vfsDest += "/"
 	}
 
-	data, err := os.ReadFile(srcPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
-		os.Exit(1)
+	type pushItem struct {
+		srcPath string
+		srcBase string
+		data    []byte
 	}
-
-	srcBase := filepath.Base(srcPath)
+	var items []pushItem
+	for _, srcPath := range srcPaths {
+		st, err := os.Stat(srcPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
+			os.Exit(1)
+		}
+		if st.IsDir() {
+			fmt.Fprintf(os.Stderr, "lakat push: %s is a directory (expected a file)\n", srcPath)
+			os.Exit(1)
+		}
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lakat push: %v\n", err)
+			os.Exit(1)
+		}
+		items = append(items, pushItem{
+			srcPath: srcPath,
+			srcBase: filepath.Base(srcPath),
+			data:    data,
+		})
+	}
 
 	// If a live `lakat tether` FUSE mount is active, write through it so we do
 	// not contend for the open serial port.
 	if mp := findActiveLakatosFuseMount(); mp != "" {
-		if targetPath, err := pushViaFuseMount(mp, srcBase, data, vfsDest); err == nil {
-			if !*quiet {
-				fmt.Printf("Pushed %s (%d bytes) -> %s (via %s)\n", srcPath, len(data), targetPath, mp)
+		allOk := true
+		for _, it := range items {
+			targetPath, err := pushViaFuseMount(mp, it.srcBase, it.data, vfsDest)
+			if err != nil {
+				allOk = false
+				break
 			}
+			if !*quiet {
+				fmt.Printf("Pushed %s (%d bytes) -> %s (via %s)\n", it.srcPath, len(it.data), targetPath, mp)
+			}
+		}
+		if allOk {
 			return
 		}
 	}
@@ -536,14 +558,15 @@ func cmdPush(args []string) {
 		os.Exit(1)
 	}
 
-	targetPath, err := bridge.PushBytes(srcBase, data, vfsDest)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "lakat push %s -> %s failed: %v\n", srcPath, targetPath, err)
-		os.Exit(1)
-	}
-
-	if !*quiet {
-		fmt.Printf("Pushed %s (%d bytes) -> %s\n", srcPath, len(data), targetPath)
+	for _, it := range items {
+		targetPath, err := bridge.PushBytes(it.srcBase, it.data, vfsDest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lakat push %s -> %s failed: %v\n", it.srcPath, targetPath, err)
+			os.Exit(1)
+		}
+		if !*quiet {
+			fmt.Printf("Pushed %s (%d bytes) -> %s\n", it.srcPath, len(it.data), targetPath)
+		}
 	}
 	os.Exit(0)
 }

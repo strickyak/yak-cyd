@@ -181,7 +181,7 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 
 ## 5. Minimal Game Skeleton
 
-Every YAKimono / Lakatos game must provide a standardized `HOME` button in the **top-left corner** (`x <= 64, y < 25`, button box `(2, 2, 58, 20)`) labeled `"HOME"` that calls `os_exit(0)` so the user can return to the YAKimono index page at any time.
+Every YakFace / Lakatos game must provide a standardized `HOME` button in the **top-left corner** (`x <= 64, y < 25`, button box `(2, 2, 58, 20)`) labeled `"HOME"` that calls `os_exit(0)` so the user can return to the YakFace index page at any time.
 
 ```go
 package main

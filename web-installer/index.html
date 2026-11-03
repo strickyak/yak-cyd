@@ -168,10 +168,10 @@
 
     <div class="card">
       <h2>Option 3: Push / Refresh 16 <code>.lapp</code> Apps via Serial VFS</h2>
-      <p>Already running Lakatos OS and want to push or update the 16 <code>.lapp</code> apps onto <code>/flash</code> or <code>/sd</code> without reflashing the OS or losing <code>/flash/config.ini</code>?</p>
+      <p>Already running Lakatos OS and want to push or update the 16 <code>.lapp</code> apps onto <code>/flash/apps</code> or <code>/sd/apps</code> without reflashing the OS or losing <code>/flash/config.ini</code>?</p>
       <div class="btn-row">
-        <button id="btn-push-flash" class="install-btn secondary" onclick="pushAllApps('/flash')">Push 16 Apps to /flash</button>
-        <button id="btn-push-sd" class="install-btn secondary" onclick="pushAllApps('/sd')">Push 16 Apps to /sd</button>
+        <button id="btn-push-flash" class="install-btn secondary" onclick="pushAllApps('/flash/apps')">Push 16 Apps to /flash/apps</button>
+        <button id="btn-push-sd" class="install-btn secondary" onclick="pushAllApps('/sd/apps')">Push 16 Apps to /sd/apps</button>
       </div>
       <div id="fuse-log"></div>
       <p class="note">Uses Lakatos OS's built-in <code>@FUSE</code> serial RPC protocol at 115200 baud.</p>
@@ -273,17 +273,19 @@
         if (!resp.ok) throw new Error("Could not load apps/apps.json");
         const appFiles = await resp.json();
 
-        log("Waiting for Lakatos OS VFS on " + targetDir + " ...");
+        const rootDir = targetDir.split("/").slice(0, 2).join("/");
+        log("Waiting for Lakatos OS VFS on " + rootDir + " ...");
         let ready = false;
         for (let attempt = 0; attempt < 10; attempt++) {
           try {
-            const rep = await callFuse("LS " + targetDir, 2000);
+            const rep = await callFuse("LS " + rootDir, 2000);
             if (rep.ok) { ready = true; break; }
           } catch (_) {}
         }
         if (!ready) {
-          throw new Error("No response from Lakatos OS @FUSE on " + targetDir + " (is Lakatos OS running?)");
+          throw new Error("No response from Lakatos OS @FUSE on " + rootDir + " (is Lakatos OS running?)");
         }
+        await callFuse("MKDIR " + targetDir, 4000);
 
         const chunkSize = 512;
         for (let i = 0; i < appFiles.length; i++) {

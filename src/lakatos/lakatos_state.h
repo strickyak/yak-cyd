@@ -102,8 +102,9 @@ bool        lakatosWifiIsConnected();
 int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
                           bool allowCtrlC, bool maskPassword = false);
 
-// Enters the interactive Settings / Calibration UI (returns when user taps BACK)
+// Enters the interactive Settings / Calibration UI (returns when user taps HOME)
 void runLakatosConfigScreen(bool startInCalibration = false);
+void runLakatosAboutScreen();
 
 // ---------------------------------------------------------------------------
 // Unified VFS (/flash/..., /sd/..., /net/...) (implemented in lakatos_vfs.cpp)

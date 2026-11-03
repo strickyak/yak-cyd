@@ -592,12 +592,37 @@ float lakatosReadCpuTempC() {
 }
 
 // ---------------------------------------------------------------------------
-// Lakatos Shell & File Browser State
+// Lakatos Home Screen & FileBrowser State
 // ---------------------------------------------------------------------------
+enum ShellScreenMode {
+  SCREEN_HOME = 0,
+  SCREEN_FILE_BROWSER = 1,
+};
+
+enum HomeAppSource : uint8_t {
+  APP_SRC_SD    = 0,  // /sd/apps/*.lapp    (1st priority)
+  APP_SRC_NET   = 1,  // /net/apps/*.lapp   (2nd priority)
+  APP_SRC_FLASH = 2,  // /flash/apps/*.lapp (3rd priority)
+};
+
+struct HomeAppEntry {
+  char    label[28];     // Basename without ".lapp"
+  char    fileName[36];  // Full filename with ".lapp"
+  uint8_t source;        // HomeAppSource
+};
+
+static constexpr int kMaxHomeApps   = 36;
 static constexpr int kMaxDirEntries = 48;
-static constexpr int kRowsPerPage = 6;
+static constexpr int kRowsPerPage   = 6;
+
+static ShellScreenMode gScreenMode      = SCREEN_HOME;
+static bool            gHomeMenuOpen    = false;
+static bool            gHomeScannedWifi = false;
+static int             gHomeAppCount    = 0;
 
 static LakatosFsEntry* const gDirEntries = (LakatosFsEntry*)gLakatosAppRamArena;
+static HomeAppEntry* const   gHomeApps   =
+    (HomeAppEntry*)(gLakatosAppRamArena + sizeof(LakatosFsEntry) * kMaxDirEntries);
 static int gDirCount = 0;
 static int gPageIdx = 0;
 static char gCurPath[128] = "/flash";
@@ -633,7 +658,12 @@ static void navigateUp() {
 
 static bool copyFileToFlash(const char* srcPath, const char* baseName) {
   char dstPath[128];
-  snprintf(dstPath, sizeof(dstPath), "/flash/%s", baseName);
+  if (endsWithLapp(baseName)) {
+    lakatosFsMkdir("/flash/apps", true);
+    snprintf(dstPath, sizeof(dstPath), "/flash/apps/%s", baseName);
+  } else {
+    snprintf(dstPath, sizeof(dstPath), "/flash/%s", baseName);
+  }
 
   LakatosFsEntry st;
   if (!lakatosFsStat(srcPath, &st) || st.isDir || st.size < 0) {
@@ -679,6 +709,97 @@ static bool copyFileToFlash(const char* srcPath, const char* baseName) {
   return ok;
 }
 
+static void collectHomeAppsFromDir(const char* dirPath, uint8_t source) {
+  int n = lakatosFsLs(dirPath, gDirEntries, kMaxDirEntries);
+  if (n <= 0) return;
+
+  for (int i = 0; i < n; i++) {
+    const LakatosFsEntry& e = gDirEntries[i];
+    if (e.isDir || !endsWithLapp(e.name)) continue;
+
+    size_t nameLen = strlen(e.name);
+    size_t stemLen = nameLen - 5;  // strip ".lapp"
+    if (stemLen == 0) continue;
+
+    char stem[28];
+    if (stemLen >= sizeof(stem)) stemLen = sizeof(stem) - 1;
+    memcpy(stem, e.name, stemLen);
+    stem[stemLen] = '\0';
+
+    bool exists = false;
+    for (int k = 0; k < gHomeAppCount; k++) {
+      if (strcasecmp(gHomeApps[k].label, stem) == 0) {
+        exists = true;
+        break;
+      }
+    }
+    if (exists) continue;
+
+    if (gHomeAppCount < kMaxHomeApps) {
+      HomeAppEntry& dst = gHomeApps[gHomeAppCount++];
+      strncpy(dst.label, stem, sizeof(dst.label) - 1);
+      dst.label[sizeof(dst.label) - 1] = '\0';
+      strncpy(dst.fileName, e.name, sizeof(dst.fileName) - 1);
+      dst.fileName[sizeof(dst.fileName) - 1] = '\0';
+      dst.source = source;
+    }
+  }
+}
+
+static void refreshHomeApps() {
+  gHomeAppCount = 0;
+
+  // Priority 1: /sd/apps/*.lapp
+  if (lakatosSdIsMounted()) {
+    collectHomeAppsFromDir("/sd/apps", APP_SRC_SD);
+  }
+
+  // Priority 2: /net/apps/*.lapp
+  bool wifiOk = lakatosWifiIsConnected();
+  gHomeScannedWifi = wifiOk;
+  if (wifiOk && strlen(lakatosGetSuperhighwayPassword()) > 0) {
+    collectHomeAppsFromDir("/net/apps", APP_SRC_NET);
+  }
+
+  // Priority 3: /flash/apps/*.lapp
+  collectHomeAppsFromDir("/flash/apps", APP_SRC_FLASH);
+
+  // Sort union alphabetically by label
+  for (int i = 0; i < gHomeAppCount - 1; i++) {
+    for (int j = i + 1; j < gHomeAppCount; j++) {
+      if (strcasecmp(gHomeApps[i].label, gHomeApps[j].label) > 0) {
+        HomeAppEntry tmp = gHomeApps[i];
+        gHomeApps[i] = gHomeApps[j];
+        gHomeApps[j] = tmp;
+      }
+    }
+  }
+}
+
+static void computeHomeGrid(int count, int& outCols, int& outRows,
+                            int& outX0, int& outY0, int& outCellW, int& outCellH) {
+  if (count <= 0) {
+    outCols = 1;
+    outRows = 1;
+  } else if (count <= 6) {
+    outCols = 2;
+  } else if (count <= 12) {
+    outCols = 3;
+  } else if (count <= 24) {
+    outCols = 4;
+  } else {
+    outCols = 5;
+  }
+  if (count > 0) {
+    outRows = (count + outCols - 1) / outCols;
+  }
+  outX0 = 4;
+  outY0 = 26;
+  outCellW = 312 / outCols;
+  outCellH = 212 / outRows;
+  if (outCellH > 52) outCellH = 52;
+}
+
 static bool gDirListError = false;
 
 static void refreshDirectory() {
@@ -719,14 +840,14 @@ static void refreshDirectory() {
   gPageIdx = 0;
 }
 
-static void drawHeaderBar() {
+static void drawHomeHeaderBar() {
   LakatosTftGuard tftGuard;
   tft.fillRect(0, 0, 320, 23, 0x10A2);
   tft.drawFastHLine(0, 23, 320, TFT_CYAN);
 
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_CYAN, 0x10A2);
-  tft.drawString("YAKimono", 6, 11, 2);
+  tft.drawString("YakFace", 6, 11, 2);
 
   char idBuf[40];
   snprintf(idBuf, sizeof(idBuf), "%s/%s", lakatosGetDeviceName(), lakatosGetSerialNumber());
@@ -747,21 +868,124 @@ static void drawHeaderBar() {
   bool wifiOk = lakatosWifiIsConnected();
   tft.fillCircle(246, 11, 4, wifiOk ? TFT_GREEN : TFT_RED);
 
-  // [CONFIG] button
-  tft.fillRoundRect(256, 2, 60, 19, 4, TFT_MAROON);
-  tft.drawRoundRect(256, 2, 60, 19, 4, TFT_WHITE);
+  // [MENU] dropdown button at top-right
+  uint16_t menuBg = gHomeMenuOpen ? TFT_DARKCYAN : 0x2945;
+  tft.fillRoundRect(256, 2, 60, 19, 4, menuBg);
+  tft.drawRoundRect(256, 2, 60, 19, 4, TFT_CYAN);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_MAROON);
-  tft.drawString("CONFIG", 286, 11, 1);
+  tft.setTextColor(gHomeMenuOpen ? TFT_WHITE : TFT_CYAN, menuBg);
+  tft.drawString("MENU", 286, 11, 2);
 
   gLastClockDrawMs = millis();
   gLastWifiState = wifiOk;
 }
 
-static void drawShellScreen() {
+static void drawHomeDropdownMenu() {
+  if (!gHomeMenuOpen) return;
+  LakatosTftGuard tftGuard;
+  // Dropdown panel anchored below [MENU] at top-right (x: 204..318, y: 24..114)
+  tft.fillRoundRect(204, 24, 114, 90, 5, 0x10A2);
+  tft.drawRoundRect(204, 24, 114, 90, 5, TFT_CYAN);
+
+  const char* items[3] = {"Config", "FileBrowser", "About"};
+  for (int i = 0; i < 3; i++) {
+    int iy = 27 + i * 29;
+    tft.fillRoundRect(208, iy, 106, 25, 4, 0x18E3);
+    tft.drawRoundRect(208, iy, 106, 25, 4, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, 0x18E3);
+    tft.drawString(items[i], 261, iy + 12, 2);
+  }
+}
+
+static void drawHomeScreen() {
   LakatosTftGuard tftGuard;
   tft.fillScreen(TFT_BLACK);
-  drawHeaderBar();
+  drawHomeHeaderBar();
+
+  if (gHomeAppCount <= 0) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("No apps in /{sd,net,flash}/apps", 160, 130, 2);
+  } else {
+    int cols = 1, rows = 1, x0 = 4, y0 = 26, cellW = 312, cellH = 48;
+    computeHomeGrid(gHomeAppCount, cols, rows, x0, y0, cellW, cellH);
+
+    for (int i = 0; i < gHomeAppCount; i++) {
+      int r = i / cols;
+      int c = i % cols;
+      int bx = x0 + c * cellW + 2;
+      int by = y0 + r * cellH + 2;
+      int bw = cellW - 4;
+      int bh = cellH - 4;
+
+      const HomeAppEntry& app = gHomeApps[i];
+      uint16_t bg     = 0x18E3;
+      uint16_t border = TFT_CYAN;
+      if (app.source == APP_SRC_SD) {
+        bg     = 0x1A26;
+        border = TFT_GREEN;
+      } else if (app.source == APP_SRC_NET) {
+        bg     = 0x2084;
+        border = TFT_MAGENTA;
+      }
+
+      tft.fillRoundRect(bx, by, bw, bh, 5, bg);
+      tft.drawRoundRect(bx, by, bw, bh, 5, border);
+
+      uint8_t font = 2;
+      if (bh < 22 || tft.textWidth(app.label, 2) > bw - 6) {
+        font = 1;
+      }
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_WHITE, bg);
+      tft.drawString(app.label, bx + bw / 2, by + bh / 2, font);
+    }
+  }
+
+  if (gHomeMenuOpen) {
+    drawHomeDropdownMenu();
+  }
+}
+
+static void drawFileBrowserHeaderBar() {
+  LakatosTftGuard tftGuard;
+  tft.fillRect(0, 0, 320, 23, 0x10A2);
+  tft.drawFastHLine(0, 23, 320, TFT_CYAN);
+
+  // [HOME] button on top-left
+  tft.fillRoundRect(2, 2, 58, 19, 4, 0x2945);
+  tft.drawRoundRect(2, 2, 58, 19, 4, TFT_CYAN);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x2945);
+  tft.drawString("HOME", 31, 11, 2);
+
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_WHITE, 0x10A2);
+  tft.drawString("FileBrowser", 66, 11, 2);
+
+  char timeBuf[16];
+  char clkStr[32];
+  if (lakatosFormatLocalTime(timeBuf, sizeof(timeBuf), "%H:%M")) {
+    snprintf(clkStr, sizeof(clkStr), "%s %s", lakatosGetAirportCode(), timeBuf);
+  } else {
+    snprintf(clkStr, sizeof(clkStr), "%s --:--", lakatosGetAirportCode());
+  }
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, 0x10A2);
+  tft.drawString(clkStr, 298, 11, 1);
+
+  bool wifiOk = lakatosWifiIsConnected();
+  tft.fillCircle(308, 11, 4, wifiOk ? TFT_GREEN : TFT_RED);
+
+  gLastClockDrawMs = millis();
+  gLastWifiState = wifiOk;
+}
+
+static void drawFileBrowserScreen() {
+  LakatosTftGuard tftGuard;
+  tft.fillScreen(TFT_BLACK);
+  drawFileBrowserHeaderBar();
 
   // VFS Tree Tabs (y=26..46)
   struct TabDef {
@@ -1003,6 +1227,7 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
     LakatosTouchSample ts = lakatosReadTouch();
     if (ts.touched && ts.y <= 25 && ts.x <= 64) {
       lakatosDevLogf("Button: Modal HOME (%d,%d)", ts.x, ts.y);
+      gScreenMode = SCREEN_HOME;
       lakatosWaitTouchRelease();
       return;
     }
@@ -1031,6 +1256,16 @@ static void showFileModal(const char* fullPath, const LakatosFsEntry& entry,
   }
 }
 
+static void refreshActiveScreen() {
+  if (gScreenMode == SCREEN_HOME) {
+    refreshHomeApps();
+    drawHomeScreen();
+  } else {
+    refreshDirectory();
+    drawFileBrowserScreen();
+  }
+}
+
 static void launchAppAndRestoreShell(const char* appPath) {
   lakatosDevLogf("Launch App: %s", appPath);
   lakatosSetRgbLed(false, false, true, 250);
@@ -1038,7 +1273,6 @@ static void launchAppAndRestoreShell(const char* appPath) {
   String errMsg;
   bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
   lakatosWaitTouchRelease();
-  refreshDirectory();
   if (ok) {
     lakatosDevLogf("App Exited: %s (code=%d)", appPath, exitCode);
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
@@ -1048,7 +1282,7 @@ static void launchAppAndRestoreShell(const char* appPath) {
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Err: %s", errMsg.c_str());
     lakatosSetRgbLed(true, false, false, 400);
   }
-  drawShellScreen();
+  refreshActiveScreen();
 }
 
 // ---------------------------------------------------------------------------
@@ -1368,8 +1602,7 @@ static void refreshShellOrMarkDirty() {
   if (gInConfigScreen) {
     gShellNeedsRefresh = true;
   } else {
-    refreshDirectory();
-    drawShellScreen();
+    refreshActiveScreen();
   }
 }
 
@@ -1511,8 +1744,7 @@ static void handleSerialCommandLine(const String& line) {
   } else if (line == "config") {
     if (!gInConfigScreen) {
       runLakatosConfigScreen(false);
-      refreshDirectory();
-      drawShellScreen();
+      refreshActiveScreen();
     }
   } else if (line == "dev" || line == "spot" ||
              line.startsWith("dev ") || line.startsWith("spot ")) {
@@ -1569,24 +1801,35 @@ void setup() {
     runLakatosConfigScreen(true);
   }
 
-  refreshDirectory();
-  drawShellScreen();
+  gScreenMode   = SCREEN_HOME;
+  gHomeMenuOpen = false;
+  refreshHomeApps();
+  drawHomeScreen();
 }
 
 void loop() {
   updateLakatosConfigBackground();
   lakatosUpdateRgbLed();
   handleSerialCommand();
+
+  bool wifiNow = lakatosWifiIsConnected();
+  if (gScreenMode == SCREEN_HOME && wifiNow && !gHomeScannedWifi) {
+    gShellNeedsRefresh = true;
+  }
+
   if (gShellNeedsRefresh) {
     gShellNeedsRefresh = false;
-    refreshDirectory();
-    drawShellScreen();
+    refreshActiveScreen();
   }
 
   // Periodically update clock and Wi-Fi indicator in top header bar
-  bool wifiNow = lakatosWifiIsConnected();
   if ((uint32_t)(millis() - gLastClockDrawMs) > 15000 || wifiNow != gLastWifiState) {
-    drawHeaderBar();
+    if (gScreenMode == SCREEN_HOME) {
+      drawHomeHeaderBar();
+      if (gHomeMenuOpen) drawHomeDropdownMenu();
+    } else {
+      drawFileBrowserHeaderBar();
+    }
   }
 
   LakatosTouchSample ts = lakatosReadTouchLatched();
@@ -1599,12 +1842,87 @@ void loop() {
   int ty = ts.y;
   lakatosWaitTouchRelease();
 
-  // 1. Header [CONFIG] button
-  if (ty < 24 && tx >= 250) {
-    lakatosDevLogf("Button: CONFIG (%d,%d)", tx, ty);
-    runLakatosConfigScreen(false);
-    refreshDirectory();
-    drawShellScreen();
+  // =========================================================================
+  // Mode A: Home Screen (App Launcher Grid + [MENU] Dropdown)
+  // =========================================================================
+  if (gScreenMode == SCREEN_HOME) {
+    if (gHomeMenuOpen) {
+      // Check if user tapped one of the 3 dropdown items (x: 204..318, y: 27..113)
+      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 114) {
+        int itemIdx = (ty - 27) / 29;
+        gHomeMenuOpen = false;
+        if (itemIdx == 0) {
+          lakatosDevLogf("Menu: Config (%d,%d)", tx, ty);
+          runLakatosConfigScreen(false);
+          refreshHomeApps();
+          drawHomeScreen();
+          return;
+        } else if (itemIdx == 1) {
+          lakatosDevLogf("Menu: FileBrowser (%d,%d)", tx, ty);
+          gScreenMode = SCREEN_FILE_BROWSER;
+          refreshDirectory();
+          drawFileBrowserScreen();
+          return;
+        } else if (itemIdx == 2) {
+          lakatosDevLogf("Menu: About (%d,%d)", tx, ty);
+          runLakatosAboutScreen();
+          refreshHomeApps();
+          drawHomeScreen();
+          return;
+        }
+      }
+      // Tapped [MENU] or outside the dropdown -> close menu
+      gHomeMenuOpen = false;
+      drawHomeScreen();
+      return;
+    }
+
+    // 1. Top-right [MENU] button
+    if (ty < 24 && tx >= 250) {
+      lakatosDevLogf("Button: MENU (%d,%d)", tx, ty);
+      gHomeMenuOpen = true;
+      drawHomeHeaderBar();
+      drawHomeDropdownMenu();
+      return;
+    }
+
+    // 2. App Grid Tiles (y >= 26)
+    if (ty >= 26 && gHomeAppCount > 0) {
+      int cols = 1, rows = 1, x0 = 4, y0 = 26, cellW = 312, cellH = 48;
+      computeHomeGrid(gHomeAppCount, cols, rows, x0, y0, cellW, cellH);
+      int col = (tx - x0) / cellW;
+      int row = (ty - y0) / cellH;
+      if (tx >= x0 && col >= 0 && col < cols && row >= 0 && row < rows) {
+        int idx = row * cols + col;
+        if (idx >= 0 && idx < gHomeAppCount) {
+          const HomeAppEntry& app = gHomeApps[idx];
+          const char* dirPrefix = "/flash/apps";
+          if (app.source == APP_SRC_SD) {
+            dirPrefix = "/sd/apps";
+          } else if (app.source == APP_SRC_NET) {
+            dirPrefix = "/net/apps";
+          }
+          char fullPath[128];
+          snprintf(fullPath, sizeof(fullPath), "%s/%s", dirPrefix, app.fileName);
+          lakatosDevLogf("Home Launch: %s (%d,%d)", fullPath, tx, ty);
+          launchAppAndRestoreShell(fullPath);
+          return;
+        }
+      }
+    }
+    return;
+  }
+
+  // =========================================================================
+  // Mode B: FileBrowser Screen
+  // =========================================================================
+  // 1. Header [HOME] button on top-left
+  if (ty < 24 && tx <= 62) {
+    lakatosDevLogf("Button: FileBrowser -> HOME (%d,%d)", tx, ty);
+    gScreenMode   = SCREEN_HOME;
+    gHomeMenuOpen = false;
+    refreshHomeApps();
+    drawHomeScreen();
     return;
   }
 
@@ -1614,22 +1932,22 @@ void loop() {
       lakatosDevLogf("Button: Tab /flash (%d,%d)", tx, ty);
       strncpy(gCurPath, "/flash", sizeof(gCurPath) - 1);
       refreshDirectory();
-      drawShellScreen();
+      drawFileBrowserScreen();
     } else if (tx >= 92 && tx <= 180) {
       lakatosDevLogf("Button: Tab /sd (%d,%d)", tx, ty);
       strncpy(gCurPath, "/sd", sizeof(gCurPath) - 1);
       refreshDirectory();
-      drawShellScreen();
+      drawFileBrowserScreen();
     } else if (tx >= 182 && tx <= 266) {
       lakatosDevLogf("Button: Tab /net (%d,%d)", tx, ty);
       strncpy(gCurPath, "/net", sizeof(gCurPath) - 1);
       refreshDirectory();
-      drawShellScreen();
+      drawFileBrowserScreen();
     } else if (tx >= 268) {
       lakatosDevLogf("Button: .. UP from %s (%d,%d)", gCurPath, tx, ty);
       navigateUp();
       refreshDirectory();
-      drawShellScreen();
+      drawFileBrowserScreen();
     }
     return;
   }
@@ -1638,7 +1956,7 @@ void loop() {
   if (ty >= 49 && ty <= 68 && tx >= 248) {
     lakatosDevLogf("Button: REFRESH %s (%d,%d)", gCurPath, tx, ty);
     refreshDirectory();
-    drawShellScreen();
+    drawFileBrowserScreen();
     return;
   }
 
@@ -1657,7 +1975,7 @@ void loop() {
       if (isApp && inRemoteOrSd && tx >= 256) {
         lakatosDevLogf("Button: Row [->/flash] %s (%d,%d)", fullPath, tx, ty);
         copyFileToFlash(fullPath, entry.name);
-        drawShellScreen();
+        drawFileBrowserScreen();
         return;
       }
 
@@ -1666,15 +1984,14 @@ void loop() {
         strncpy(gCurPath, fullPath, sizeof(gCurPath) - 1);
         gCurPath[sizeof(gCurPath) - 1] = '\0';
         refreshDirectory();
-        drawShellScreen();
+        drawFileBrowserScreen();
       } else if (isApp) {
         lakatosDevLogf("Button: Row Launch %s (%d,%d)", fullPath, tx, ty);
         launchAppAndRestoreShell(fullPath);
       } else {
         lakatosDevLogf("Button: Row Open File %s (%d,%d)", fullPath, tx, ty);
         showFileModal(fullPath, entry);
-        refreshDirectory();
-        drawShellScreen();
+        refreshActiveScreen();
       }
     }
     return;
@@ -1687,11 +2004,11 @@ void loop() {
       if (tx >= 224 && tx <= 270) {
         gPageIdx = (gPageIdx + totalPages - 1) % totalPages;
         lakatosDevLogf("Button: Page PREV -> %d/%d (%d,%d)", gPageIdx + 1, totalPages, tx, ty);
-        drawShellScreen();
+        drawFileBrowserScreen();
       } else if (tx >= 272 && tx <= 318) {
         gPageIdx = (gPageIdx + 1) % totalPages;
         lakatosDevLogf("Button: Page NEXT -> %d/%d (%d,%d)", gPageIdx + 1, totalPages, tx, ty);
-        drawShellScreen();
+        drawFileBrowserScreen();
       }
     }
   }

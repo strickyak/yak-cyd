@@ -109,8 +109,11 @@ void initLakatosVfs() {
   if (LittleFS.begin(true, "/flash", 8, "spiffs")) {
     gLoMounted = true;
     Serial.println("[Lakatos VFS] Mounted /flash (LittleFS on spiffs partition).");
-    seedLoAppFile("/life.lapp", kSeedApp_life, sizeof(kSeedApp_life));
-    seedLoAppFile("/gallery.lapp", kSeedApp_gallery, sizeof(kSeedApp_gallery));
+    if (!LittleFS.exists("/apps")) {
+      LittleFS.mkdir("/apps");
+    }
+    seedLoAppFile("/apps/life.lapp", kSeedApp_life, sizeof(kSeedApp_life));
+    seedLoAppFile("/apps/gallery.lapp", kSeedApp_gallery, sizeof(kSeedApp_gallery));
   } else {
     Serial.println("[Lakatos VFS] ERROR: Failed to mount /flash LittleFS!");
   }

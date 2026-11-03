@@ -9,7 +9,7 @@ BOOT_APP0 ?= $(HOME)/.platformio/packages/framework-arduinoespressif32/tools/par
 
 all:
 	@echo "================================================================"
-	@echo "  YAKimono Makefile Targets"
+	@echo "  YakFace Makefile Targets"
 	@echo "================================================================"
 	@echo "  make push           Build and push: lakatos & apps"
 	@echo "  make lakatos        Build LCode .lapp apps, compile & upload Lakatos OS"
@@ -25,8 +25,8 @@ all:
 	@echo "  make clean          Clean PlatformIO and .lapp build artifacts"
 	@echo "================================================================"
 
-push: lakatos apps
-	TODO
+push: lakatos
+	$(LAKAT) push build/apps/*.lapp /sd/apps/
 
 lakat:
 	mkdir -p build build/flash build/sd build/net
@@ -60,12 +60,14 @@ build-lakatos: apps
 
 web-installer: build-lakatos
 	rm -rf build/web-installer
-	mkdir -p build/web-installer build/web-installer/apps
+	mkdir -p build/web-installer build/web-installer/apps build/web-installer/fs_root/apps
 	cp web-installer/index.html web-installer/manifest.json web-installer/manifest-os-only.json build/web-installer/
 	cp .pio/build/lakatos/bootloader.bin .pio/build/lakatos/partitions.bin .pio/build/lakatos/firmware.bin build/web-installer/
 	cp $(BOOT_APP0) build/web-installer/boot_app0.bin
 	cp build/apps/*.lapp build/web-installer/apps/
-	$(MKLITTLEFS) -c build/web-installer/apps -b 4096 -p 256 -s 1769472 build/web-installer/littlefs.bin
+	cp build/apps/*.lapp build/web-installer/fs_root/apps/
+	$(MKLITTLEFS) -c build/web-installer/fs_root -b 4096 -p 256 -s 1769472 build/web-installer/littlefs.bin
+	rm -rf build/web-installer/fs_root
 	$(PYTHON) -c 'import json, os; apps = sorted(f for f in os.listdir("build/web-installer/apps") if f.endswith(".lapp")); open("build/web-installer/apps/apps.json", "w").write(json.dumps(apps, indent=2) + "\n")'
 	@echo "WebSerial installer bundle ready in build/web-installer/"
 

@@ -931,15 +931,16 @@ static bool runAirportSelectorModal() {
 }
 
 // ---------------------------------------------------------------------------
-// ABOUT Lakatos Operating System Modal
+// ABOUT Lakatos Operating System Screen
 // ---------------------------------------------------------------------------
-static bool runAboutModal() {
+void runLakatosAboutScreen() {
+  lakatosSetInConfigScreen(true);
   {
     LakatosTftGuard tftLock;
     tft.fillScreen(0x0841);
     tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
 
-    // [ HOME ] (top-left -> goes back to index page)
+    // [ HOME ] (top-left -> goes back to Home page)
     tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
     tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
     tft.setTextDatum(MC_DATUM);
@@ -948,12 +949,6 @@ static bool runAboutModal() {
 
     tft.setTextColor(TFT_WHITE, TFT_NAVY);
     tft.drawString("ABOUT", 160, 12, 2);
-
-    // [ CONFIG ] (top-right -> returns to CONFIG page)
-    tft.fillRoundRect(256, 2, 62, 20, 4, TFT_MAROON);
-    tft.drawRoundRect(256, 2, 62, 20, 4, TFT_WHITE);
-    tft.setTextColor(TFT_WHITE, TFT_MAROON);
-    tft.drawString("CONFIG", 287, 12, 1);
 
     // Main Card
     tft.fillRoundRect(6, 30, 308, 204, 6, 0x1082);
@@ -964,7 +959,7 @@ static bool runAboutModal() {
     tft.drawString("Lakatos Operating System", 160, 38, 2);
 
     tft.setTextColor(TFT_YELLOW, 0x1082);
-    tft.drawString("YAKimono  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
+    tft.drawString("YakFace  |  ESP32-2432S028R (240 MHz)", 160, 58, 1);
 
     tft.drawFastHLine(16, 72, 288, 0x39E7);
 
@@ -992,15 +987,18 @@ static bool runAboutModal() {
   uint32_t lastRel = millis();
   while (true) {
     updateLakatosConfigBackground();
-    if (lakatosShouldExitApp()) return true;
+    if (lakatosShouldExitApp()) {
+      lakatosSetInConfigScreen(false);
+      return;
+    }
     LakatosTouchSample t = lakatosReadTouch();
     uint32_t now = millis();
     if (t.touched) {
       if (!wasDown && (now - lastRel > 100)) {
         wasDown = true;
-        if (t.y <= 25) {
-          if (t.x <= 62) return true;    // HOME -> index page
-          if (t.x >= 252) return false;  // CONFIG -> back to config page
+        if (t.y <= 25 && t.x <= 62) {
+          lakatosSetInConfigScreen(false);
+          return;  // HOME -> back to Home screen
         }
       }
     } else {
@@ -1022,7 +1020,7 @@ static void drawConfigScreen() {
   tft.fillScreen(0x0841);
   tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
 
-  // [ HOME ] (top-left -> goes back to index page)
+  // [ HOME ] (top-left -> goes back to Home page)
   tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
   tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
   tft.setTextDatum(MC_DATUM);
@@ -1031,12 +1029,6 @@ static void drawConfigScreen() {
 
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
   tft.drawString("CONFIG", 160, 12, 2);
-
-  // [ ABOUT ] (top-right -> Lakatos Operating System info)
-  tft.fillRoundRect(258, 2, 60, 20, 4, TFT_PURPLE);
-  tft.drawRoundRect(258, 2, 60, 20, 4, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_PURPLE);
-  tft.drawString("ABOUT", 288, 12, 2);
 
   // Row 1 (y: 28..66): Brightness Slider + [AUTO] toggle
   tft.fillRoundRect(4, 28, 312, 38, 5, 0x1082);
@@ -1191,14 +1183,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
         if (t.y <= 25 && t.x <= 62) {
           lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
           lakatosSetInConfigScreen(false);
-          return;  // HOME -> Exit Config back to YAKimono index page
-        } else if (t.y <= 25 && t.x >= 254) {
-          lakatosDevLogf("Button: CONFIG -> ABOUT (%d,%d)", t.x, t.y);
-          if (runAboutModal()) {
-            lakatosSetInConfigScreen(false);
-            return;
-          }
-          drawConfigScreen();
+          return;  // HOME -> Exit Config back to YakFace Home page
         } else if (t.y <= 25 && t.x >= 90 && t.x <= 230) {
           secretTitleTaps++;
           if (secretTitleTaps >= 8 && !gCanBeDeveloper) {
