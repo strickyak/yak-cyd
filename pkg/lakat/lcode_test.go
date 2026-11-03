@@ -649,11 +649,14 @@ func TestPaintKebabSavePngPal4(t *testing.T) {
 	vm.VfsRoot = tmpDir
 	vm.MaxInstructions = 400000
 
-	// 1. Draw a stroke on the canvas at (100, 80) -> (120, 80)
+	// 1. Draw a stroke on the canvas at (100, 80) -> (120, 80) with default Cyan (swatch 8)
 	// 2. Tap the Kebab [...] button at (9, 228)
-	// 3. Release touch, then tap [SAVE PNG TO /net/paintings] at (160, 120)
-	// 4. Release touch, then tap [RESUME] at (220, 165)
-	// 5. Release touch, then tap top-left corner exit wedge at (5, 5)
+	// 3. Tap [PALETTE] at (160, 165) to open the 16-Color RGB Palette Editor
+	// 4. Drag Red slider to max at (264, 106), turning swatch 8 from Cyan (0,63,31) to White (31,63,31)
+	// 5. Tap [APPLY & BACK] at (220, 200)
+	// 6. Tap [SAVE PNG TO /net/paintings] at (160, 120)
+	// 7. Tap [RESUME] at (250, 165)
+	// 8. Tap top-left corner exit wedge at (5, 5)
 	vm.TouchQueue = []TouchEvent{
 		{Touched: true, X: 100, Y: 80},
 		{Touched: true, X: 110, Y: 80},
@@ -661,9 +664,15 @@ func TestPaintKebabSavePngPal4(t *testing.T) {
 		{Touched: false},
 		{Touched: true, X: 9, Y: 228},
 		{Touched: false},
+		{Touched: true, X: 160, Y: 165},
+		{Touched: false},
+		{Touched: true, X: 264, Y: 106},
+		{Touched: false},
+		{Touched: true, X: 220, Y: 200},
+		{Touched: false},
 		{Touched: true, X: 160, Y: 120},
 		{Touched: false},
-		{Touched: true, X: 220, Y: 165},
+		{Touched: true, X: 250, Y: 165},
 		{Touched: false},
 		{Touched: true, X: 5, Y: 5},
 	}
@@ -688,13 +697,13 @@ func TestPaintKebabSavePngPal4(t *testing.T) {
 	if img.Bounds().Dx() != 300 || img.Bounds().Dy() != 240 {
 		t.Fatalf("expected 300x240 PNG, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
 	}
-	// Verify stroke at canvas (80, 80) (screen x=100 -> canvas x=80, y=80) is Cyan (R=0, G=255, B=255)
+	// Verify stroke at canvas (80, 80) was recolored to White (R=255, G=255, B=255) by the Palette Editor
 	r, g, b, _ := img.At(80, 80).RGBA()
-	if r != 0 || g == 0 || b == 0 {
-		t.Fatalf("expected Cyan pixel at canvas (80,80), got RGBA=(%d,%d,%d)", r>>8, g>>8, b>>8)
+	if r>>8 != 255 || g>>8 != 255 || b>>8 != 255 {
+		t.Fatalf("expected recolored White pixel at canvas (80,80), got RGBA=(%d,%d,%d)", r>>8, g>>8, b>>8)
 	}
-	// Verify canvas pixel on VM screen at (100, 80) was restored after closing modal
-	if vm.Screen[80][100] != 0x07FF {
-		t.Fatalf("expected restored screen pixel (100,80)=0x07FF after modal resume, got 0x%04X", vm.Screen[80][100])
+	// Verify canvas pixel on VM screen at (100, 80) was restored with the new palette color (0xFFFF)
+	if vm.Screen[80][100] != 0xFFFF {
+		t.Fatalf("expected restored screen pixel (100,80)=0xFFFF after modal resume, got 0x%04X", vm.Screen[80][100])
 	}
 }

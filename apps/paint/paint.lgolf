@@ -3,31 +3,33 @@
 // Layout:
 //   - Left 20x240 minimalist toolbar (x = 0..19, y = 0..239):
 //     * Top-left 10x10 exit wedge (y = 0..13)
-//     * 9 color swatches including Black/Eraser (y = 15..176)
-//     * 3 brush size selectors: Fine, Medium, Thick (y = 180..215)
+//     * 2x8 grid of 16 color swatches including Black/Eraser (y = 14..173)
+//     * 3 brush size selectors: Fine, Medium, Thick (y = 176..214)
 //     * Kebab [...] menu control (y = 219..237) -> temporary modal overlay
-//       to name & save PNG to /net/paintings/<name>.png or clear canvas
+//       to name & save PNG to /net/paintings/<name>.png, customize the
+//       16-color palette, or clear the canvas
 //   - Right 300x240 4-bit indexed pixel canvas (x = 20..319, y = 0..239)
 package main
 
 import "wedge"
 
 const (
-	UI_W       = 20
-	CANVAS_X   = 20
-	CANVAS_Y   = 0
-	CANVAS_W   = 300
-	CANVAS_H   = 240
-	ROW_STRIDE = 150 // 300 pixels / 2 pixels per byte
+	UI_W         = 20
+	CANVAS_X     = 20
+	CANVAS_Y     = 0
+	CANVAS_W     = 300
+	CANVAS_H     = 240
+	ROW_STRIDE   = 150 // 300 pixels / 2 pixels per byte
 	CANVAS_BYTES = 36000
 
-	NUM_SWATCHES = 9
-	SWATCH_Y0    = 15
-	SWATCH_H     = 18
+	NUM_SWATCHES = 16
+	SWATCH_ROWS  = 8
+	SWATCH_Y0    = 14
+	SWATCH_ROW_H = 20
 
 	NUM_SIZES = 3
-	SIZE_Y0   = 180
-	SIZE_H    = 12
+	SIZE_Y0   = 176
+	SIZE_H    = 13
 
 	KEBAB_Y0 = 219
 	KEBAB_H  = 19
@@ -37,7 +39,7 @@ const (
 )
 
 var (
-	// 16-entry RGB565 palette (index 0 is BLACK so zeroed canvas is black)
+	// 16-entry RGB565 palette (index 0 is default BLACK so zeroed canvas is black)
 	palette     [16]int
 	swatchToPal [NUM_SWATCHES]int
 	radii       [NUM_SIZES]int
@@ -59,28 +61,39 @@ var (
 	lastToolMs int
 )
 
-func initPalette() {
-	palette[0] = BLACK
-	palette[1] = WHITE
-	palette[2] = RED
-	palette[3] = ORANGE
-	palette[4] = YELLOW
-	palette[5] = GREEN
-	palette[6] = CYAN
-	palette[7] = 0x2AFF // Bright sky/cobalt blue
-	palette[8] = MAGENTA
+func resetDefaultPalette() {
+	palette[0] = 0x0000  // Black (BG / Eraser)
+	palette[1] = 0xFFFF  // White
+	palette[2] = 0xAD55  // Light Grey
+	palette[3] = 0xF800  // Red
+	palette[4] = 0xFD20  // Orange
+	palette[5] = 0xFFE0  // Yellow
+	palette[6] = 0x87E0  // Lime
+	palette[7] = 0x07E0  // Green
+	palette[8] = 0x03E0  // Dark Green
+	palette[9] = 0x07FF  // Cyan
+	palette[10] = 0x2AFF // Sky Blue
+	palette[11] = 0x001F // Royal Blue
+	palette[12] = 0x7817 // Purple
+	palette[13] = 0xF81F // Magenta
+	palette[14] = 0xFE19 // Pink
+	palette[15] = 0x8A22 // Brown
 
-	// Swatches 0..7 map to palette 1..8; Swatch 8 maps to palette 0 (Black/Eraser)
-	for i := 0; i < 8; i++ {
+	// Swatches 0..14 map to palette 1..15; Swatch 15 maps to palette 0 (BG/Eraser)
+	for i := 0; i < 15; i++ {
 		swatchToPal[i] = i + 1
 	}
-	swatchToPal[8] = 0
+	swatchToPal[15] = 0
+}
+
+func initPalette() {
+	resetDefaultPalette()
 
 	radii[0] = 1
 	radii[1] = 3
 	radii[2] = 5
 
-	swatchIdx = 5 // Start with Cyan
+	swatchIdx = 8 // Start with Cyan (palette[9])
 	sizeIdx = 1   // Start with Medium brush (r=3)
 	lastToolMs = -1000
 
@@ -103,31 +116,34 @@ func drawToolbar() {
 	// Top-left 10x10 corner exit wedge
 	DrawExitWedge()
 
-	// 9 Color Swatches (y = 15..176)
+	// 2x8 Grid of 16 Color Swatches (y = 14..173)
 	for i := 0; i < NUM_SWATCHES; i++ {
-		sy := SWATCH_Y0 + i*SWATCH_H
-		col := palette[swatchToPal[i]]
+		row := i / 2
+		col := i & 1
+		sx := 1 + col*9
+		sy := SWATCH_Y0 + row*SWATCH_ROW_H
+		c := palette[swatchToPal[i]]
 
+		tft_fill_rect(sx+1, sy+1, 6, 16, c)
 		if i == swatchIdx {
 			hi := WHITE
-			if col == WHITE || col == YELLOW {
+			if c == WHITE || c == YELLOW {
 				hi = CYAN
 			}
-			tft_draw_rect(0, sy-1, 18, 17, hi)
-			tft_draw_rect(1, sy, 16, 15, hi)
-			tft_fill_rect(2, sy+1, 14, 13, col)
+			tft_draw_rect(sx, sy, 8, 18, hi)
+			tft_draw_fast_hline(sx+1, sy+1, 6, hi)
+			tft_draw_fast_hline(sx+1, sy+16, 6, hi)
 		} else {
-			tft_fill_rect(2, sy+1, 14, 13, col)
-			tft_draw_rect(2, sy+1, 14, 13, 0x4A69)
+			tft_draw_rect(sx, sy, 8, 18, 0x4A69)
 		}
 
-		// Diagonal slash across Black swatch to indicate Eraser
-		if col == BLACK {
-			tft_draw_line(3, sy+12, 14, sy+2, 0x7BEF)
+		// Diagonal slash across Swatch 15 when it is Black to indicate Eraser
+		if i == 15 && c == BLACK {
+			tft_draw_line(sx+1, sy+15, sx+6, sy+2, 0x7BEF)
 		}
 	}
 
-	// 3 Brush Size Buttons (y = 180..215)
+	// 3 Brush Size Buttons (y = 176..214)
 	previewCol := palette[swatchToPal[swatchIdx]]
 	if previewCol == BLACK {
 		previewCol = WHITE
@@ -155,7 +171,7 @@ func drawToolbar() {
 
 func clearCanvas() {
 	memset(&canvas[0], 0, CANVAS_BYTES)
-	tft_fill_rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, BLACK)
+	tft_fill_rect(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, palette[0])
 }
 
 func restoreCanvas() {
@@ -273,6 +289,207 @@ func buildSavePath() int {
 	return pos
 }
 
+func waitRelease() {
+	for {
+		touched, _, _ := os_read_touch()
+		if !touched {
+			return
+		}
+		os_delay_ms(15)
+	}
+}
+
+func drawPaletteControls() {
+	// 2x8 grid of 16 swatches (x = 40..292, y = 42..84)
+	for i := 0; i < NUM_SWATCHES; i++ {
+		row := i / 8
+		col := i % 8
+		bx := 40 + col*32
+		by := 42 + row*22
+		c := palette[swatchToPal[i]]
+		tft_fill_rect(bx+2, by+2, 24, 14, c)
+		if i == swatchIdx {
+			tft_draw_rect(bx, by, 28, 18, WHITE)
+			tft_draw_rect(bx+1, by+1, 26, 16, CYAN)
+		} else {
+			tft_draw_rect(bx, by, 28, 18, 0x1082)
+			tft_draw_rect(bx+1, by+1, 26, 16, 0x4A69)
+		}
+	}
+
+	palIdx := swatchToPal[swatchIdx]
+	curCol := palette[palIdx]
+	r5 := (curCol >> 11) & 0x1F
+	g6 := (curCol >> 5) & 0x3F
+	b5 := curCol & 0x1F
+
+	// Selected color preview box (x = 40..94, y = 94..176)
+	tft_fill_round_rect(40, 94, 54, 82, 4, curCol)
+	tft_draw_round_rect(40, 94, 54, 82, 4, WHITE)
+	tft_fill_rect(44, 156, 46, 16, BLACK)
+	tft_set_text_color(WHITE, BLACK)
+	if palIdx == 0 {
+		tft_draw_string("BG/0", 54, 160, 1)
+	} else {
+		tft_draw_string("COL#", 46, 160, 1)
+		tft_draw_int(swatchIdx+1, 72, 160, 1)
+	}
+
+	// R slider (0..31) at y = 96..118
+	tft_fill_rect(102, 94, 198, 24, 0x1082)
+	tft_set_text_color(RED, 0x1082)
+	tft_draw_string("R", 104, 99, 2)
+	tft_fill_rect(120, 98, 144, 16, BLACK)
+	tft_draw_rect(120, 98, 144, 16, RED)
+	rw := (r5 * 140) / 31
+	if rw > 0 {
+		tft_fill_rect(122, 100, rw, 12, RED)
+	}
+	tft_set_text_color(WHITE, 0x1082)
+	tft_draw_int(r5, 270, 99, 2)
+
+	// G slider (0..63) at y = 124..148
+	tft_fill_rect(102, 124, 198, 24, 0x1082)
+	tft_set_text_color(GREEN, 0x1082)
+	tft_draw_string("G", 104, 129, 2)
+	tft_fill_rect(120, 128, 144, 16, BLACK)
+	tft_draw_rect(120, 128, 144, 16, GREEN)
+	gw := (g6 * 140) / 63
+	if gw > 0 {
+		tft_fill_rect(122, 130, gw, 12, GREEN)
+	}
+	tft_set_text_color(WHITE, 0x1082)
+	tft_draw_int(g6, 270, 129, 2)
+
+	// B slider (0..31) at y = 154..178
+	tft_fill_rect(102, 154, 198, 24, 0x1082)
+	tft_set_text_color(CYAN, 0x1082)
+	tft_draw_string("B", 104, 159, 2)
+	tft_fill_rect(120, 158, 144, 16, BLACK)
+	tft_draw_rect(120, 158, 144, 16, 0x2AFF)
+	bw := (b5 * 140) / 31
+	if bw > 0 {
+		tft_fill_rect(122, 160, bw, 12, 0x2AFF)
+	}
+	tft_set_text_color(WHITE, 0x1082)
+	tft_draw_int(b5, 270, 159, 2)
+}
+
+func drawPaletteModal() {
+	// Card over the 300x240 canvas (x = 30..306, y = 12..226)
+	tft_fill_round_rect(30, 12, 276, 214, 6, 0x1082)
+	tft_draw_round_rect(30, 12, 276, 214, 6, MAGENTA)
+
+	// Header
+	tft_fill_round_rect(32, 14, 272, 24, 4, NAVY)
+	tft_set_text_color(YELLOW, NAVY)
+	tft_draw_string("16-COLOR PALETTE", 42, 18, 2)
+
+	// [DONE] button in header (x = 246..300, y = 16..36)
+	tft_fill_round_rect(246, 16, 54, 20, 4, 0x2945)
+	tft_draw_round_rect(246, 16, 54, 20, 4, CYAN)
+	tft_set_text_color(CYAN, 0x2945)
+	tft_draw_string("DONE", 256, 18, 2)
+
+	drawPaletteControls()
+
+	// Bottom buttons: [RESET 16] (x = 40..162, y = 186..216) & [APPLY & BACK] (x = 172..296, y = 186..216)
+	tft_fill_round_rect(40, 186, 122, 30, 5, 0x4800)
+	tft_draw_round_rect(40, 186, 122, 30, 5, ORANGE)
+	tft_set_text_color(WHITE, 0x4800)
+	tft_draw_string("RESET 16", 66, 193, 2)
+
+	tft_fill_round_rect(172, 186, 124, 30, 5, DARKGREEN)
+	tft_draw_round_rect(172, 186, 124, 30, 5, GREEN)
+	tft_set_text_color(WHITE, DARKGREEN)
+	tft_draw_string("APPLY & BACK", 184, 193, 2)
+}
+
+func clampSliderVal(tx int, maxVal int) int {
+	if tx <= 122 {
+		return 0
+	}
+	if tx >= 262 {
+		return maxVal
+	}
+	return (tx - 122) * maxVal / 140
+}
+
+func runPaletteModal() {
+	drawPaletteModal()
+	waitRelease()
+
+	wasDown := false
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+				return
+			}
+		}
+
+		touched, tx, ty := os_read_touch()
+		if touched {
+			// Continuous slider dragging for R, G, B (tx = 112..276, ty = 94..180)
+			if tx >= 112 && tx <= 276 && ty >= 94 && ty <= 180 {
+				palIdx := swatchToPal[swatchIdx]
+				curCol := palette[palIdx]
+				r5 := (curCol >> 11) & 0x1F
+				g6 := (curCol >> 5) & 0x3F
+				b5 := curCol & 0x1F
+				if ty < 121 {
+					r5 = clampSliderVal(tx, 31)
+				} else if ty < 151 {
+					g6 = clampSliderVal(tx, 63)
+				} else {
+					b5 = clampSliderVal(tx, 31)
+				}
+				newCol := (r5 << 11) | (g6 << 5) | b5
+				if newCol != curCol {
+					palette[palIdx] = newCol
+					drawToolbar()
+					drawPaletteControls()
+				}
+				wasDown = true
+			} else if !wasDown {
+				wasDown = true
+				// [DONE] in header or [APPLY & BACK] at bottom
+				if (ty >= 14 && ty <= 38 && tx >= 244 && tx <= 302) ||
+					(ty >= 186 && ty <= 218 && tx >= 172 && tx <= 296) {
+					waitRelease()
+					restoreCanvas()
+					return
+				}
+
+				// 2x8 swatch selector inside modal (x = 40..296, y = 42..86)
+				if ty >= 42 && ty < 86 && tx >= 40 && tx < 296 {
+					col := (tx - 40) / 32
+					row := (ty - 42) / 22
+					if col >= 0 && col < 8 && row >= 0 && row < 2 {
+						idx := row*8 + col
+						if idx != swatchIdx {
+							swatchIdx = idx
+							drawToolbar()
+							drawPaletteControls()
+						}
+					}
+				} else if ty >= 186 && ty <= 218 && tx >= 40 && tx <= 162 {
+					// [RESET 16]
+					waitRelease()
+					resetDefaultPalette()
+					drawToolbar()
+					drawPaletteControls()
+					wasDown = false
+				}
+			}
+		} else {
+			wasDown = false
+		}
+		os_delay_ms(15)
+	}
+}
+
 func drawKebabModal(statusMsg string, statusCol int) {
 	// Centered card over the 300x240 canvas (x = 34..306, y = 22..218)
 	tft_fill_round_rect(34, 22, 272, 196, 6, 0x1082)
@@ -289,7 +506,7 @@ func drawKebabModal(statusMsg string, statusCol int) {
 	tft_set_text_color(WHITE, 0x2945)
 	tft_draw_string("BACK", 257, 28, 2)
 
-	// Name box + [NAME] button (y = 56..98)
+	// Name box + [RENAME] button (y = 56..98)
 	tft_set_text_color(LIGHTGREY, 0x1082)
 	tft_draw_string("SAVE PATH:", 46, 54, 1)
 
@@ -310,16 +527,21 @@ func drawKebabModal(statusMsg string, statusCol int) {
 	tft_set_text_color(WHITE, DARKGREEN)
 	tft_draw_string("SAVE PNG TO /net/paintings", 68, 113, 2)
 
-	// [ CLEAR CANVAS ] (x = 44..164, y = 148..182) & [ RESUME ] (x = 174..296, y = 148..182)
-	tft_fill_round_rect(44, 148, 120, 34, 5, 0x4800)
-	tft_draw_round_rect(44, 148, 120, 34, 5, RED)
+	// Bottom row (y = 148..182): [CLEAR] (x=44..118), [PALETTE] (x=124..204), [RESUME] (x=210..296)
+	tft_fill_round_rect(44, 148, 74, 34, 5, 0x4800)
+	tft_draw_round_rect(44, 148, 74, 34, 5, RED)
 	tft_set_text_color(WHITE, 0x4800)
-	tft_draw_string("CLEAR CANVAS", 56, 157, 2)
+	tft_draw_string("CLEAR", 59, 157, 2)
 
-	tft_fill_round_rect(174, 148, 122, 34, 5, 0x2945)
-	tft_draw_round_rect(174, 148, 122, 34, 5, CYAN)
+	tft_fill_round_rect(124, 148, 80, 34, 5, 0x380A)
+	tft_draw_round_rect(124, 148, 80, 34, 5, MAGENTA)
+	tft_set_text_color(YELLOW, 0x380A)
+	tft_draw_string("PALETTE", 136, 157, 2)
+
+	tft_fill_round_rect(210, 148, 86, 34, 5, 0x2945)
+	tft_draw_round_rect(210, 148, 86, 34, 5, CYAN)
 	tft_set_text_color(CYAN, 0x2945)
-	tft_draw_string("RESUME", 208, 157, 2)
+	tft_draw_string("RESUME", 226, 157, 2)
 
 	// Status line at bottom of modal (y = 192..210)
 	tft_fill_rect(44, 190, 252, 22, 0x1082)
@@ -327,18 +549,8 @@ func drawKebabModal(statusMsg string, statusCol int) {
 	tft_draw_string(statusMsg, 46, 196, 1)
 }
 
-func waitRelease() {
-	for {
-		touched, _, _ := os_read_touch()
-		if !touched {
-			return
-		}
-		os_delay_ms(15)
-	}
-}
-
 func runKebabModal() {
-	drawKebabModal("Tap RENAME to set filename, or SAVE PNG.", LIGHTGREY)
+	drawKebabModal("Tap RENAME, SAVE PNG, or PALETTE to edit 16 colors.", LIGHTGREY)
 	waitRelease()
 
 	wasDown := false
@@ -355,9 +567,9 @@ func runKebabModal() {
 		if touched {
 			if !wasDown {
 				wasDown = true
-				// [BACK] button (top-right of modal) or [RESUME] button
+				// [BACK] button (top-right of modal) or [RESUME] button (x = 210..296, y = 148..182)
 				if (ty >= 24 && ty <= 48 && tx >= 244 && tx <= 302) ||
-					(ty >= 148 && ty <= 182 && tx >= 174 && tx <= 296) {
+					(ty >= 148 && ty <= 182 && tx >= 210 && tx <= 296) {
 					waitRelease()
 					restoreCanvas()
 					return
@@ -384,8 +596,13 @@ func runKebabModal() {
 					}
 					waitRelease()
 					wasDown = false
-				} else if ty >= 148 && ty <= 182 && tx >= 44 && tx <= 164 {
-					// [ CLEAR CANVAS ]
+				} else if ty >= 148 && ty <= 182 && tx >= 124 && tx <= 204 {
+					// [ PALETTE ] -> 16-Color RGB Palette Editor
+					runPaletteModal()
+					drawKebabModal("Palette updated! Tap RESUME or SAVE PNG.", CYAN)
+					wasDown = false
+				} else if ty >= 148 && ty <= 182 && tx >= 44 && tx <= 118 {
+					// [ CLEAR ]
 					waitRelease()
 					drawToolbar()
 					clearCanvas()
@@ -399,15 +616,20 @@ func runKebabModal() {
 	}
 }
 
-func handleToolbarTap(ty int) {
+func handleToolbarTap(tx int, ty int) {
 	now := os_millis()
 	if now-lastToolMs < 140 {
 		return
 	}
 	lastToolMs = now
 
-	if ty >= SWATCH_Y0 && ty < SWATCH_Y0+NUM_SWATCHES*SWATCH_H {
-		idx := (ty - SWATCH_Y0) / SWATCH_H
+	if ty >= SWATCH_Y0 && ty < SWATCH_Y0+SWATCH_ROWS*SWATCH_ROW_H {
+		row := (ty - SWATCH_Y0) / SWATCH_ROW_H
+		col := 0
+		if tx >= 10 {
+			col = 1
+		}
+		idx := row*2 + col
 		if idx >= 0 && idx < NUM_SWATCHES && idx != swatchIdx {
 			swatchIdx = idx
 			drawToolbar()
@@ -456,7 +678,7 @@ func main() {
 			if tx < CANVAS_X {
 				penDown = false
 				if ty >= 14 {
-					handleToolbarTap(ty)
+					handleToolbarTap(tx, ty)
 				}
 			} else {
 				palIdx := swatchToPal[swatchIdx]
