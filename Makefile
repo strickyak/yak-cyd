@@ -2,7 +2,10 @@ PIO ?= .venv/bin/python -m platformio
 PYTHON ?= python3
 LAKAT ?= ./build/lakat
 
-.PHONY: all push lakatos build-lakatos lakat apps demo1 demo2 build-demo1 build-demo2 monitor clean
+MKLITTLEFS ?= $(HOME)/.platformio/packages/tool-mklittlefs/mklittlefs
+BOOT_APP0 ?= $(HOME)/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin
+
+.PHONY: all push lakatos build-lakatos web-installer lakat apps demo1 demo2 build-demo1 build-demo2 monitor clean
 
 all:
 	@echo "================================================================"
@@ -11,6 +14,7 @@ all:
 	@echo "  make push           Build and push: lakatos & apps"
 	@echo "  make lakatos        Build LCode .lapp apps, compile & upload Lakatos OS"
 	@echo "  make build-lakatos  Build LCode .lapp apps & compile Lakatos OS"
+	@echo "  make web-installer  Build ready-to-host WebSerial installer in build/web-installer/"
 	@echo "  make lakat          Build ./build/lakat (compiler, asm, dis, emulator, uploader, tether)"
 	@echo "  make apps           Compile LCode .lgolf apps into build/apps/*.lapp"
 	@echo "  make demo1          Compile and upload demo1 (src/demo1/) to CYD"
@@ -53,6 +57,17 @@ lakatos: apps
 
 build-lakatos: apps
 	$(PIO) run -e lakatos
+
+web-installer: build-lakatos
+	rm -rf build/web-installer
+	mkdir -p build/web-installer build/web-installer/apps
+	cp web-installer/index.html web-installer/manifest.json web-installer/manifest-os-only.json build/web-installer/
+	cp .pio/build/lakatos/bootloader.bin .pio/build/lakatos/partitions.bin .pio/build/lakatos/firmware.bin build/web-installer/
+	cp $(BOOT_APP0) build/web-installer/boot_app0.bin
+	cp build/apps/*.lapp build/web-installer/apps/
+	$(MKLITTLEFS) -c build/web-installer/apps -b 4096 -p 256 -s 1769472 build/web-installer/littlefs.bin
+	$(PYTHON) -c 'import json, os; apps = sorted(f for f in os.listdir("build/web-installer/apps") if f.endswith(".lapp")); open("build/web-installer/apps/apps.json", "w").write(json.dumps(apps, indent=2) + "\n")'
+	@echo "WebSerial installer bundle ready in build/web-installer/"
 
 demo1:
 	$(PIO) run -e demo1 -t upload

@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lakatos OS — CYD WebSerial Installer</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #131c33;
+      --border: #263866;
+      --cyan: #00e5ff;
+      --yellow: #ffe033;
+      --green: #00e676;
+      --text: #e8eefc;
+      --muted: #9bb0d8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px 16px 64px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 780px;
+      margin: 0 auto;
+    }
+    header {
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.9rem;
+      color: var(--yellow);
+      letter-spacing: 0.4px;
+    }
+    .subtitle {
+      color: var(--cyan);
+      font-size: 1rem;
+      margin: 0;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 {
+      margin-top: 0;
+      font-size: 1.25rem;
+      color: var(--cyan);
+    }
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      margin-top: 14px;
+    }
+    .install-btn {
+      background: var(--green);
+      color: #04120a;
+      font-weight: 700;
+      font-size: 1rem;
+      border: none;
+      border-radius: 6px;
+      padding: 12px 22px;
+      cursor: pointer;
+      transition: filter 0.15s;
+    }
+    .install-btn:hover { filter: brightness(1.1); }
+    .install-btn.secondary {
+      background: #1d3566;
+      color: var(--cyan);
+      border: 1px solid var(--cyan);
+    }
+    .install-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    ol, ul {
+      padding-left: 22px;
+      margin: 8px 0;
+    }
+    li { margin-bottom: 6px; }
+    code {
+      background: #080d1a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--yellow);
+      font-size: 0.92em;
+    }
+    #fuse-log {
+      margin-top: 14px;
+      background: #070b16;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      color: #b7f7d4;
+      max-height: 240px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .badge {
+      display: inline-block;
+      background: #1c2c52;
+      color: var(--yellow);
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    .note {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Lakatos OS — WebSerial Installer</h1>
+      <p class="subtitle">Zero-install browser flasher for ESP32-2432S028R ("Cheap Yellow Display" / CYD)</p>
+    </header>
+
+    <div class="card">
+      <h2>Before You Begin</h2>
+      <ol>
+        <li>Open this page in <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> on Windows, macOS, or Linux.</li>
+        <li>Plug your CYD board into your computer with a <strong>data-capable USB cable</strong>.</li>
+        <li>Click one of the install buttons below and select the USB serial port (typically <code>USB Serial</code>, <code>CH340</code>, <code>CP2102</code>, <code>ttyUSB0</code>, or <code>cu.usbserial-*</code>).</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>Option 1: Fresh Install (Lakatos OS + All 16 Built-in Apps) <span class="badge">RECOMMENDED FOR NEW CYD</span></h2>
+      <p>Flashes the bootloader, partition table, Lakatos OS firmware, and pre-loads the <code>/flash</code> LittleFS partition with all 16 compiled <code>.lapp</code> applications (Paint, NOAA Weather, Gallery, Conway's Life, Breakout, Space Invaders, Galaga, Defender, Tetris, Mandelbrot, Rubik's Cube, 15-Puzzle, Bouncing Ball, Ising Spin, Dendrite DLA, Pix-2).</p>
+      <div class="btn-row">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate" class="install-btn">Install Lakatos OS + 16 Apps</button>
+          <span slot="unsupported">Your browser does not support WebSerial. Please use Chrome or Edge.</span>
+          <span slot="not-allowed">WebSerial requires HTTPS or localhost.</span>
+        </esp-web-install-button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Option 2: Upgrade Lakatos OS Firmware Only <span class="badge">KEEPS /flash CONFIG</span></h2>
+      <p>Updates the Lakatos OS kernel at <code>0x10000</code> without touching your existing <code>/flash</code> filesystem, preserving your Wi-Fi configuration (<code>/flash/config.ini</code>) and files.</p>
+      <div class="btn-row">
+        <esp-web-install-button manifest="manifest-os-only.json">
+          <button slot="activate" class="install-btn secondary">Upgrade OS Firmware Only</button>
+        </esp-web-install-button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Option 3: Push / Refresh 16 <code>.lapp</code> Apps via Serial VFS</h2>
+      <p>Already running Lakatos OS and want to push or update the 16 <code>.lapp</code> apps onto <code>/flash</code> or <code>/sd</code> without reflashing the OS or losing <code>/flash/config.ini</code>?</p>
+      <div class="btn-row">
+        <button id="btn-push-flash" class="install-btn secondary" onclick="pushAllApps('/flash')">Push 16 Apps to /flash</button>
+        <button id="btn-push-sd" class="install-btn secondary" onclick="pushAllApps('/sd')">Push 16 Apps to /sd</button>
+      </div>
+      <div id="fuse-log"></div>
+      <p class="note">Uses Lakatos OS's built-in <code>@FUSE</code> serial RPC protocol at 115200 baud.</p>
+    </div>
+  </div>
+
+  <script>
+    function toBase64(u8) {
+      let bin = "";
+      for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+      return btoa(bin);
+    }
+
+    async function pushAllApps(targetDir) {
+      const logEl = document.getElementById("fuse-log");
+      const btnFlash = document.getElementById("btn-push-flash");
+      const btnSd = document.getElementById("btn-push-sd");
+      logEl.style.display = "block";
+      logEl.textContent = "";
+      const log = (msg) => {
+        logEl.textContent += msg + "\n";
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      if (!("serial" in navigator)) {
+        log("ERROR: WebSerial is not supported in this browser. Use Chrome or Edge.");
+        return;
+      }
+
+      let port;
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+      } catch (e) {
+        log("Serial open cancelled or failed: " + e.message);
+        return;
+      }
+
+      btnFlash.disabled = true;
+      btnSd.disabled = true;
+
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const writer = port.writable.getWriter();
+      const reader = port.readable.getReader();
+
+      let rxBuf = "";
+      let waitSeq = "";
+      let waitResolve = null;
+
+      const readLoop = (async () => {
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            rxBuf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = rxBuf.indexOf("\n")) !== -1) {
+              const line = rxBuf.slice(0, nl).replace(/\r$/, "");
+              rxBuf = rxBuf.slice(nl + 1);
+              if (line.startsWith("@@FUSE ")) {
+                const parts = line.slice(7).trim().split(" ");
+                if (parts.length >= 2 && parts[0] === waitSeq && waitResolve) {
+                  const res = waitResolve;
+                  waitSeq = "";
+                  waitResolve = null;
+                  res({ ok: parts[1] === "OK", raw: line });
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      })();
+
+      let seqNum = 100;
+      async function callFuse(cmd, timeoutMs = 6000) {
+        seqNum++;
+        const seq = String(seqNum);
+        const p = new Promise((resolve, reject) => {
+          waitSeq = seq;
+          const timer = setTimeout(() => {
+            if (waitSeq === seq) {
+              waitSeq = "";
+              waitResolve = null;
+              reject(new Error("Timeout waiting for @@FUSE reply (" + cmd.split(" ")[0] + ")"));
+            }
+          }, timeoutMs);
+          waitResolve = (rep) => {
+            clearTimeout(timer);
+            resolve(rep);
+          };
+        });
+        await writer.write(encoder.encode("\n@FUSE " + seq + " " + cmd + "\n"));
+        return p;
+      }
+
+      try {
+        const resp = await fetch("apps/apps.json");
+        if (!resp.ok) throw new Error("Could not load apps/apps.json");
+        const appFiles = await resp.json();
+
+        log("Waiting for Lakatos OS VFS on " + targetDir + " ...");
+        let ready = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const rep = await callFuse("LS " + targetDir, 2000);
+            if (rep.ok) { ready = true; break; }
+          } catch (_) {}
+        }
+        if (!ready) {
+          throw new Error("No response from Lakatos OS @FUSE on " + targetDir + " (is Lakatos OS running?)");
+        }
+
+        const chunkSize = 512;
+        for (let i = 0; i < appFiles.length; i++) {
+          const name = appFiles[i];
+          const appResp = await fetch("apps/" + name);
+          if (!appResp.ok) throw new Error("Failed to fetch apps/" + name);
+          const bytes = new Uint8Array(await appResp.arrayBuffer());
+          const destPath = targetDir + "/" + name;
+          log(`[${i + 1}/${appFiles.length}] Pushing ${destPath} (${bytes.length} bytes)...`);
+
+          for (let off = 0; off < bytes.length; off += chunkSize) {
+            const slice = bytes.subarray(off, Math.min(off + chunkSize, bytes.length));
+            const mode = off === 0 ? "W" : "A";
+            const rep = await callFuse(`WRITE ${destPath} ${mode} ${off} ${toBase64(slice)}`, 8000);
+            if (!rep.ok) throw new Error(`WRITE failed for ${destPath}: ${rep.raw}`);
+          }
+          const cRep = await callFuse(`COMMIT ${destPath}`, 8000);
+          if (!cRep.ok) throw new Error(`COMMIT failed for ${destPath}: ${cRep.raw}`);
+        }
+
+        log("SUCCESS! All " + appFiles.length + " apps pushed to " + targetDir + ".");
+      } catch (err) {
+        log("ERROR: " + err.message);
+      } finally {
+        try { await reader.cancel(); } catch (_) {}
+        try { writer.releaseLock(); } catch (_) {}
+        try { reader.releaseLock(); } catch (_) {}
+        try { await port.close(); } catch (_) {}
+        btnFlash.disabled = false;
+        btnSd.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
