@@ -1,14 +1,24 @@
 #include "lakatos_state.h"
 
+#include <driver/ledc.h>
 #include <esp_heap_caps.h>
 #include <esp_heap_caps_init.h>
+#include <esp_intr_alloc.h>
 #include <esp_partition.h>
+#include <esp_timer.h>
 #include <mbedtls/sha256.h>
 #include <setjmp.h>
+#include <soc/interrupts.h>
+#include <soc/ledc_struct.h>
+#include <soc/timer_group_struct.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern "C" {
+#include <miniz.h>
+}
 
 #include "esp32/rom/cache.h"
 #include "esp_private/cache_utils.h"
@@ -121,9 +131,10 @@ static void* api_calloc(size_t nmemb, size_t size) {
 
 static void* api_realloc(void* ptr, size_t size) {
   if (!ptr) return api_malloc(size);
+  uintptr_t oldAddr = (uintptr_t)ptr;
   void* p = realloc(ptr, size);
   if (p) {
-    forgetAlloc(ptr);
+    forgetAlloc((void*)oldAddr);
     recordAlloc(p);
   }
   return p;
@@ -249,6 +260,451 @@ static size_t api_serial_write(const void* buf, size_t len) {
   return Serial.write((const uint8_t*)buf, len);
 }
 
+// ---------------------------------------------------------------------------
+// Core 0 4-Channel Audio Synthesizer & Sample Mixer (15,625 Hz on GPIO 26)
+// ---------------------------------------------------------------------------
+struct LakatosVoiceState {
+  const int8_t* pcm;
+  uint32_t      len;
+  uint32_t      loopStart;
+  uint32_t      loopLen;
+  uint32_t      posFp16;
+  uint32_t      stepFp16;
+  uint8_t       vol;
+  uint8_t       waveType;
+  bool          active;
+};
+
+static DRAM_ATTR uint8_t           gAudioRing[512];
+static DRAM_ATTR volatile uint32_t gAudioRingRead       = 0;
+static DRAM_ATTR volatile uint32_t gAudioRingWrite      = 0;
+static DRAM_ATTR volatile bool     gAudioHwTimerStarted = false;
+static intr_handle_t               gAudioIsrHandle      = nullptr;
+static esp_timer_handle_t          gAudioMixerTimer     = nullptr;
+static volatile bool               gAudioActive         = false;
+
+static LakatosVoiceState           gVoices[4];
+static lakatos_audio_tick_cb_t     gAudioTickCb         = nullptr;
+static void*                       gAudioTickUser       = nullptr;
+static uint32_t                    gTickPeriodSamples   = 0;
+static uint32_t                    gSamplesUntilTick    = 0;
+static uint32_t                    gNoiseLfsr           = 0xACE1u;
+
+// Quarter-wave 64-entry sine table (0..127) for compact built-in LAKATOS_WAVE_SINE
+static const uint8_t kQuarterSine[64] = {
+      0,   3,   6,   9,  12,  16,  19,  22,  25,  28,  31,  34,  37,  40,  43,  46,
+     49,  51,  54,  57,  60,  63,  65,  68,  71,  73,  76,  78,  81,  83,  85,  88,
+     90,  92,  94,  96,  98, 100, 102, 104, 106, 107, 109, 111, 112, 113, 115, 116,
+    117, 118, 120, 121, 122, 122, 123, 124, 125, 125, 126, 126, 126, 127, 127, 127
+};
+
+static inline int8_t evalBuiltinWave(uint8_t waveType, uint8_t phase8) {
+  switch (waveType) {
+    case LAKATOS_WAVE_SINE: {
+      uint8_t q = phase8 & 0x3Fu;
+      uint8_t mag = (phase8 & 0x40u) ? kQuarterSine[63u - q] : kQuarterSine[q];
+      return (phase8 & 0x80u) ? (int8_t)(-(int)mag) : (int8_t)mag;
+    }
+    case LAKATOS_WAVE_RAMP:
+      return (int8_t)(phase8 - 128);
+    case LAKATOS_WAVE_SQUARE:
+      return (phase8 & 0x80u) ? 127 : -127;
+    case LAKATOS_WAVE_TRIANGLE: {
+      uint8_t tri = (phase8 & 0x80u) ? (uint8_t)((255u - phase8) << 1) : (uint8_t)(phase8 << 1);
+      return (int8_t)(tri - 128);
+    }
+    case LAKATOS_WAVE_NOISE: {
+      gNoiseLfsr = (gNoiseLfsr >> 1) ^ (-(int32_t)(gNoiseLfsr & 1u) & 0xB400u);
+      return (int8_t)(gNoiseLfsr & 0xFFu);
+    }
+    default:
+      return 0;
+  }
+}
+
+static void IRAM_ATTR audioSampleIsr(void* arg) {
+  (void)arg;
+  TIMERG0.int_clr_timers.t1_int_clr = 1;
+  TIMERG0.hw_timer[1].config.tx_alarm_en = 1;
+
+  uint32_t r = gAudioRingRead;
+  uint8_t duty = 0;
+  if (r != gAudioRingWrite) {
+    duty = gAudioRing[r & 511u];
+    gAudioRingRead = r + 1u;
+  }
+  LEDC.channel_group[0].channel[7].duty.val = (uint32_t)duty << 4;
+  LEDC.channel_group[0].channel[7].conf0.sig_out_en = (duty > 0) ? 1 : 0;
+  LEDC.channel_group[0].channel[7].conf1.duty_start = 1;
+}
+
+static void audioMixerTimerCb(void* arg) {
+  (void)arg;
+  if (!gAudioActive) return;
+
+  if (!gAudioHwTimerStarted) {
+    TIMERG0.hw_timer[1].config.tx_en = 0;
+    TIMERG0.hw_timer[1].config.tx_divider = 2;       // 80 MHz / 2 = 40 MHz
+    TIMERG0.hw_timer[1].config.tx_increase = 1;
+    TIMERG0.hw_timer[1].config.tx_autoreload = 1;
+    TIMERG0.hw_timer[1].config.tx_level_int_en = 1;
+    TIMERG0.hw_timer[1].config.tx_edge_int_en = 0;
+    TIMERG0.hw_timer[1].loadlo.tx_load_lo = 0;
+    TIMERG0.hw_timer[1].loadhi.tx_load_hi = 0;
+    TIMERG0.hw_timer[1].load.tx_load = 1;
+    TIMERG0.hw_timer[1].alarmlo.tx_alarm_lo = 2560;  // 2560 / 40 MHz = 64.0 us (15,625 Hz)
+    TIMERG0.hw_timer[1].alarmhi.tx_alarm_hi = 0;
+    TIMERG0.int_clr_timers.t1_int_clr = 1;
+    TIMERG0.int_ena_timers.t1_int_ena = 1;
+    if (!gAudioIsrHandle) {
+      esp_intr_alloc(ETS_TG0_T1_LEVEL_INTR_SOURCE, ESP_INTR_FLAG_IRAM,
+                     audioSampleIsr, nullptr, &gAudioIsrHandle);
+    }
+    TIMERG0.hw_timer[1].config.tx_alarm_en = 1;
+    TIMERG0.hw_timer[1].config.tx_en = 1;
+    gAudioHwTimerStarted = true;
+  }
+
+  uint32_t w = gAudioRingWrite;
+  while ((uint32_t)(w - gAudioRingRead) < 256u) {
+    if (gAudioTickCb != nullptr && gTickPeriodSamples > 0) {
+      if (gSamplesUntilTick == 0) {
+        gSamplesUntilTick = gTickPeriodSamples;
+        gAudioTickCb(gAudioTickUser);
+      }
+      gSamplesUntilTick--;
+    }
+
+    int32_t mix = 0;
+    bool anyActive = false;
+    for (int c = 0; c < 4; c++) {
+      LakatosVoiceState& v = gVoices[c];
+      if (!v.active || v.len == 0 || v.stepFp16 == 0) continue;
+
+      uint32_t idx = v.posFp16 >> 16;
+      if (idx >= v.len) {
+        if (v.loopLen > 2 && v.loopStart < v.len) {
+          uint32_t lEnd = v.loopStart + v.loopLen;
+          if (lEnd > v.len) lEnd = v.len;
+          uint32_t lSpan = lEnd - v.loopStart;
+          if (lSpan > 0) {
+            uint32_t lStartFp = v.loopStart << 16;
+            uint32_t lSpanFp  = lSpan << 16;
+            v.posFp16 = lStartFp + ((v.posFp16 - lStartFp) % lSpanFp);
+            idx = v.posFp16 >> 16;
+          } else {
+            v.active = false;
+            continue;
+          }
+        } else {
+          v.active = false;
+          continue;
+        }
+      }
+
+      if (v.vol > 0) {
+        int8_t s = (v.pcm != nullptr) ? v.pcm[idx] : evalBuiltinWave(v.waveType, (uint8_t)(idx & 0xFFu));
+        mix += (int32_t)s * (int32_t)v.vol;
+        anyActive = true;
+      }
+
+      v.posFp16 += v.stepFp16;
+      if ((v.posFp16 >> 16) >= v.len) {
+        if (v.loopLen > 2 && v.loopStart < v.len) {
+          uint32_t lEnd = v.loopStart + v.loopLen;
+          if (lEnd > v.len) lEnd = v.len;
+          uint32_t lSpan = lEnd - v.loopStart;
+          if (lSpan > 0) {
+            v.posFp16 -= (lSpan << 16);
+          } else {
+            v.active = false;
+          }
+        } else {
+          v.active = false;
+        }
+      }
+    }
+
+    uint8_t outByte = 0;
+    if (anyActive) {
+      int32_t out = (mix >> 7) + 128;
+      if (out < 1) out = 1;
+      else if (out > 255) out = 255;
+      outByte = (uint8_t)out;
+    }
+    gAudioRing[w & 511u] = outByte;
+    w++;
+    gAudioRingWrite = w;
+  }
+}
+
+static void api_audio_stop(void) {
+  gAudioActive = false;
+  gAudioTickCb = nullptr;
+  gAudioTickUser = nullptr;
+  gTickPeriodSamples = 0;
+  gSamplesUntilTick = 0;
+
+  if (gAudioMixerTimer) {
+    esp_timer_stop(gAudioMixerTimer);
+  }
+  if (gAudioHwTimerStarted) {
+    TIMERG0.hw_timer[1].config.tx_alarm_en = 0;
+    TIMERG0.hw_timer[1].config.tx_en = 0;
+    TIMERG0.int_ena_timers.t1_int_ena = 0;
+    TIMERG0.int_clr_timers.t1_int_clr = 1;
+    gAudioHwTimerStarted = false;
+  }
+  memset(gVoices, 0, sizeof(gVoices));
+  memset(gAudioRing, 0, sizeof(gAudioRing));
+  gAudioRingRead = 0;
+  gAudioRingWrite = 0;
+
+  LEDC.channel_group[0].channel[7].duty.val = 0;
+  LEDC.channel_group[0].channel[7].conf0.sig_out_en = 0;
+  LEDC.channel_group[0].channel[7].conf1.duty_start = 1;
+  lakatosSetRgbLed(false, false, false, 0);
+}
+
+static void api_audio_start(void) {
+  api_audio_stop();
+
+  // Route GPIO 26 pad mux to digital IO_MUX (clear RTC_IO_PDAC2_MUX_SEL)
+  *(volatile uint32_t*)0x3FF48488u = (2u << 30);
+
+  ledc_timer_config_t timer_cfg = {};
+  timer_cfg.speed_mode      = LEDC_HIGH_SPEED_MODE;
+  timer_cfg.duty_resolution = LEDC_TIMER_8_BIT;
+  timer_cfg.timer_num       = LEDC_TIMER_3;
+  timer_cfg.freq_hz         = 31250; // 31.25 kHz carrier (2x 15.625 kHz sample rate)
+  timer_cfg.clk_cfg         = LEDC_AUTO_CLK;
+  ledc_timer_config(&timer_cfg);
+
+  ledc_channel_config_t ch_cfg = {};
+  ch_cfg.gpio_num   = 26;
+  ch_cfg.speed_mode = LEDC_HIGH_SPEED_MODE;
+  ch_cfg.channel    = LEDC_CHANNEL_7;
+  ch_cfg.intr_type  = LEDC_INTR_DISABLE;
+  ch_cfg.timer_sel  = LEDC_TIMER_3;
+  ch_cfg.duty       = 0;
+  ch_cfg.hpoint     = 0;
+  ledc_channel_config(&ch_cfg);
+
+  // Set maximum 40 mA CMOS push-pull drive strength on GPIO 26
+  *(volatile uint32_t*)0x3FF49028u |= (3u << 10);
+  // Enable SC8002B amplifier (active-low on GPIO 4) and cancel any pending LED auto-off timer
+  lakatosSetRgbLed(true, false, false, 0);
+
+  if (!gAudioMixerTimer) {
+    esp_timer_create_args_t targs = {};
+    targs.callback        = audioMixerTimerCb;
+    targs.arg             = nullptr;
+    targs.dispatch_method = ESP_TIMER_TASK;
+    targs.name            = "lak_audio";
+    esp_timer_create(&targs, &gAudioMixerTimer);
+  }
+
+  gAudioActive = true;
+  if (gAudioMixerTimer) {
+    esp_timer_start_periodic(gAudioMixerTimer, 4000); // Wake every 4 ms on Core 0
+  }
+}
+
+static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
+                                uint32_t loop_start, uint32_t loop_len,
+                                uint32_t step_fp16, uint8_t vol, bool reset_pos) {
+  if (ch < 0 || ch >= 4) return;
+  if (vol > 64) vol = 64;
+  LakatosVoiceState& v = gVoices[ch];
+  if (pcm == nullptr) {
+    if (len == LAKATOS_WAVE_NONE || step_fp16 == 0 || vol == 0) {
+      v.active = false;
+      v.vol = 0;
+      return;
+    }
+    v.pcm       = nullptr;
+    v.waveType  = (uint8_t)len;
+    v.len       = 256u;
+    v.loopStart = 0u;
+    v.loopLen   = 256u;
+    v.stepFp16  = step_fp16;
+    v.vol       = vol;
+    if (reset_pos) v.posFp16 = 0u;
+    v.active    = true;
+  } else {
+    if (len == 0) {
+      v.active = false;
+      v.vol = 0;
+      return;
+    }
+    v.pcm       = pcm;
+    v.waveType  = LAKATOS_WAVE_NONE;
+    v.len       = len;
+    v.loopStart = loop_start;
+    v.loopLen   = loop_len;
+    v.stepFp16  = step_fp16;
+    v.vol       = vol;
+    if (reset_pos) {
+      v.posFp16 = 0u;
+      v.active  = true;
+    }
+  }
+}
+
+static void api_audio_set_tick_cb(lakatos_audio_tick_cb_t cb, void* user, uint32_t tick_samples) {
+  gAudioTickUser     = user;
+  gTickPeriodSamples = tick_samples;
+  if (gSamplesUntilTick > tick_samples) {
+    gSamplesUntilTick = tick_samples;
+  }
+  gAudioTickCb       = cb;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming VFS Reader with Transparent .zip (Store / Deflate) Decompression
+// ---------------------------------------------------------------------------
+static int32_t api_fs_read_stream(const char* path, lakatos_stream_cb_t on_chunk, void* user) {
+  if (!path || !on_chunk) return -1;
+  LakatosVfsStream* s = lakatosFsOpenRead(path);
+  if (!s) return -1;
+
+  uint8_t hdr[30];
+  int32_t gotHdr = lakatosFsStreamRead(s, hdr, 4);
+  if (gotHdr <= 0) {
+    lakatosFsClose(s);
+    return (gotHdr == 0) ? 0 : -1;
+  }
+
+  // Case 1: Plain uncompressed file (does not begin with ZIP "PK\x03\x04")
+  if (gotHdr < 4 || hdr[0] != 0x50 || hdr[1] != 0x4B || hdr[2] != 0x03 || hdr[3] != 0x04) {
+    int32_t totalOut = gotHdr;
+    if (!on_chunk(hdr, (size_t)gotHdr, user)) {
+      lakatosFsClose(s);
+      return totalOut;
+    }
+    uint8_t* buf = (uint8_t*)malloc(2048);
+    if (!buf) {
+      lakatosFsClose(s);
+      return -1;
+    }
+    for (;;) {
+      int32_t n = lakatosFsStreamRead(s, buf, 2048);
+      if (n <= 0) break;
+      totalOut += n;
+      if (!on_chunk(buf, (size_t)n, user)) break;
+    }
+    free(buf);
+    lakatosFsClose(s);
+    return totalOut;
+  }
+
+  // Case 2: ZIP Archive Local File Header ("PK\x03\x04")
+  int32_t remHdr = lakatosFsStreamRead(s, hdr + 4, 26);
+  if (remHdr != 26) {
+    lakatosFsClose(s);
+    return -1;
+  }
+  uint16_t method   = (uint16_t)(hdr[8]  | (hdr[9] << 8));
+  uint32_t uncompSz = (uint32_t)hdr[22] | ((uint32_t)hdr[23] << 8) |
+                      ((uint32_t)hdr[24] << 16) | ((uint32_t)hdr[25] << 24);
+  uint16_t fnLen    = (uint16_t)(hdr[26] | (hdr[27] << 8));
+  uint16_t extLen   = (uint16_t)(hdr[28] | (hdr[29] << 8));
+
+  if (!lakatosFsStreamSkip(s, (size_t)fnLen + (size_t)extLen)) {
+    lakatosFsClose(s);
+    return -1;
+  }
+
+  if (method == 0) {
+    // Stored uncompressed inside .zip
+    uint8_t* buf = (uint8_t*)malloc(2048);
+    if (!buf) {
+      lakatosFsClose(s);
+      return -1;
+    }
+    int32_t totalOut = 0;
+    while (uncompSz == 0 || (uint32_t)totalOut < uncompSz) {
+      size_t ask = 2048;
+      if (uncompSz > 0 && uncompSz - (uint32_t)totalOut < ask) {
+        ask = uncompSz - (uint32_t)totalOut;
+      }
+      int32_t n = lakatosFsStreamRead(s, buf, ask);
+      if (n <= 0) break;
+      totalOut += n;
+      if (!on_chunk(buf, (size_t)n, user)) break;
+    }
+    free(buf);
+    lakatosFsClose(s);
+    return totalOut;
+  }
+
+  if (method != 8) {
+    lakatosFsClose(s);
+    return -1;
+  }
+
+  // Method 8: Raw Deflate stream via ESP32 ROM tinfl_decompress
+  bool useScratch = (gLakatosPngScratch != nullptr) &&
+                    (gLakatosPngScratchSize >= sizeof(tinfl_decompressor));
+  tinfl_decompressor* decomp = useScratch
+                                   ? (tinfl_decompressor*)gLakatosPngScratch
+                                   : (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
+  uint8_t* dict  = (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
+  uint8_t* inBuf = (uint8_t*)malloc(2048);
+  if (!decomp || !dict || !inBuf) {
+    if (!useScratch && decomp) free(decomp);
+    if (dict) free(dict);
+    if (inBuf) free(inBuf);
+    lakatosFsClose(s);
+    return -1;
+  }
+
+  tinfl_init(decomp);
+  size_t dictOfs = 0;
+  int32_t totalOut = 0;
+  bool done = false;
+
+  while (!done) {
+    int32_t gotIn = lakatosFsStreamRead(s, inBuf, 2048);
+    bool hasMoreIn = (gotIn > 0);
+    size_t inPos = 0;
+    size_t availIn = (gotIn > 0) ? (size_t)gotIn : 0;
+
+    for (;;) {
+      size_t inBytes  = availIn - inPos;
+      size_t outBytes = TINFL_LZ_DICT_SIZE - dictOfs;
+      uint32_t flags  = hasMoreIn ? TINFL_FLAG_HAS_MORE_INPUT : 0;
+      tinfl_status status = tinfl_decompress(
+          decomp, inBuf + inPos, &inBytes,
+          dict, dict + dictOfs, &outBytes, flags);
+      inPos += inBytes;
+
+      if (outBytes > 0) {
+        totalOut += (int32_t)outBytes;
+        if (!on_chunk(dict + dictOfs, outBytes, user)) {
+          done = true;
+          break;
+        }
+        dictOfs = (dictOfs + outBytes) & (TINFL_LZ_DICT_SIZE - 1);
+      }
+      if (status == TINFL_STATUS_DONE || status < 0) {
+        done = true;
+        break;
+      }
+      if (inPos >= availIn && status != TINFL_STATUS_HAS_MORE_OUTPUT) {
+        break;
+      }
+    }
+    if (!hasMoreIn) break;
+  }
+
+  free(inBuf);
+  free(dict);
+  if (!useScratch) free(decomp);
+  lakatosFsClose(s);
+  return totalOut;
+}
+
 static const LakatosApi gLakatosApi = {
     .api_version          = LAKATOS_API_VERSION,
     .struct_size          = sizeof(LakatosApi),
@@ -307,6 +763,11 @@ static const LakatosApi gLakatosApi = {
     .vsnprintf            = vsnprintf,
     .city_hash32          = lakatosCityHash32,
     .fetch_with_cache     = lakatosHttpGetCached,
+    .audio_start          = api_audio_start,
+    .audio_stop           = api_audio_stop,
+    .audio_set_voice      = api_audio_set_voice,
+    .audio_set_tick_cb    = api_audio_set_tick_cb,
+    .fs_read_stream       = api_fs_read_stream,
 };
 
 // ---------------------------------------------------------------------------
@@ -627,6 +1088,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   }
 
   gAppRunning = false;
+  api_audio_stop();
   pinMode(26, OUTPUT);
   digitalWrite(26, LOW);
   lakatosPrefetchFree();

@@ -61,6 +61,18 @@ extern "C" {
 #define LAKATOS_BC_DATUM    7  // Bottom centre
 #define LAKATOS_BR_DATUM    8  // Bottom right
 
+// Built-in waveform IDs for audio_set_voice(..., pcm = NULL, len = LAKATOS_WAVE_*, ...)
+#define LAKATOS_AUDIO_RATE      15625u
+#define LAKATOS_WAVE_NONE       0u
+#define LAKATOS_WAVE_SINE       1u
+#define LAKATOS_WAVE_RAMP       2u
+#define LAKATOS_WAVE_SQUARE     3u
+#define LAKATOS_WAVE_TRIANGLE   4u
+#define LAKATOS_WAVE_NOISE      5u
+
+typedef void (*lakatos_audio_tick_cb_t)(void* user);
+typedef bool (*lakatos_stream_cb_t)(const uint8_t* data, size_t len, void* user);
+
 // ---------------------------------------------------------------------------
 // 128-Byte .lapp Application Header (located at offset 0 of .lapp file,
 // mapped at LAKATOS_APP_DROM_BASE = 0x3F700000)
@@ -194,6 +206,17 @@ typedef struct LakatosApi {
   int      (*vsnprintf)(char* buf, size_t size, const char* fmt, va_list ap);
   uint32_t (*city_hash32)(const void* buf, size_t len);
   int      (*fetch_with_cache)(const char* url, void* buf, size_t max_len, uint32_t max_age_sec);
+
+  // --- 4-Channel Core 0 Audio Synthesizer & Sample Mixer (15,625 Hz) ---
+  void     (*audio_start)(void);
+  void     (*audio_stop)(void);
+  void     (*audio_set_voice)(int ch, const int8_t* pcm, uint32_t len,
+                              uint32_t loop_start, uint32_t loop_len,
+                              uint32_t step_fp16, uint8_t vol, bool reset_pos);
+  void     (*audio_set_tick_cb)(lakatos_audio_tick_cb_t cb, void* user, uint32_t tick_samples);
+
+  // --- Streaming VFS Reader with Transparent .zip Extraction ---
+  int32_t  (*fs_read_stream)(const char* path, lakatos_stream_cb_t on_chunk, void* user);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);
