@@ -292,11 +292,13 @@ static void triggerRowChannel(int c, const uint8_t* cell) {
     ch.instIdx   = instNum;
     ch.vol       = (int8_t)inst.vol;
     ch.finetune  = inst.finetune;
-    ch.decShift  = inst.decShift;
-    ch.pcm       = inst.pcm;
-    ch.len       = inst.storedLen;
-    ch.loopStart = inst.storedLoopStart;
-    ch.loopLen   = inst.storedLoopLen;
+    if (rawPeriod > 0 || ch.pcm == nullptr) {
+      ch.decShift  = inst.decShift;
+      ch.pcm       = inst.pcm;
+      ch.len       = inst.storedLen;
+      ch.loopStart = inst.storedLoopStart;
+      ch.loopLen   = inst.storedLoopLen;
+    }
   }
 
   int noteIdx = -1;
@@ -632,6 +634,7 @@ static void freeCurrentSongResources() {
   for (int c = 0; c < 4; c++) {
     gState.os->audio_set_voice(c, nullptr, 0, 0, 0, 0, 0, true);
   }
+  gState.os->delay_ms(3);
   for (int i = 1; i <= 31; i++) {
     if (gState.insts[i].pcm) {
       gState.os->free(gState.insts[i].pcm);
@@ -1278,7 +1281,7 @@ static void drawFullScreen() {
 extern "C" void app_main(const LakatosApi* os) {
   memset(&gState, 0, sizeof(gState));
   gState.os                 = os;
-  gState.masterVolIdx       = 4; // Default 5/5 volume
+  gState.masterVolIdx       = 2; // Default 3/5 volume (prevents SC8002B USB rail brownout)
   gState.autoNextSong       = true;
   gState.currentSongItemIdx = -1;
 

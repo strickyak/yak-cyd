@@ -270,18 +270,26 @@ struct LakatosVoiceState {
   uint32_t      loopLen;
   uint32_t      posFp16;
   uint32_t      stepFp16;
-  uint8_t       vol;
+  int32_t       lastSampleOut; // Most recent volume-scaled sample (s * curVol)
+  int32_t       tailSampleOut; // Outgoing level captured at note-on / note-off / retrigger
+  uint8_t       fadeIdx;       // 0..32 raised-cosine fade-in / fade-out / cross-fade index
+  uint8_t       curVol;        // Current interpolated volume (0..64)
+  uint8_t       startVol;      // Starting volume of current 2ms volume ramp
+  uint8_t       targetVol;     // Target volume (0..64)
+  uint8_t       volFadeIdx;    // 0..32 raised-cosine volume slew index
   uint8_t       waveType;
   bool          active;
 };
 
-static DRAM_ATTR uint8_t           gAudioRing[512];
+static DRAM_ATTR uint8_t           gAudioRing[1024];
 static DRAM_ATTR volatile uint32_t gAudioRingRead       = 0;
 static DRAM_ATTR volatile uint32_t gAudioRingWrite      = 0;
+static DRAM_ATTR volatile uint8_t  gAudioLastDuty       = 0;
 static DRAM_ATTR volatile bool     gAudioHwTimerStarted = false;
 static intr_handle_t               gAudioIsrHandle      = nullptr;
 static esp_timer_handle_t          gAudioMixerTimer     = nullptr;
 static volatile bool               gAudioActive         = false;
+static uint8_t                     gAudioDcBias         = 0;
 
 static LakatosVoiceState           gVoices[4];
 static lakatos_audio_tick_cb_t     gAudioTickCb         = nullptr;
@@ -289,6 +297,15 @@ static void*                       gAudioTickUser       = nullptr;
 static uint32_t                    gTickPeriodSamples   = 0;
 static uint32_t                    gSamplesUntilTick    = 0;
 static uint32_t                    gNoiseLfsr           = 0xACE1u;
+
+// 32-sample (2.048 ms @ 15,625 Hz) Raised Cosine Envelope (0..256):
+// w[k] = round(256 * (1 - cos(pi * (k + 1) / 32)) / 2)
+static const uint16_t kRaisedCosine32[32] = {
+      1,   2,   6,  10,  15,  22,  29,  38,
+     47,  57,  68,  79,  91, 103, 115, 128,
+    141, 153, 165, 177, 188, 199, 209, 218,
+    227, 234, 241, 246, 250, 254, 255, 256
+};
 
 // Quarter-wave 64-entry sine table (0..127) for compact built-in LAKATOS_WAVE_SINE
 static const uint8_t kQuarterSine[64] = {
@@ -328,13 +345,18 @@ static void IRAM_ATTR audioSampleIsr(void* arg) {
   TIMERG0.hw_timer[1].config.tx_alarm_en = 1;
 
   uint32_t r = gAudioRingRead;
-  uint8_t duty = 0;
+  uint8_t duty = gAudioLastDuty;
   if (r != gAudioRingWrite) {
-    duty = gAudioRing[r & 511u];
+    duty = gAudioRing[r & 1023u];
     gAudioRingRead = r + 1u;
+    gAudioLastDuty = duty;
+  } else {
+    // If ring buffer ever underruns during heavy I/O, hold and gently relax toward 128 midpoint
+    if (duty > 128u) duty--;
+    else if (duty < 128u) duty++;
+    gAudioLastDuty = duty;
   }
   LEDC.channel_group[0].channel[7].duty.val = (uint32_t)duty << 4;
-  LEDC.channel_group[0].channel[7].conf0.sig_out_en = (duty > 0) ? 1 : 0;
   LEDC.channel_group[0].channel[7].conf1.duty_start = 1;
 }
 
@@ -366,7 +388,7 @@ static void audioMixerTimerCb(void* arg) {
   }
 
   uint32_t w = gAudioRingWrite;
-  while ((uint32_t)(w - gAudioRingRead) < 256u) {
+  while ((uint32_t)(w - gAudioRingRead) < 512u) {
     if (gAudioTickCb != nullptr && gTickPeriodSamples > 0) {
       if (gSamplesUntilTick == 0) {
         gSamplesUntilTick = gTickPeriodSamples;
@@ -376,10 +398,31 @@ static void audioMixerTimerCb(void* arg) {
     }
 
     int32_t mix = 0;
-    bool anyActive = false;
     for (int c = 0; c < 4; c++) {
       LakatosVoiceState& v = gVoices[c];
-      if (!v.active || v.len == 0 || v.stepFp16 == 0) continue;
+
+      // Smooth 2 ms raised-cosine volume slew
+      if (v.volFadeIdx < 32u) {
+        uint16_t wv = kRaisedCosine32[v.volFadeIdx++];
+        v.curVol = (uint8_t)(((uint32_t)v.startVol * (256u - wv) + (uint32_t)v.targetVol * wv) >> 8);
+      } else {
+        v.curVol = v.targetVol;
+      }
+
+      if (!v.active || v.len == 0 || v.stepFp16 == 0) {
+        // Voice is inactive: if a 2 ms raised-cosine fade-out tail is still active, play it out
+        if (v.fadeIdx < 32u && v.tailSampleOut != 0) {
+          uint16_t wf = kRaisedCosine32[v.fadeIdx++];
+          int32_t tail = (v.tailSampleOut * (int32_t)(256u - wf)) >> 8;
+          v.lastSampleOut = tail;
+          mix += tail;
+        } else {
+          v.fadeIdx = 32u;
+          v.tailSampleOut = 0;
+          v.lastSampleOut = 0;
+        }
+        continue;
+      }
 
       uint32_t idx = v.posFp16 >> 16;
       if (idx >= v.len) {
@@ -393,20 +436,46 @@ static void audioMixerTimerCb(void* arg) {
             v.posFp16 = lStartFp + ((v.posFp16 - lStartFp) % lSpanFp);
             idx = v.posFp16 >> 16;
           } else {
+            v.tailSampleOut = v.lastSampleOut;
+            v.fadeIdx = 0;
             v.active = false;
             continue;
           }
         } else {
+          v.tailSampleOut = v.lastSampleOut;
+          v.fadeIdx = 0;
           v.active = false;
           continue;
         }
       }
 
-      if (v.vol > 0) {
+      int32_t rawOut = 0;
+      if (v.curVol > 0) {
         int8_t s = (v.pcm != nullptr) ? v.pcm[idx] : evalBuiltinWave(v.waveType, (uint8_t)(idx & 0xFFu));
-        mix += (int32_t)s * (int32_t)v.vol;
-        anyActive = true;
+        rawOut = (int32_t)s * (int32_t)v.curVol;
+
+        // End-of-sample 2 ms (32-sample) raised-cosine fade-out for non-looped one-shot samples
+        if (v.loopLen <= 2 && v.len <= 0xFFFFu) {
+          uint32_t endFp16  = v.len << 16;
+          uint32_t remFp16  = (endFp16 > v.posFp16) ? (endFp16 - v.posFp16) : 0u;
+          uint32_t spanFp16 = v.stepFp16 << 5; // 32 output samples (~2.048 ms)
+          if (remFp16 < spanFp16 && v.stepFp16 > 0) {
+            uint32_t remSamples = remFp16 / v.stepFp16;
+            if (remSamples < 32u) {
+              rawOut = (rawOut * (int32_t)kRaisedCosine32[remSamples]) >> 8;
+            }
+          }
+        }
       }
+
+      // Apply 2 ms (32-sample) raised-cosine fade-in / cross-fade from previous tailSampleOut
+      if (v.fadeIdx < 32u) {
+        uint16_t wf = kRaisedCosine32[v.fadeIdx++];
+        rawOut = (v.tailSampleOut * (int32_t)(256u - wf) + rawOut * (int32_t)wf) >> 8;
+      }
+
+      v.lastSampleOut = rawOut;
+      mix += rawOut;
 
       v.posFp16 += v.stepFp16;
       if ((v.posFp16 >> 16) >= v.len) {
@@ -417,22 +486,35 @@ static void audioMixerTimerCb(void* arg) {
           if (lSpan > 0) {
             v.posFp16 -= (lSpan << 16);
           } else {
+            v.tailSampleOut = v.lastSampleOut;
+            v.fadeIdx = 0;
             v.active = false;
           }
         } else {
+          v.tailSampleOut = v.lastSampleOut;
+          v.fadeIdx = 0;
           v.active = false;
         }
       }
     }
 
-    uint8_t outByte = 0;
-    if (anyActive) {
-      int32_t out = (mix >> 7) + 128;
-      if (out < 1) out = 1;
-      else if (out > 255) out = 255;
-      outByte = (uint8_t)out;
+    // Soft-start DC bias ramp (0 -> 128 over ~8 ms on audio_start) so enabling PWM never pops
+    if (gAudioDcBias < 128u) {
+      gAudioDcBias++;
     }
-    gAudioRing[w & 511u] = outByte;
+
+    // Scale 4-channel mix with soft-knee limiting so 3-4 channel chords never hard-clip
+    int32_t scaled = (mix * 3) >> 9; // 1.5x single-channel gain, +/-192 max on 4-channel full-scale peak
+    if (scaled > 96) {
+      scaled = 96 + ((scaled - 96) >> 2);
+    } else if (scaled < -96) {
+      scaled = -96 + ((scaled + 96) >> 2);
+    }
+    int32_t out = scaled + (int32_t)gAudioDcBias;
+    if (out < 4) out = 4;
+    else if (out > 252) out = 252;
+
+    gAudioRing[w & 1023u] = (uint8_t)out;
     w++;
     gAudioRingWrite = w;
   }
@@ -459,6 +541,8 @@ static void api_audio_stop(void) {
   memset(gAudioRing, 0, sizeof(gAudioRing));
   gAudioRingRead = 0;
   gAudioRingWrite = 0;
+  gAudioLastDuty = 0;
+  gAudioDcBias = 0;
 
   LEDC.channel_group[0].channel[7].duty.val = 0;
   LEDC.channel_group[0].channel[7].conf0.sig_out_en = 0;
@@ -468,6 +552,11 @@ static void api_audio_stop(void) {
 
 static void api_audio_start(void) {
   api_audio_stop();
+
+  for (int c = 0; c < 4; c++) {
+    gVoices[c].fadeIdx    = 32u;
+    gVoices[c].volFadeIdx = 32u;
+  }
 
   // Route GPIO 26 pad mux to digital IO_MUX (clear RTC_IO_PDAC2_MUX_SEL)
   *(volatile uint32_t*)0x3FF48488u = (2u << 30);
@@ -486,9 +575,10 @@ static void api_audio_start(void) {
   ch_cfg.channel    = LEDC_CHANNEL_7;
   ch_cfg.intr_type  = LEDC_INTR_DISABLE;
   ch_cfg.timer_sel  = LEDC_TIMER_3;
-  ch_cfg.duty       = 0;
+  ch_cfg.duty       = 4;
   ch_cfg.hpoint     = 0;
   ledc_channel_config(&ch_cfg);
+  LEDC.channel_group[0].channel[7].conf0.sig_out_en = 1;
 
   // Set maximum 40 mA CMOS push-pull drive strength on GPIO 26
   *(volatile uint32_t*)0x3FF49028u |= (3u << 10);
@@ -518,8 +608,13 @@ static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
   LakatosVoiceState& v = gVoices[ch];
   if (pcm == nullptr) {
     if (len == LAKATOS_WAVE_NONE || step_fp16 == 0 || vol == 0) {
-      v.active = false;
-      v.vol = 0;
+      if (v.active || v.lastSampleOut != 0) {
+        v.tailSampleOut = v.lastSampleOut;
+        v.fadeIdx       = 0;
+      }
+      v.active    = false;
+      v.pcm       = nullptr;
+      v.targetVol = 0;
       return;
     }
     v.pcm       = nullptr;
@@ -528,13 +623,29 @@ static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
     v.loopStart = 0u;
     v.loopLen   = 256u;
     v.stepFp16  = step_fp16;
-    v.vol       = vol;
-    if (reset_pos) v.posFp16 = 0u;
-    v.active    = true;
+    if (reset_pos || !v.active) {
+      v.tailSampleOut = v.lastSampleOut;
+      v.fadeIdx       = 0;
+      v.posFp16       = 0u;
+      v.curVol        = vol;
+      v.startVol      = vol;
+      v.targetVol     = vol;
+      v.volFadeIdx    = 32u;
+      v.active        = true;
+    } else if (vol != v.targetVol) {
+      v.startVol   = v.curVol;
+      v.targetVol  = vol;
+      v.volFadeIdx = 0;
+    }
   } else {
-    if (len == 0) {
-      v.active = false;
-      v.vol = 0;
+    if (len == 0 || step_fp16 == 0) {
+      if (v.active || v.lastSampleOut != 0) {
+        v.tailSampleOut = v.lastSampleOut;
+        v.fadeIdx       = 0;
+      }
+      v.active    = false;
+      v.pcm       = nullptr;
+      v.targetVol = 0;
       return;
     }
     v.pcm       = pcm;
@@ -543,10 +654,19 @@ static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
     v.loopStart = loop_start;
     v.loopLen   = loop_len;
     v.stepFp16  = step_fp16;
-    v.vol       = vol;
     if (reset_pos) {
-      v.posFp16 = 0u;
-      v.active  = true;
+      v.tailSampleOut = v.lastSampleOut;
+      v.fadeIdx       = 0;
+      v.posFp16       = 0u;
+      v.curVol        = vol;
+      v.startVol      = vol;
+      v.targetVol     = vol;
+      v.volFadeIdx    = 32u;
+      v.active        = true;
+    } else if (vol != v.targetVol) {
+      v.startVol   = v.curVol;
+      v.targetVol  = vol;
+      v.volFadeIdx = 0;
     }
   }
 }
