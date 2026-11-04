@@ -1,60 +1,41 @@
-// Fast Image Gallery Viewer for Lakatos OS (LCode 32-bit Bytecode VM)
-// Uses Core 0 Background Prefetcher + Reusable 64 KB RAM Buffer
+// gallery: Slideshow viewer for /net/pix/ on Lakatos OS (320x240)
+// Remembers up to 500 .jpg basenames (<= 8 bytes each without the .jpg extension),
+// shuffles them using the ESP32 hardware TRNG (os_rand), and displays each image
+// centered on the 320x240 screen for 10 seconds using Core 0 background prefetching.
 package main
 
 import "wedge"
 
 const (
-	BUF_MAX     = 65536 // 64 KB reusable compressed image buffer
-	MAX_IMAGES  = 32
-	NAME_STRIDE = 64
-	FS_ENT_SZ   = 88 // sizeof(LakatosFsEntry)
-
-	VIEW_Y = 24
-	VIEW_H = 216
-
-	BAR_BG     = 0x10A2
-	BTN_HOME   = 0x2945
-	BTN_DIR    = 0x2124
-	BTN_AUTO   = 0x3186
-	BTN_AUTO_ON = 0x03E0
-	BTN_NAV    = 0x4208
-	BADGE_TRUNC = 0xFD20
+	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
+	MAX_SCAN     = 700   // 700 * 88 = 61,600 B fits inside 64 KB imgBuf during scanCatalog()
+	MAX_IMAGES   = 500   // Up to 500 .jpg basenames remembered
+	NAME_STRIDE  = 8     // Up to 8 bytes per basename (without ".jpg")
+	ENTRY_SIZE   = 88    // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
+	ENTRY_ISDIR  = 80
+	DISPLAY_MS   = 10000
+	POLL_STEP_MS = 40
 )
 
 var (
-	// 64 KB (65,536 B) reusable prefetch & decode buffer in DRAM1
-	imgBuf [BUF_MAX]byte
-
-	// Directory & image catalog
-	imgNames [2048]byte // MAX_IMAGES * NAME_STRIDE
-	imgSizes [MAX_IMAGES]int
-	imgTypes [MAX_IMAGES]byte // 1 = PNG, 2 = JPG
+	imgBuf   [BUF_MAX]byte
+	imgNames [4000]byte // MAX_IMAGES (500) * NAME_STRIDE (8)
 	imgCount int
 
-	dirSlice  []byte
-	dirLen    int
-	pathSlice []byte
-	pathLen   int
-
-	curIdx             int
-	prefetchIdx        int
-	prefetchBadgeState int // 0=none, 1=busy, 2=ready
-	autoPlay           bool
-	lastAdvanceMs      int
-	lastRenderMs       int
-	lastTouchMs        int
+	pathBuf     [32]byte // "/net/pix/" (9) + basename (<=8) + ".jpg" (4) + NUL
+	prefetchIdx int
 )
 
 func toLowerByte(c int) int {
-	if c >= 65 && c <= 90 {
+	if c >= 'A' && c <= 'Z' {
 		return c + 32
 	}
 	return c
 }
 
-// Returns 1 for .png, 2 for .jpg/.jpeg, 0 otherwise
-func detectImageType(nameAddr int) int {
+// Returns the basename length (1..8) if the entry name ends with ".jpg" (case-insensitive)
+// and its basename (without ".jpg") is 1..8 bytes; returns 0 otherwise.
+func jpgBasenameLen(nameAddr int) int {
 	ln := 0
 	for ln < 63 {
 		if peek1(nameAddr+ln) == 0 {
@@ -62,197 +43,155 @@ func detectImageType(nameAddr int) int {
 		}
 		ln++
 	}
-	if ln < 5 {
+	// Need at least 1 basename byte + ".jpg" (4 bytes) = 5 bytes,
+	// and at most 8 basename bytes + ".jpg" (4 bytes) = 12 bytes.
+	if ln < 5 || ln > 12 {
 		return 0
 	}
-	// Check last 4 chars for .png or .jpg
 	c0 := peek1(nameAddr + ln - 4)
 	c1 := toLowerByte(peek1(nameAddr + ln - 3))
 	c2 := toLowerByte(peek1(nameAddr + ln - 2))
 	c3 := toLowerByte(peek1(nameAddr + ln - 1))
-	if c0 == 46 { // '.'
-		if c1 == 112 && c2 == 110 && c3 == 103 { // "png"
-			return 1
-		}
-		if c1 == 106 && c2 == 112 && c3 == 103 { // "jpg"
-			return 2
-		}
-	}
-	// Check last 5 chars for .jpeg
-	if ln >= 6 {
-		d0 := peek1(nameAddr + ln - 5)
-		d1 := toLowerByte(peek1(nameAddr + ln - 4))
-		d2 := toLowerByte(peek1(nameAddr + ln - 3))
-		d3 := toLowerByte(peek1(nameAddr + ln - 2))
-		d4 := toLowerByte(peek1(nameAddr + ln - 1))
-		if d0 == 46 && d1 == 106 && d2 == 112 && d3 == 101 && d4 == 103 {
-			return 2
-		}
+	if c0 == '.' && c1 == 'j' && c2 == 'p' && c3 == 'g' {
+		return ln - 4
 	}
 	return 0
 }
 
-func setDirString(s string) {
-	b := s.Base
-	n := s.Len
-	if n > 62 {
-		n = 62
-	}
-	for i := 0; i < n; i++ {
-		dirSlice[i] = byte(peek1(b + i))
-	}
-	dirSlice[n] = 0
-	dirLen = n
+func exitCleanly() {
+	os_prefetch_cancel()
+	os_exit(0)
 }
 
-func updateDirLenFromCStr() {
-	n := 0
-	for n < 62 {
-		if dirSlice[n] == 0 {
-			break
+// pollUserAction returns:
+//   99 = exit (serial 'q'/'Q'/^C; top-left 10x10 wedge is handled by Core 0)
+//    1 = next picture (click on right half: x >= 160)
+//   -1 = previous picture (click on left half: x < 160, outside 10x10 home wedge)
+//    0 = no action
+func pollUserAction() int {
+	if os_serial_available() > 0 {
+		ch := os_serial_read()
+		if ch == 'q' || ch == 'Q' || ch == 3 {
+			exitCleanly()
+			return 99
 		}
-		n++
 	}
-	// Strip trailing slash unless root
-	for n > 1 && dirSlice[n-1] == 47 {
-		n--
-		dirSlice[n] = 0
+	clicked, cx, _ := os_read_click()
+	if clicked {
+		if cx >= 160 {
+			return 1
+		}
+		return -1
 	}
-	dirLen = n
+	return 0
 }
 
-func buildFullPath(idx int) {
-	pos := 0
-	for i := 0; i < dirLen; i++ {
-		pathSlice[pos] = dirSlice[i]
-		pos++
+func checkHomeExit() bool {
+	return pollUserAction() == 99
+}
+
+// waitSlideAction waits up to durationMs while polling for HOME exit or left/right navigation clicks.
+func waitSlideAction(durationMs int) int {
+	startMs := os_millis()
+	for (os_millis() - startMs) < durationMs {
+		act := pollUserAction()
+		if act != 0 {
+			return act
+		}
+		os_delay_ms(POLL_STEP_MS)
 	}
-	if pos == 0 || pathSlice[pos-1] != 47 {
-		pathSlice[pos] = 47 // '/'
-		pos++
-	}
-	nameBase := int(&imgNames) + idx*NAME_STRIDE
-	for i := 0; i < NAME_STRIDE-1; i++ {
-		ch := peek1(nameBase + i)
+	return pollUserAction()
+}
+
+// waitWithHomePoll waits up to durationMs while polling the HOME button.
+func waitWithHomePoll(durationMs int) bool {
+	return waitSlideAction(durationMs) == 99
+}
+
+// buildNetJpgPath writes "/net/pix/<basename>.jpg" into pathBuf and returns its string slice.
+func buildNetJpgPath(idx int) string {
+	// Prefix: "/net/pix/" (9 bytes)
+	pathBuf[0] = '/'
+	pathBuf[1] = 'n'
+	pathBuf[2] = 'e'
+	pathBuf[3] = 't'
+	pathBuf[4] = '/'
+	pathBuf[5] = 'p'
+	pathBuf[6] = 'i'
+	pathBuf[7] = 'x'
+	pathBuf[8] = '/'
+
+	pos := 9
+	nameAddr := int(&imgNames) + idx*NAME_STRIDE
+	for i := 0; i < NAME_STRIDE; i++ {
+		ch := peek1(nameAddr + i)
 		if ch == 0 {
 			break
 		}
-		pathSlice[pos] = byte(ch)
+		pathBuf[pos] = byte(ch)
 		pos++
 	}
-	pathSlice[pos] = 0
-	pathLen = pos
+	pathBuf[pos] = '.'
+	pathBuf[pos+1] = 'j'
+	pathBuf[pos+2] = 'p'
+	pathBuf[pos+3] = 'g'
+	pos += 4
+	pathBuf[pos] = 0
+	return make_slice(&pathBuf[0], 32, pos)
 }
 
-func drawTopBar() {
-	tft_fill_rect(0, 0, SCREEN_W, VIEW_Y, BAR_BG)
-	tft_draw_fast_hline(0, VIEW_Y-1, SCREEN_W, CYAN)
+func showStatusMessage(line1 string, line2 string) {
+	tft_fill_screen(BLACK)
 	DrawExitWedge()
-
-	// DIR button (x=53..91)
-	tft_fill_round_rect(53, 2, 38, 19, 3, BTN_DIR)
-	tft_draw_round_rect(53, 2, 38, 19, 3, LIGHTGREY)
-	tft_set_text_color(WHITE, BTN_DIR)
-	tft_draw_string("DIR", 61, 4, 2)
-
-	// AUTO slideshow button (x=176..224)
-	autoBg := BTN_AUTO
-	if autoPlay {
-		autoBg = BTN_AUTO_ON
-	}
-	tft_fill_round_rect(176, 2, 48, 19, 3, autoBg)
-	tft_draw_round_rect(176, 2, 48, 19, 3, WHITE)
-	tft_set_text_color(WHITE, autoBg)
-	tft_draw_string("AUTO", 184, 4, 2)
-
-	// PREV '<' button (x=228..271)
-	tft_fill_round_rect(228, 2, 43, 19, 3, BTN_NAV)
-	tft_draw_round_rect(228, 2, 43, 19, 3, WHITE)
-	tft_set_text_color(WHITE, BTN_NAV)
-	tft_draw_string("PREV", 234, 4, 2)
-
-	// NEXT '>' button (x=275..318)
-	tft_fill_round_rect(275, 2, 43, 19, 3, BTN_NAV)
-	tft_draw_round_rect(275, 2, 43, 19, 3, WHITE)
-	tft_set_text_color(WHITE, BTN_NAV)
-	tft_draw_string("NEXT", 281, 4, 2)
-
-	updateCounterAndPrefetchHUD(true)
+	tft_set_text_color(CYAN, BLACK)
+	tft_draw_string(line1, 40, 100, 2)
+	tft_set_text_color(LIGHTGREY, BLACK)
+	tft_draw_string(line2, 40, 124, 2)
 }
 
-func updateCounterAndPrefetchHUD(force bool) {
-	st, _ := os_prefetch_status()
-	if !force && st == prefetchBadgeState {
+func startPrefetch(idx int) {
+	if idx < 0 || idx >= imgCount {
+		prefetchIdx = -1
 		return
 	}
-	prefetchBadgeState = st
-
-	// Status region x=94..173
-	tft_fill_rect(94, 2, 80, 19, BAR_BG)
-	tft_set_text_color(YELLOW, BAR_BG)
-	if imgCount > 0 {
-		w1 := tft_draw_int(curIdx+1, 96, 4, 2)
-		w2 := tft_draw_string("/", 96+w1, 4, 2)
-		tft_draw_int(imgCount, 96+w1+w2, 4, 2)
+	fullPath := buildNetJpgPath(idx)
+	if os_prefetch_start(fullPath, &imgBuf, BUF_MAX) != 0 {
+		prefetchIdx = idx
 	} else {
-		tft_draw_string("0/0", 96, 4, 2)
-	}
-
-	// Core 0 Prefetch LED indicator dot at x=162, y=11
-	if st == 2 {
-		// READY in RAM -> bright green dot
-		tft_fill_circle(164, 11, 5, GREEN)
-		tft_draw_circle(164, 11, 5, WHITE)
-	} else if st == 1 {
-		// BUSY fetching on Core 0 -> orange dot
-		tft_fill_circle(164, 11, 5, ORANGE)
-	} else if st < 0 {
-		tft_fill_circle(164, 11, 5, RED)
+		prefetchIdx = -1
 	}
 }
 
-func drawBottomCaption(truncated bool) {
-	// Translucent-style dark footer bar on bottom 18px
-	tft_fill_rect(0, 222, SCREEN_W, 18, BAR_BG)
-	nameAddr := int(&imgNames) + curIdx*NAME_STRIDE
-	tft_set_text_color(WHITE, BAR_BG)
-	tft_draw_cstr(nameAddr, 4, 223, 2)
-
-	// Right side: render time in ms + optional 64K TRUNC badge
-	if truncated {
-		tft_fill_round_rect(206, 223, 56, 16, 2, BADGE_TRUNC)
-		tft_set_text_color(BLACK, BADGE_TRUNC)
-		tft_draw_string("64K CAP", 213, 223, 1)
+func swapCatalogEntries(i int, j int) {
+	if i == j {
+		return
 	}
-	tft_fill_rect(266, 223, 54, 16, BAR_BG)
-	tft_set_text_color(CYAN, BAR_BG)
-	w := tft_draw_int(lastRenderMs, 270, 223, 2)
-	tft_draw_string("ms", 272+w, 223, 2)
+	addrI := int(&imgNames) + i*NAME_STRIDE
+	addrJ := int(&imgNames) + j*NAME_STRIDE
+	w0 := peek4(addrI)
+	w1 := peek4(addrI + 4)
+	poke4(addrI, peek4(addrJ))
+	poke4(addrI+4, peek4(addrJ+4))
+	poke4(addrJ, w0)
+	poke4(addrJ+4, w1)
 }
 
-func scanDirectory() {
+func shuffleCatalog() {
+	for i := imgCount - 1; i > 0; i-- {
+		j := int(os_rand(uint(i + 1)))
+		swapCatalogEntries(i, j)
+	}
+}
+
+func scanCatalog() int {
 	os_prefetch_cancel()
 	imgCount = 0
-	curIdx = 0
 	prefetchIdx = -1
-	prefetchBadgeState = -99
 
-	tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H, BLACK)
-	tft_set_text_color(CYAN, BLACK)
-	tft_draw_string("Scanning directory...", 80, 110, 2)
-	tft_set_text_color(YELLOW, BLACK)
-	tft_draw_cstr(dirSlice.Base, 80, 130, 2)
-
-	// Reuse imgBuf temporarily to hold up to 48 LakatosFsEntry records (48 * 88 = 4224 B)
-	n := fs_ls(dirSlice[0:dirLen], &imgBuf, 48)
-	if n < 0 {
-		drawTopBar()
-		tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H, BLACK)
-		tft_set_text_color(RED, BLACK)
-		tft_draw_string("Error listing directory:", 64, 100, 2)
-		tft_set_text_color(WHITE, BLACK)
-		tft_draw_cstr(dirSlice.Base, 60, 124, 2)
-		return
+	// Reuse imgBuf temporarily for up to MAX_SCAN (700) LakatosFsEntry structs (700 * 88 = 61,600 B)
+	n := fs_ls("/net/pix", &imgBuf, MAX_SCAN)
+	if n <= 0 {
+		return 0
 	}
 
 	baseBuf := int(&imgBuf)
@@ -260,251 +199,117 @@ func scanDirectory() {
 		if imgCount >= MAX_IMAGES {
 			break
 		}
-		entAddr := baseBuf + i*FS_ENT_SZ
-		isDir := peek1(entAddr + 80)
-		if isDir == 0 {
-			t := detectImageType(entAddr)
-			if t > 0 {
-				dstName := int(&imgNames) + imgCount*NAME_STRIDE
-				for c := 0; c < NAME_STRIDE-1; c++ {
-					ch := peek1(entAddr + c)
-					poke1(dstName+c, ch)
-					if ch == 0 {
-						break
-					}
-				}
-				poke1(dstName+NAME_STRIDE-1, 0)
-				imgSizes[imgCount] = peek4(entAddr + 64)
-				imgTypes[imgCount] = byte(t)
-				imgCount++
-			}
+		entAddr := baseBuf + i*ENTRY_SIZE
+		isDir := peek1(entAddr + ENTRY_ISDIR)
+		firstCh := peek1(entAddr)
+		if isDir != 0 || firstCh == 0 || firstCh == '.' {
+			continue
 		}
+		baseLen := jpgBasenameLen(entAddr)
+		if baseLen <= 0 {
+			continue
+		}
+		dstName := int(&imgNames) + imgCount*NAME_STRIDE
+		poke4(dstName, 0)
+		poke4(dstName+4, 0)
+		for c := 0; c < baseLen; c++ {
+			poke1(dstName+c, peek1(entAddr+c))
+		}
+		imgCount++
 	}
-
-	println("[GALLERY] Found", imgCount, "images in", dirSlice[0:dirLen])
-	drawTopBar()
-	if imgCount == 0 {
-		tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H, BLACK)
-		tft_set_text_color(YELLOW, BLACK)
-		tft_draw_string("No .png or .jpg images found in:", 36, 100, 2)
-		tft_set_text_color(WHITE, BLACK)
-		tft_draw_cstr(dirSlice.Base, 60, 124, 2)
-		return
-	}
-
-	showCurrentImage()
+	shuffleCatalog()
+	return imgCount
 }
 
-func startPrefetchFor(idx int) {
-	if imgCount <= 0 || idx < 0 || idx >= imgCount {
-		return
-	}
-	buildFullPath(idx)
-	ok := os_prefetch_start(pathSlice[0:pathLen], &imgBuf, BUF_MAX)
-	if ok != 0 {
-		prefetchIdx = idx
-	} else {
-		prefetchIdx = -1
-	}
-	updateCounterAndPrefetchHUD(true)
-}
-
-func showCurrentImage() {
-	if imgCount <= 0 {
-		return
-	}
-
-	// If Core 0 isn't already prefetching (or holding) curIdx, start it now on Core 0
-	if prefetchIdx != curIdx {
-		startPrefetchFor(curIdx)
-	} else {
-		updateCounterAndPrefetchHUD(true)
-	}
-
-	st, got := os_prefetch_status()
-	if st == 1 {
-		// Core 0 is actively downloading curIdx; show live progress bar while waiting
-		tft_fill_rect(40, 112, 240, 36, BAR_BG)
-		tft_draw_rect(40, 112, 240, 36, CYAN)
-		tft_set_text_color(WHITE, BAR_BG)
-		tft_draw_string("Core 0 Fetching Image...", 68, 116, 2)
-		expected := imgSizes[curIdx]
-		if expected > BUF_MAX || expected <= 0 {
-			expected = BUF_MAX
-		}
-		for st == 1 {
-			pct := (got * 220) / expected
-			if pct > 220 {
-				pct = 220
-			}
-			tft_fill_rect(50, 136, pct, 6, CYAN)
-			os_delay_ms(12)
-			st, got = os_prefetch_status()
-		}
-	}
-
-	tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H, BLACK)
-	t0 := os_millis()
-	imgType := int(imgTypes[curIdx])
+func displaySlide(idx int) bool {
 	drawn := false
+
+	if prefetchIdx != idx {
+		startPrefetch(idx)
+	}
+	st, got := os_prefetch_status()
+	for st == 1 {
+		if checkHomeExit() {
+			return false
+		}
+		os_delay_ms(15)
+		st, got = os_prefetch_status()
+	}
 	if st == 2 && got > 0 {
-		// Decode and blast from the 64 KB RAM buffer to the TFT screen!
-		if imgType == 1 {
-			drawn = tft_draw_png(&imgBuf, got, -1, VIEW_Y)
-		} else {
-			drawn = tft_draw_jpg(&imgBuf, got, -1, VIEW_Y, 0)
-		}
-	}
-	if !drawn {
-		buildFullPath(curIdx)
-		if imgType == 1 {
-			drawn = tft_draw_png_file(pathSlice[0:pathLen], -1, VIEW_Y)
-		} else {
-			drawn = tft_draw_jpg_file(pathSlice[0:pathLen], -1, VIEW_Y, 0)
-		}
-	}
-	lastRenderMs = os_millis() - t0
-
-	if !drawn {
-		tft_set_text_color(RED, BLACK)
-		tft_draw_string("Failed to load image", 80, 110, 2)
-	} else {
-		truncated := (st == 2 && imgSizes[curIdx] > BUF_MAX)
-		drawBottomCaption(truncated)
-		println("[GALLERY] Displayed idx=", curIdx, "bytes=", got, "renderMs=", lastRenderMs)
+		tft_fill_screen(BLACK)
+		// x = -1 centers the image horizontally and vertically on the 320x240 screen
+		drawn = tft_draw_jpg(&imgBuf, got, -1, 0, 0)
 	}
 
-	// Immediately kick off Core 0 background prefetch for the NEXT image into imgBuf!
-	if imgCount > 1 {
-		nextIdx := curIdx + 1
+	// Fallback to streaming directly from VFS if not drawn from RAM buffer
+	if !drawn {
+		fullPath := buildNetJpgPath(idx)
+		tft_fill_screen(BLACK)
+		drawn = tft_draw_jpg_file(fullPath, -1, 0, 0)
+	}
+
+	if drawn {
+		DrawExitWedge()
+	}
+
+	// Immediately start Core 0 background prefetch for the NEXT slide during the 10s wait
+	if imgCount > 0 {
+		nextIdx := idx + 1
 		if nextIdx >= imgCount {
 			nextIdx = 0
 		}
-		startPrefetchFor(nextIdx)
-	} else {
-		updateCounterAndPrefetchHUD(true)
-	}
-	lastAdvanceMs = os_millis()
-}
-
-func advanceImage(delta int) {
-	if imgCount <= 0 {
-		return
-	}
-	curIdx = curIdx + delta
-	if curIdx >= imgCount {
-		curIdx = 0
-	} else if curIdx < 0 {
-		curIdx = imgCount - 1
-	}
-	showCurrentImage()
-}
-
-func handleInputs() {
-	if os_serial_available() > 0 {
-		ch := os_serial_read()
-		if ch == 113 || ch == 81 || ch == 3 { // 'q', 'Q', ^C
-			os_prefetch_cancel()
-			os_exit(0)
-			return
-		}
-		if ch == 110 || ch == 78 || ch == 32 { // 'n', 'N', Space -> NEXT
-			advanceImage(1)
-			return
-		}
-		if ch == 112 || ch == 80 { // 'p', 'P' -> PREV
-			advanceImage(-1)
-			return
-		}
-		if ch == 97 || ch == 65 { // 'a', 'A' -> toggle AUTO
-			autoPlay = !autoPlay
-			drawTopBar()
-			lastAdvanceMs = os_millis()
-			return
-		}
+		startPrefetch(nextIdx)
 	}
 
-	touched, tx, ty := os_read_click()
-	if !touched {
-		return
-	}
-	now := os_millis()
-	if lastTouchMs > 0 && now-lastTouchMs < 120 {
-		return
-	}
-	lastTouchMs = now
-
-	if ty < VIEW_Y {
-		// DIR (x=53..91)
-		if tx >= 52 && tx <= 93 {
-			os_prefetch_cancel()
-			res := os_prompt_keyboard("Gallery Directory", dirSlice.Base, 62, true)
-			if res > 0 {
-				updateDirLenFromCStr()
-				scanDirectory()
-			} else {
-				drawTopBar()
-				showCurrentImage()
-			}
-			return
-		}
-		// AUTO (x=176..224)
-		if tx >= 174 && tx <= 225 {
-			autoPlay = !autoPlay
-			drawTopBar()
-			lastAdvanceMs = os_millis()
-			return
-		}
-		// PREV (x=228..271)
-		if tx >= 226 && tx <= 272 {
-			advanceImage(-1)
-			return
-		}
-		// NEXT (x=275..318)
-		if tx >= 273 {
-			advanceImage(1)
-			return
-		}
-		return
-	}
-
-	// Tapping the left 1/3 of the image goes to PREV; right 2/3 goes to NEXT
-	if tx < 100 {
-		advanceImage(-1)
-	} else {
-		advanceImage(1)
-	}
+	return drawn
 }
 
 func main() {
-	dirSlice = make([]byte, 64)
-	pathSlice = make([]byte, 128)
-	autoPlay = false
-
-	// Default to /net/png-1 if Wi-Fi is connected, otherwise /flash
-	if os_wifi_connected() != 0 {
-		setDirString("/net/png-1")
-	} else {
-		setDirString("/flash")
-	}
-
 	tft_fill_screen(BLACK)
-	drawTopBar()
-	scanDirectory()
+	DrawExitWedge()
+	tft_set_text_color(CYAN, BLACK)
+	tft_draw_string("Loading /net/pix/ ...", 64, 110, 2)
 
 	for {
-		updateCounterAndPrefetchHUD(false)
-		handleInputs()
+		count := scanCatalog()
 
-		if autoPlay && imgCount > 1 {
-			st, _ := os_prefetch_status()
-			// Advance once Core 0 has the next image READY and 2.5s have elapsed
-			if st == 2 && (os_millis()-lastAdvanceMs) >= 2500 {
-				advanceImage(1)
-			} else if (os_millis() - lastAdvanceMs) >= 5000 {
-				advanceImage(1)
+		if count > 0 {
+			idx := 0
+			failures := 0
+			for failures < count {
+				if displaySlide(idx) {
+					failures = 0
+					act := waitSlideAction(DISPLAY_MS)
+					if act == 99 {
+						return
+					}
+					if act == -1 {
+						idx = idx - 1
+						if idx < 0 {
+							idx = count - 1
+						}
+					} else {
+						idx = idx + 1
+						if idx >= count {
+							idx = 0
+						}
+					}
+				} else {
+					if checkHomeExit() {
+						return
+					}
+					failures++
+					idx = idx + 1
+					if idx >= count {
+						idx = 0
+					}
+				}
 			}
 		}
-		os_delay_ms(15)
+
+		showStatusMessage("No images in /net/pix/", "Retrying in 3 seconds...")
+		if waitWithHomePoll(3000) {
+			return
+		}
 	}
 }
