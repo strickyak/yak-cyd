@@ -291,7 +291,7 @@ static esp_timer_handle_t          gAudioMixerTimer     = nullptr;
 static volatile bool               gAudioActive         = false;
 static uint8_t                     gAudioDcBias         = 0;
 
-static LakatosVoiceState           gVoices[4];
+static LakatosVoiceState           gVoices[LAKATOS_AUDIO_VOICES];
 static lakatos_audio_tick_cb_t     gAudioTickCb         = nullptr;
 static void*                       gAudioTickUser       = nullptr;
 static uint32_t                    gTickPeriodSamples   = 0;
@@ -398,7 +398,7 @@ static void audioMixerTimerCb(void* arg) {
     }
 
     int32_t mix = 0;
-    for (int c = 0; c < 4; c++) {
+    for (int c = 0; c < (int)LAKATOS_AUDIO_VOICES; c++) {
       LakatosVoiceState& v = gVoices[c];
 
       // Smooth 2 ms raised-cosine volume slew
@@ -548,7 +548,7 @@ static void api_audio_stop(void) {
 static void api_audio_start(void) {
   api_audio_stop();
 
-  for (int c = 0; c < 4; c++) {
+  for (int c = 0; c < (int)LAKATOS_AUDIO_VOICES; c++) {
     gVoices[c].fadeIdx    = 32u;
     gVoices[c].volFadeIdx = 32u;
   }
@@ -598,7 +598,7 @@ static void api_audio_start(void) {
 static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
                                 uint32_t loop_start, uint32_t loop_len,
                                 uint32_t step_fp16, uint8_t vol, bool reset_pos) {
-  if (ch < 0 || ch >= 4) return;
+  if (ch < 0 || ch >= (int)LAKATOS_AUDIO_VOICES) return;
   LakatosVoiceState& v = gVoices[ch];
   if (pcm == nullptr) {
     if (len == LAKATOS_WAVE_NONE || step_fp16 == 0 || vol == 0) {

@@ -63,6 +63,7 @@ extern "C" {
 
 // Built-in waveform IDs for audio_set_voice(..., pcm = NULL, len = LAKATOS_WAVE_*, ...)
 #define LAKATOS_AUDIO_RATE      15625u
+#define LAKATOS_AUDIO_VOICES    8u
 #define LAKATOS_WAVE_NONE       0u
 #define LAKATOS_WAVE_SINE       1u
 #define LAKATOS_WAVE_RAMP       2u

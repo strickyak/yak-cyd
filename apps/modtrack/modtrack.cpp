@@ -91,10 +91,10 @@ static const char* const kNoteNames[36] = {
 // ---------------------------------------------------------------------------
 // Data Structures (Placed in 32 KB Static Arena 0x3FFC8000)
 // ---------------------------------------------------------------------------
-static constexpr int kMaxStaticPatterns = 16;   // 16 KB static pattern storage
-static constexpr int kMaxTotalPatterns  = 64;
-static constexpr int kMaxBrowserItems   = 64;
-static constexpr uint32_t kPcmHeapBudget = 28672u; // 28 KB heap budget for PCM samples
+static constexpr uint32_t kStaticPatPoolSize = 16384u; // 16 KB static pattern pool in .bss
+static constexpr int      kMaxTotalPatterns  = 64;
+static constexpr int      kMaxBrowserItems   = 64;
+static constexpr uint32_t kPcmHeapBudget     = 49152u; // 48 KB heap budget for PCM samples
 
 struct ModInst {
   char     name[23];
@@ -147,8 +147,9 @@ struct BrowserItem {
 struct AppState {
   const LakatosApi* os;
 
-  // Static pattern pool (20 x 1024 B = 20,480 B in .bss)
-  uint8_t  staticPatterns[kMaxStaticPatterns][1024];
+  // Bitmask-packed pattern pool (16 KB in .bss + overflow on OS heap)
+  uint8_t  staticPatPool[kStaticPatPoolSize];
+  uint32_t staticPatPoolUsed;
   uint8_t* patternPtrs[kMaxTotalPatterns];
 
   // Parsed MOD Metadata & Instruments
@@ -160,11 +161,13 @@ struct AppState {
   uint8_t  restartPos;
   uint8_t  numPatterns;
   uint8_t  numInstSlots;  // 31 or 15
+  uint8_t  fileChans;     // Channels stored per row in file (4..32)
+  uint8_t  numChans;      // Active played channels (4..8)
   uint32_t totalRawPcm;
   uint32_t totalStoredPcm;
 
   // Sequencer Runtime State (updated on Core 0 at 50 Hz)
-  ModChan       chans[4];
+  ModChan       chans[8];
   volatile int  curOrder;
   volatile int  curRow;
   volatile int  curTick;
@@ -175,7 +178,7 @@ struct AppState {
   volatile bool songLoaded;
   volatile bool songEndedFlag;
   bool          autoNextSong;
-  int           masterVolIdx; // 0..4 -> scale 16..64
+  int           masterVolIdx; // 0..11 ("goes to 11")
 
   // File Browser State
   bool        inBrowserView;
@@ -187,6 +190,12 @@ struct AppState {
 
   // Streaming Loader Scratch State
   uint8_t     hdrBuf[1084];
+  uint8_t     curRowBuf[32];
+  uint8_t     curPatBuf[2112];
+  uint16_t    curPatBufLen;
+  uint8_t     curLoadPat;
+  uint8_t     curLoadRow;
+  uint16_t    curLoadByteInRow;
   uint32_t    streamPos;
   uint32_t    patEndOffset;
   int         curLoadInst;
@@ -282,9 +291,33 @@ static void updateVoiceOutput(int chIdx, uint16_t period, int vol, bool resetPos
 
 static void applyMasterVolumeImmediate() {
   if (!gState.songLoaded || !gState.playing) return;
-  for (int c = 0; c < 4; c++) {
+  int nCh = (gState.numChans > 0 && gState.numChans <= 8) ? gState.numChans : 4;
+  for (int c = 0; c < nCh; c++) {
     updateVoiceOutput(c, gState.chans[c].period, gState.chans[c].vol, false);
   }
+}
+
+static bool unpackPatternRow(uint8_t patIdx, int row, uint8_t outRow[8][4]) {
+  memset(outRow, 0, 32);
+  if (patIdx >= kMaxTotalPatterns || row < 0 || row >= 64) return false;
+  const uint8_t* p = gState.patternPtrs[patIdx];
+  if (!p) return false;
+  for (int r = 0; r < row; r++) {
+    uint8_t m = *p++;
+    while (m) {
+      m &= (uint8_t)(m - 1u);
+      p += 4;
+    }
+  }
+  uint8_t mask = *p++;
+  int nCh = (gState.numChans > 0 && gState.numChans <= 8) ? gState.numChans : 4;
+  for (int c = 0; c < nCh; c++) {
+    if (mask & (uint8_t)(1u << c)) {
+      memcpy(outRow[c], p, 4);
+      p += 4;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,8 +546,10 @@ static void modTickCb(void* user) {
   (void)user;
   if (!gState.playing || !gState.songLoaded) return;
 
+  int nCh = (gState.numChans > 0 && gState.numChans <= 8) ? gState.numChans : 4;
+
   // Decay VU meters slightly every 20 ms tick
-  for (int c = 0; c < 4; c++) {
+  for (int c = 0; c < nCh; c++) {
     if (gState.chans[c].vuLevel > 2) gState.chans[c].vuLevel -= 2;
     else gState.chans[c].vuLevel = 0;
   }
@@ -528,15 +563,14 @@ static void modTickCb(void* user) {
       int row = gState.curRow;
       if (ord < 0 || ord >= gState.songLen) ord = 0;
       uint8_t patIdx = gState.orderTable[ord];
-      const uint8_t* patBase = (patIdx < kMaxTotalPatterns) ? gState.patternPtrs[patIdx] : nullptr;
 
       int jumpOrder = -1;
       int breakRow  = -1;
 
-      if (patBase != nullptr) {
-        const uint8_t* rowPtr = patBase + (row * 16);
-        for (int c = 0; c < 4; c++) {
-          const uint8_t* cell = rowPtr + (c * 4);
+      uint8_t rowCells[8][4];
+      if (unpackPatternRow(patIdx, row, rowCells)) {
+        for (int c = 0; c < nCh; c++) {
+          const uint8_t* cell = rowCells[c];
           triggerRowChannel(c, cell);
 
           uint8_t effect = cell[2] & 0x0Fu;
@@ -597,7 +631,7 @@ static void modTickCb(void* user) {
       }
     }
   } else {
-    for (int c = 0; c < 4; c++) {
+    for (int c = 0; c < nCh; c++) {
       updateTickEffects(c, tick);
     }
   }
@@ -644,7 +678,7 @@ static void freeCurrentSongResources() {
   gState.playing = false;
   gState.songLoaded = false;
   gState.os->audio_set_tick_cb(nullptr, nullptr, 0);
-  for (int c = 0; c < 4; c++) {
+  for (int c = 0; c < 8; c++) {
     gState.os->audio_set_voice(c, nullptr, 0, 0, 0, 0, 0, true);
   }
   gState.os->delay_ms(3);
@@ -654,28 +688,75 @@ static void freeCurrentSongResources() {
       gState.insts[i].pcm = nullptr;
     }
   }
-  for (int p = kMaxStaticPatterns; p < kMaxTotalPatterns; p++) {
-    if (gState.patternPtrs[p]) {
-      gState.os->free(gState.patternPtrs[p]);
+  const uint8_t* poolStart = gState.staticPatPool;
+  const uint8_t* poolEnd   = gState.staticPatPool + kStaticPatPoolSize;
+  for (int p = 0; p < kMaxTotalPatterns; p++) {
+    uint8_t* ptr = gState.patternPtrs[p];
+    if (ptr != nullptr) {
+      if (ptr < poolStart || ptr >= poolEnd) {
+        gState.os->free(ptr);
+      }
       gState.patternPtrs[p] = nullptr;
     }
   }
+  gState.staticPatPoolUsed = 0;
 }
 
-static bool isFourChannelTag(const uint8_t m[4]) {
+static void detectModFormat(const uint8_t m[4], uint8_t* outFileChans, bool* outIs31) {
   if (memcmp(m, "M.K.", 4) == 0 || memcmp(m, "M!K!", 4) == 0 ||
       memcmp(m, "FLT4", 4) == 0 || memcmp(m, "4CHN", 4) == 0 ||
-      memcmp(m, "N.T.", 4) == 0 || memcmp(m, "PATT", 4) == 0) {
-    return true;
+      memcmp(m, "N.T.", 4) == 0 || memcmp(m, "PATT", 4) == 0 ||
+      memcmp(m, "EXO4", 4) == 0) {
+    *outFileChans = 4;
+    *outIs31      = true;
+    return;
   }
-  return false;
+  if (memcmp(m, "6CHN", 4) == 0 || memcmp(m, "CD61", 4) == 0 ||
+      memcmp(m, "FA06", 4) == 0) {
+    *outFileChans = 6;
+    *outIs31      = true;
+    return;
+  }
+  if (memcmp(m, "8CHN", 4) == 0 || memcmp(m, "FLT8", 4) == 0 ||
+      memcmp(m, "CD81", 4) == 0 || memcmp(m, "OCTA", 4) == 0 ||
+      memcmp(m, "OKTA", 4) == 0 || memcmp(m, "FA08", 4) == 0 ||
+      memcmp(m, "EXO8", 4) == 0) {
+    *outFileChans = 8;
+    *outIs31      = true;
+    return;
+  }
+  if (m[0] >= '1' && m[0] <= '9' && memcmp(m + 1, "CHN", 3) == 0) {
+    *outFileChans = (uint8_t)(m[0] - '0');
+    *outIs31      = true;
+    return;
+  }
+  if (m[0] >= '0' && m[0] <= '9' && m[1] >= '0' && m[1] <= '9' &&
+      (memcmp(m + 2, "CH", 2) == 0 || memcmp(m + 2, "CN", 2) == 0)) {
+    int ch = (m[0] - '0') * 10 + (m[1] - '0');
+    if (ch >= 1 && ch <= 32) {
+      *outFileChans = (uint8_t)ch;
+      *outIs31      = true;
+      return;
+    }
+  }
+  if (memcmp(m, "TDZ", 3) == 0 && m[3] >= '1' && m[3] <= '9') {
+    *outFileChans = (uint8_t)(m[3] - '0');
+    *outIs31      = true;
+    return;
+  }
+  // Legacy 15-instrument 4-channel SoundTracker
+  *outFileChans = 4;
+  *outIs31      = false;
 }
 
 static bool parseModHeader() {
   const uint8_t* h = gState.hdrBuf;
 
-  // Check if 31-instrument ProTracker/NoiseTracker or 15-instrument SoundTracker
-  bool is31 = isFourChannelTag(h + 1080);
+  bool is31 = false;
+  uint8_t fileChans = 4;
+  detectModFormat(h + 1080, &fileChans, &is31);
+  gState.fileChans    = fileChans;
+  gState.numChans     = (fileChans > 8) ? 8 : fileChans;
   gState.numInstSlots = is31 ? 31 : 15;
 
   memcpy(gState.songTitle, h, 20);
@@ -731,9 +812,9 @@ static bool parseModHeader() {
   }
   gState.numPatterns = (uint8_t)(maxPat + 1);
 
-  // Pick decimation shift (0..4) for long samples (> 512 B) so total stored PCM fits budget
+  // Pick decimation shift (0..7) for long samples (> 512 B) so total stored PCM fits budget
   uint8_t chosenShift = 0;
-  for (uint8_t sh = 0; sh <= 4; sh++) {
+  for (uint8_t sh = 0; sh <= 7; sh++) {
     uint32_t sum = 0;
     for (int i = 1; i <= gState.numInstSlots; i++) {
       uint32_t rl = gState.insts[i].rawLen;
@@ -768,20 +849,19 @@ static bool parseModHeader() {
     gState.totalStoredPcm += inst.storedLen;
   }
 
-  // Set up pattern pointers (first 20 in static .bss, any extra allocated in 1 KB blocks)
-  for (int p = 0; p < kMaxStaticPatterns; p++) {
-    gState.patternPtrs[p] = gState.staticPatterns[p];
-    memset(gState.patternPtrs[p], 0, 1024);
+  gState.staticPatPoolUsed = 0;
+  for (int p = 0; p < kMaxTotalPatterns; p++) {
+    gState.patternPtrs[p] = nullptr;
   }
-  for (int p = kMaxStaticPatterns; p < gState.numPatterns && p < kMaxTotalPatterns; p++) {
-    gState.patternPtrs[p] = (uint8_t*)gState.os->malloc(1024);
-    if (gState.patternPtrs[p]) {
-      memset(gState.patternPtrs[p], 0, 1024);
-    }
-  }
+  gState.curLoadPat       = 0;
+  gState.curLoadRow       = 0;
+  gState.curLoadByteInRow = 0;
+  gState.curPatBufLen     = 0;
+  memset(gState.curRowBuf, 0, sizeof(gState.curRowBuf));
 
   uint32_t hdrLen = is31 ? 1084u : 600u;
-  gState.patEndOffset = hdrLen + (uint32_t)gState.numPatterns * 1024u;
+  uint32_t filePatSize = 64u * (uint32_t)gState.fileChans * 4u;
+  gState.patEndOffset = hdrLen + (uint32_t)gState.numPatterns * filePatSize;
   gState.curLoadInst = 1;
   gState.curInstRawBytePos = 0;
   while (gState.curLoadInst <= gState.numInstSlots &&
@@ -795,13 +875,53 @@ static bool feedPostHeaderByte(uint8_t b, uint32_t fileOffset) {
   uint32_t hdrLen = (gState.numInstSlots == 31) ? 1084u : 600u;
   if (fileOffset < hdrLen) return true;
 
-  // 1. Pattern Data Region
+  // 1. Pattern Data Region (packed per row with a 1-byte channel bitmask)
   if (fileOffset < gState.patEndOffset) {
-    uint32_t patRel = fileOffset - hdrLen;
-    uint32_t patIdx = patRel >> 10;
-    uint32_t offInPat = patRel & 1023u;
-    if (patIdx < kMaxTotalPatterns && gState.patternPtrs[patIdx]) {
-      gState.patternPtrs[patIdx][offInPat] = b;
+    uint16_t activeRowBytes = (uint16_t)gState.numChans * 4u;
+    uint16_t fileRowBytes   = (uint16_t)gState.fileChans * 4u;
+    if (gState.curLoadByteInRow < activeRowBytes) {
+      gState.curRowBuf[gState.curLoadByteInRow] = b;
+    }
+    gState.curLoadByteInRow++;
+    if (gState.curLoadByteInRow >= fileRowBytes) {
+      uint8_t mask = 0;
+      for (int c = 0; c < gState.numChans; c++) {
+        const uint8_t* cell = &gState.curRowBuf[c * 4];
+        if (cell[0] | cell[1] | cell[2] | cell[3]) {
+          mask |= (uint8_t)(1u << c);
+        }
+      }
+      if (gState.curPatBufLen + 1u + (uint16_t)(gState.numChans * 4u) <= sizeof(gState.curPatBuf)) {
+        gState.curPatBuf[gState.curPatBufLen++] = mask;
+        for (int c = 0; c < gState.numChans; c++) {
+          if (mask & (uint8_t)(1u << c)) {
+            memcpy(&gState.curPatBuf[gState.curPatBufLen], &gState.curRowBuf[c * 4], 4);
+            gState.curPatBufLen += 4;
+          }
+        }
+      }
+      gState.curLoadByteInRow = 0;
+      memset(gState.curRowBuf, 0, sizeof(gState.curRowBuf));
+      gState.curLoadRow++;
+      if (gState.curLoadRow >= 64) {
+        if (gState.curLoadPat < kMaxTotalPatterns && gState.curPatBufLen > 0) {
+          uint32_t sz = gState.curPatBufLen;
+          uint8_t* dst = nullptr;
+          if (gState.staticPatPoolUsed + sz <= kStaticPatPoolSize) {
+            dst = &gState.staticPatPool[gState.staticPatPoolUsed];
+            gState.staticPatPoolUsed += sz;
+          } else {
+            dst = (uint8_t*)gState.os->malloc(sz);
+          }
+          if (dst != nullptr) {
+            memcpy(dst, gState.curPatBuf, sz);
+            gState.patternPtrs[gState.curLoadPat] = dst;
+          }
+        }
+        gState.curLoadRow   = 0;
+        gState.curPatBufLen = 0;
+        gState.curLoadPat++;
+      }
     }
     return true;
   }
@@ -900,8 +1020,9 @@ static bool loadAndPlayModFile(const char* fullPath, const char* displayName) {
 
   {
     char lbuf[160];
-    int n = snprintf(lbuf, sizeof(lbuf), "[MOD] playing: %s ['%s', %u orders, %u pats, %lu/%lu B PCM, heap=%lu]\n",
+    int n = snprintf(lbuf, sizeof(lbuf), "[MOD] playing: %s ['%s', %uch, %u orders, %u pats, %lu/%lu B PCM, heap=%lu]\n",
              gState.currentFileName, gState.songTitle,
+             (unsigned)gState.numChans,
              (unsigned)gState.songLen, (unsigned)gState.numPatterns,
              (unsigned long)gState.totalStoredPcm, (unsigned long)gState.totalRawPcm,
              (unsigned long)gState.os->free_heap_bytes());
@@ -909,7 +1030,7 @@ static bool loadAndPlayModFile(const char* fullPath, const char* displayName) {
   }
 
   // Initialize playback state
-  for (int c = 0; c < 4; c++) {
+  for (int c = 0; c < 8; c++) {
     bool wasMuted = gState.chans[c].muted;
     memset(&gState.chans[c], 0, sizeof(ModChan));
     gState.chans[c].noteIdx = -1;
@@ -993,7 +1114,9 @@ static void navigateParentDir() {
 static bool playAdjacentSong(int dir) {
   if (gState.itemCount <= 0) return false;
   int start = gState.currentSongItemIdx;
-  if (start < 0 || start >= gState.itemCount) start = 0;
+  if (start < 0 || start >= gState.itemCount) {
+    start = (dir >= 0) ? (gState.itemCount - 1) : 1;
+  }
   for (int step = 1; step <= gState.itemCount; step++) {
     int idx = (start + step * dir + gState.itemCount * 2) % gState.itemCount;
     if (!gState.items[idx].isDir) {
@@ -1065,8 +1188,9 @@ static void drawTrackerStatusBar() {
     int ord = gState.curOrder;
     int pat = (ord >= 0 && ord < 128) ? gState.orderTable[ord] : 0;
     int row = getDisplayRow();
-    snprintf(buf, sizeof(buf), "Ord %02d/%02d  Pat %02d  Row %02X  Spd %d/%d  %luK",
-             ord + 1, (int)gState.songLen, pat, row,
+    int nCh = (gState.numChans > 0) ? gState.numChans : 4;
+    snprintf(buf, sizeof(buf), "Ord %02d/%02d Pat %02d Row %02X %dch %d/%d %luK",
+             ord + 1, (int)gState.songLen, pat, row, nCh,
              gState.speed, gState.bpm,
              (unsigned long)((gState.totalStoredPcm + 512u) / 1024u));
   } else {
@@ -1080,23 +1204,36 @@ static void drawTrackerStatusBar() {
 
 static void drawChannelHeadersAndVu(bool drawFrame) {
   const LakatosApi* os = gState.os;
-  for (int c = 0; c < 4; c++) {
-    int x = c * 80;
+  int nCols = (gState.songLoaded && gState.numChans > 4) ? gState.numChans : 4;
+  if (nCols > 8) nCols = 8;
+  int colW = 320 / nCols;
+
+  for (int c = 0; c < nCols; c++) {
+    int x = c * colW;
+    int w = (c == nCols - 1) ? (320 - x) : (colW - 1);
     const ModChan& ch = gState.chans[c];
     if (drawFrame) {
       uint16_t hdrBg = ch.muted ? 0x3800 : 0x18E3;
-      os->tft_fill_rect(x, 50, 79, 28, hdrBg);
-      os->tft_draw_rect(x, 50, 79, 28, ch.muted ? LAKATOS_RED : 0x4208);
+      os->tft_fill_rect(x, 50, w, 28, hdrBg);
+      os->tft_draw_rect(x, 50, w, 28, ch.muted ? LAKATOS_RED : 0x4208);
 
       char hbuf[16];
-      if (ch.muted) {
-        snprintf(hbuf, sizeof(hbuf), "CH%d MUTE", c + 1);
+      if (nCols <= 4) {
+        if (ch.muted) {
+          snprintf(hbuf, sizeof(hbuf), "CH%d MUTE", c + 1);
+        } else {
+          snprintf(hbuf, sizeof(hbuf), "CH%d I:%02u", c + 1, (unsigned)ch.instIdx);
+        }
       } else {
-        snprintf(hbuf, sizeof(hbuf), "CH%d I:%02d", c + 1, (unsigned)ch.instIdx);
+        if (ch.muted) {
+          snprintf(hbuf, sizeof(hbuf), "%d:OFF", c + 1);
+        } else {
+          snprintf(hbuf, sizeof(hbuf), "%d:%02u", c + 1, (unsigned)ch.instIdx);
+        }
       }
       os->tft_set_text_datum(LAKATOS_TL_DATUM);
       os->tft_set_text_color(ch.muted ? LAKATOS_ORANGE : LAKATOS_CYAN, hdrBg);
-      os->tft_draw_string(hbuf, x + 4, 53, 1);
+      os->tft_draw_string(hbuf, x + (nCols <= 4 ? 4 : 3), 53, 1);
     } else {
       // Update instrument number text cleanly
       uint16_t hdrBg = ch.muted ? 0x3800 : 0x18E3;
@@ -1105,24 +1242,27 @@ static void drawChannelHeadersAndVu(bool drawFrame) {
         snprintf(ibuf, sizeof(ibuf), "%02u", (unsigned)ch.instIdx);
         os->tft_set_text_datum(LAKATOS_TL_DATUM);
         os->tft_set_text_color(LAKATOS_CYAN, hdrBg);
-        os->tft_draw_string(ibuf, x + 40, 53, 1);
+        os->tft_draw_string(ibuf, x + (nCols <= 4 ? 40 : 15), 53, 1);
       }
     }
 
-    // VU meter bar (x+4 .. x+74, width 70 px, y=66..74)
-    int vuW = ch.muted ? 0 : ((int)ch.vuLevel * 70) / 64;
-    if (vuW > 70) vuW = 70;
+    // VU meter bar (y = 66..74)
+    int pad = (nCols <= 4) ? 4 : 3;
+    int maxVuW = w - 2 * pad;
+    if (maxVuW < 4) maxVuW = 4;
+    int vuW = ch.muted ? 0 : ((int)ch.vuLevel * maxVuW) / 64;
+    if (vuW > maxVuW) vuW = maxVuW;
     if (vuW > 0) {
-      uint16_t vuCol = (vuW > 54) ? LAKATOS_ORANGE : LAKATOS_GREEN;
-      os->tft_fill_rect(x + 4, 66, vuW, 8, vuCol);
+      uint16_t vuCol = (vuW * 64 > maxVuW * 52) ? LAKATOS_ORANGE : LAKATOS_GREEN;
+      os->tft_fill_rect(x + pad, 66, vuW, 8, vuCol);
     }
-    if (vuW < 70) {
-      os->tft_fill_rect(x + 4 + vuW, 66, 70 - vuW, 8, LAKATOS_BLACK);
+    if (vuW < maxVuW) {
+      os->tft_fill_rect(x + pad + vuW, 66, maxVuW - vuW, 8, LAKATOS_BLACK);
     }
   }
 }
 
-static void formatPatternCell(const uint8_t* cell, char out[12]) {
+static void formatPatternCell(const uint8_t* cell, bool compact, char out[12]) {
   uint8_t  instNum   = (cell[0] & 0xF0u) | ((cell[2] >> 4) & 0x0Fu);
   uint16_t rawPeriod = ((uint16_t)(cell[0] & 0x0Fu) << 8) | cell[1];
   uint8_t  effect    = cell[2] & 0x0Fu;
@@ -1137,6 +1277,11 @@ static void formatPatternCell(const uint8_t* cell, char out[12]) {
   char i0 = (instNum > 0) ? (char)('0' + (instNum / 10) % 10) : '-';
   char i1 = (instNum > 0) ? (char)('0' + (instNum % 10)) : '-';
 
+  if (compact) {
+    snprintf(out, 12, "%s %c%c", noteStr, i0, i1);
+    return;
+  }
+
   const char* hex = "0123456789ABCDEF";
   char e0 = (effect != 0 || param != 0) ? hex[effect & 15] : '-';
   char e1 = (effect != 0 || param != 0) ? hex[(param >> 4) & 15] : '-';
@@ -1150,9 +1295,10 @@ static void drawPatternGrid() {
   int ord = gState.curOrder;
   int centerRow = getDisplayRow();
   uint8_t patIdx = (gState.songLoaded && ord >= 0 && ord < 128) ? gState.orderTable[ord] : 0;
-  const uint8_t* patBase = (gState.songLoaded && patIdx < kMaxTotalPatterns)
-                               ? gState.patternPtrs[patIdx]
-                               : nullptr;
+  int nCols = (gState.songLoaded && gState.numChans > 4) ? gState.numChans : 4;
+  if (nCols > 8) nCols = 8;
+  int colW = 320 / nCols;
+  bool compact = (nCols > 4);
 
   os->tft_set_text_datum(LAKATOS_TL_DATUM);
   for (int dr = -3; dr <= 3; dr++) {
@@ -1162,19 +1308,18 @@ static void drawPatternGrid() {
     uint16_t rowBg = isCenter ? 0x2124 : LAKATOS_BLACK;
     os->tft_fill_rect(0, y, 320, 14, rowBg);
 
-    if (r < 0 || r >= 64 || !patBase) continue;
+    uint8_t rowCells[8][4];
+    if (!gState.songLoaded || !unpackPatternRow(patIdx, r, rowCells)) continue;
 
-    // Row hex number on far left of CH1 or inside each channel
-    const uint8_t* rowPtr = patBase + (r * 16);
-    for (int c = 0; c < 4; c++) {
-      int x = c * 80;
+    for (int c = 0; c < nCols; c++) {
+      int x = c * colW;
       char cbuf[12];
-      formatPatternCell(rowPtr + c * 4, cbuf);
+      formatPatternCell(rowCells[c], compact, cbuf);
       uint16_t fg = gState.chans[c].muted
                         ? 0x4208
                         : (isCenter ? LAKATOS_YELLOW : ((dr < 0) ? 0x7BEF : 0xBDF7));
       os->tft_set_text_color(fg, rowBg);
-      os->tft_draw_string(cbuf, x + 8, y + 3, 1);
+      os->tft_draw_string(cbuf, x + (compact ? 2 : 8), y + 3, 1);
       if (c > 0) {
         os->tft_draw_fast_v_line(x, y, 14, 0x2104);
       }
@@ -1381,13 +1526,11 @@ static void drawFullScreen() {
 extern "C" void app_main(const LakatosApi* os) {
   memset(&gState, 0, sizeof(gState));
   gState.os                 = os;
+  gState.numChans           = 4;
+  gState.fileChans          = 4;
   gState.masterVolIdx       = 7; // Default level 7 on 0..11 scale (8 = unity, 9..11 = overdrive)
   gState.autoNextSong       = true;
   gState.currentSongItemIdx = -1;
-
-  for (int p = 0; p < kMaxStaticPatterns; p++) {
-    gState.patternPtrs[p] = gState.staticPatterns[p];
-  }
 
   os->tft_fill_screen(LAKATOS_BLACK);
   os->audio_start();
@@ -1572,9 +1715,12 @@ extern "C" void app_main(const LakatosApi* os) {
         } else {
           // 3. Tracker View Touch Handling
           if (ty >= 50 && ty < 78) {
-            // Channel Header Mute Toggle (CH1..CH4)
-            int chIdx = tx / 80;
-            if (chIdx >= 0 && chIdx < 4) {
+            // Channel Header Mute Toggle (CH1..CH8)
+            int nCols = (gState.songLoaded && gState.numChans > 4) ? gState.numChans : 4;
+            if (nCols > 8) nCols = 8;
+            int colW = 320 / nCols;
+            int chIdx = tx / colW;
+            if (chIdx >= 0 && chIdx < nCols) {
               gState.chans[chIdx].muted = !gState.chans[chIdx].muted;
               if (gState.chans[chIdx].muted) {
                 os->audio_set_voice(chIdx, nullptr, 0, 0, 0, 0, 0, false);
@@ -1593,7 +1739,7 @@ extern "C" void app_main(const LakatosApi* os) {
             } else if (tx < 162) {
               gState.playing = !gState.playing;
               if (!gState.playing) {
-                for (int c = 0; c < 4; c++) {
+                for (int c = 0; c < 8; c++) {
                   os->audio_set_voice(c, nullptr, 0, 0, 0, 0, 0, false);
                 }
               }
