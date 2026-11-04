@@ -196,7 +196,10 @@ struct AppState {
 };
 
 static AppState gState;
-static const uint8_t kMasterVolScale[5] = {16, 28, 42, 54, 64};
+// Volume 0..11 ("goes to 11"): 0 = silent, 8 = normal 1.0x (64), 9..11 = overmodulated
+static const uint8_t kMasterVolScale[12] = {
+    0, 6, 12, 18, 26, 35, 44, 54, 64, 96, 144, 224
+};
 
 // ---------------------------------------------------------------------------
 // Utility Functions
@@ -248,8 +251,11 @@ static inline uint32_t periodToStepFp16(uint16_t period, uint8_t decShift) {
 static inline uint8_t scaleChannelVol(int chVol) {
   if (chVol <= 0) return 0;
   if (chVol > 64) chVol = 64;
-  uint32_t scaled = ((uint32_t)chVol * kMasterVolScale[gState.masterVolIdx & 7]) >> 6;
-  return (scaled > 64u) ? 64u : (uint8_t)scaled;
+  int vIdx = gState.masterVolIdx;
+  if (vIdx <= 0) return 0;
+  if (vIdx > 11) vIdx = 11;
+  uint32_t scaled = ((uint32_t)chVol * kMasterVolScale[vIdx]) >> 6;
+  return (scaled > 255u) ? 255u : (uint8_t)scaled;
 }
 
 static void updateVoiceOutput(int chIdx, uint16_t period, int vol, bool resetPos, uint32_t byteOffset = 0) {
@@ -272,6 +278,13 @@ static void updateVoiceOutput(int chIdx, uint16_t period, int vol, bool resetPos
   uint32_t step = periodToStepFp16(period, ch.decShift);
   uint8_t  outVol = scaleChannelVol(vol);
   gState.os->audio_set_voice(chIdx, pcmPtr, len, lStart, lLen, step, outVol, resetPos);
+}
+
+static void applyMasterVolumeImmediate() {
+  if (!gState.songLoaded || !gState.playing) return;
+  for (int c = 0; c < 4; c++) {
+    updateVoiceOutput(c, gState.chans[c].period, gState.chans[c].vol, false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,12 +1039,18 @@ static void drawTopHeader() {
   os->tft_set_text_color(LAKATOS_WHITE, viewBg);
   os->tft_draw_string(gState.inBrowserView ? "TRACK" : "FILES", 234, 14, 2);
 
-  // Master Volume button [V:x/5]
+  // Master Volume indicator / mute-toggle badge [VOL:0..11]
+  int vol = gState.masterVolIdx;
+  if (vol < 0) vol = 0;
+  if (vol > 11) vol = 11;
+  uint16_t volCol = (vol == 0) ? 0x7BEF
+                               : ((vol <= 8) ? LAKATOS_GREEN
+                                             : ((vol <= 10) ? LAKATOS_ORANGE : LAKATOS_RED));
   os->tft_fill_round_rect(264, 2, 54, 24, 4, 0x0841);
-  os->tft_draw_round_rect(264, 2, 54, 24, 4, LAKATOS_GREEN);
+  os->tft_draw_round_rect(264, 2, 54, 24, 4, volCol);
   char vbuf[16];
-  snprintf(vbuf, sizeof(vbuf), "V:%d/5", (gState.masterVolIdx & 7) + 1);
-  os->tft_set_text_color(LAKATOS_GREEN, 0x0841);
+  snprintf(vbuf, sizeof(vbuf), "VOL:%d", vol);
+  os->tft_set_text_color(volCol, 0x0841);
   os->tft_draw_string(vbuf, 291, 14, 2);
   os->tft_set_text_datum(LAKATOS_TL_DATUM);
 }
@@ -1136,9 +1155,9 @@ static void drawPatternGrid() {
                                : nullptr;
 
   os->tft_set_text_datum(LAKATOS_TL_DATUM);
-  for (int dr = -4; dr <= 4; dr++) {
+  for (int dr = -3; dr <= 3; dr++) {
     int r = centerRow + dr;
-    int y = 80 + (dr + 4) * 14;
+    int y = 78 + (dr + 3) * 14;
     bool isCenter = (dr == 0);
     uint16_t rowBg = isCenter ? 0x2124 : LAKATOS_BLACK;
     os->tft_fill_rect(0, y, 320, 14, rowBg);
@@ -1161,6 +1180,86 @@ static void drawPatternGrid() {
       }
     }
   }
+}
+
+static void drawVolumeSliderBar() {
+  const LakatosApi* os = gState.os;
+  int vol = gState.masterVolIdx;
+  if (vol < 0) vol = 0;
+  if (vol > 11) vol = 11;
+
+  os->tft_fill_rect(0, 176, 320, 32, 0x0841);
+  os->tft_draw_fast_h_line(0, 176, 320, 0x3186);
+
+  uint16_t valCol = (vol == 0) ? 0x7BEF
+                               : ((vol <= 8) ? LAKATOS_GREEN
+                                             : ((vol <= 10) ? LAKATOS_ORANGE : LAKATOS_RED));
+
+  // Left label: "VOL" + numeric 0..11
+  os->tft_set_text_datum(LAKATOS_ML_DATUM);
+  os->tft_set_text_color(LAKATOS_WHITE, 0x0841);
+  os->tft_draw_string("VOL", 6, 186, 1);
+  char vbuf[8];
+  snprintf(vbuf, sizeof(vbuf), "%2d", vol);
+  os->tft_set_text_color(valCol, 0x0841);
+  os->tft_draw_string(vbuf, 28, 192, 2);
+  if (vol == 0) {
+    os->tft_set_text_color(0x7BEF, 0x0841);
+    os->tft_draw_string("MUTE", 6, 200, 1);
+  } else if (vol >= 9) {
+    os->tft_set_text_color(valCol, 0x0841);
+    os->tft_draw_string("OVER", 6, 200, 1);
+  }
+
+  // Slider geometry: x = 62 .. 304 (11 intervals of 22 px = 242 px)
+  static constexpr int kTrackX0 = 62;
+  static constexpr int kStepPx  = 22;
+  static constexpr int kTrackW  = 11 * kStepPx; // 242
+
+  // Scale labels & ticks along top of slider (y = 178..186)
+  os->tft_set_text_datum(LAKATOS_MC_DATUM);
+  for (int i = 0; i <= 11; i++) {
+    int tx = kTrackX0 + i * kStepPx;
+    uint16_t tickCol = (i <= 8) ? 0x7BEF : ((i <= 10) ? LAKATOS_ORANGE : LAKATOS_RED);
+    os->tft_draw_fast_v_line(tx, 202, (i == 0 || i == 8 || i == 11) ? 5 : 3, tickCol);
+  }
+  os->tft_set_text_color(0xBDF7, 0x0841);
+  os->tft_draw_string("0", kTrackX0, 181, 1);
+  os->tft_draw_string("4", kTrackX0 + 4 * kStepPx, 181, 1);
+  os->tft_set_text_color(LAKATOS_GREEN, 0x0841);
+  os->tft_draw_string("8", kTrackX0 + 8 * kStepPx, 181, 1);
+  os->tft_set_text_color(LAKATOS_RED, 0x0841);
+  os->tft_draw_string("11", kTrackX0 + 11 * kStepPx, 181, 1);
+
+  // Slider trough (y = 190..199)
+  os->tft_fill_round_rect(kTrackX0 - 4, 190, kTrackW + 8, 10, 4, LAKATOS_BLACK);
+  os->tft_draw_round_rect(kTrackX0 - 4, 190, kTrackW + 8, 10, 4, 0x4208);
+
+  // Segmented color fill up to current volume
+  if (vol > 0) {
+    int cleanEnd = (vol <= 8) ? vol : 8;
+    int cleanW = cleanEnd * kStepPx;
+    os->tft_fill_rect(kTrackX0, 192, cleanW, 6, LAKATOS_GREEN);
+    if (vol >= 9) {
+      int warnEnd = (vol <= 10) ? vol : 10;
+      int warnW = (warnEnd - 8) * kStepPx;
+      os->tft_fill_rect(kTrackX0 + 8 * kStepPx, 192, warnW, 6, LAKATOS_ORANGE);
+    }
+    if (vol >= 11) {
+      os->tft_fill_rect(kTrackX0 + 10 * kStepPx, 192, kStepPx, 6, LAKATOS_RED);
+    }
+  }
+
+  // Unity gain (8) reference notch on trough
+  os->tft_draw_fast_v_line(kTrackX0 + 8 * kStepPx, 189, 12, LAKATOS_WHITE);
+
+  // Draggable thumb knob centered at thumbX
+  int thumbX = kTrackX0 + vol * kStepPx;
+  os->tft_fill_round_rect(thumbX - 7, 186, 15, 18, 4, valCol);
+  os->tft_draw_round_rect(thumbX - 7, 186, 15, 18, 4, LAKATOS_WHITE);
+  os->tft_draw_fast_v_line(thumbX, 189, 12, LAKATOS_BLACK);
+
+  os->tft_set_text_datum(LAKATOS_TL_DATUM);
 }
 
 static void drawTransportBar() {
@@ -1271,6 +1370,7 @@ static void drawFullScreen() {
     drawTrackerStatusBar();
     drawChannelHeadersAndVu(true);
     drawPatternGrid();
+    drawVolumeSliderBar();
     drawTransportBar();
   }
 }
@@ -1281,7 +1381,7 @@ static void drawFullScreen() {
 extern "C" void app_main(const LakatosApi* os) {
   memset(&gState, 0, sizeof(gState));
   gState.os                 = os;
-  gState.masterVolIdx       = 2; // Default 3/5 volume (prevents SC8002B USB rail brownout)
+  gState.masterVolIdx       = 7; // Default level 7 on 0..11 scale (8 = unity, 9..11 = overdrive)
   gState.autoNextSong       = true;
   gState.currentSongItemIdx = -1;
 
@@ -1312,6 +1412,8 @@ extern "C" void app_main(const LakatosApi* os) {
   int lastDrawnRow = -1;
   uint32_t lastVuDrawMs = 0;
   bool touchHeld = false;
+  bool draggingVolSlider = false;
+  int savedVolBeforeMute = 7;
 
   for (;;) {
     while (os->serial_available() > 0) {
@@ -1355,10 +1457,27 @@ extern "C" void app_main(const LakatosApi* os) {
 
     LakatosTouchSample ts = os->read_touch();
     if (ts.touched) {
-      if (!touchHeld) {
+      int tx = ts.x;
+      int ty = ts.y;
+
+      if (!touchHeld && !gState.inBrowserView && ty >= 174 && ty < 208) {
         touchHeld = true;
-        int tx = ts.x;
-        int ty = ts.y;
+        draggingVolSlider = true;
+      }
+
+      if (draggingVolSlider && !gState.inBrowserView) {
+        int newVol = (tx < 50) ? 0 : ((tx - 62 + 11) / 22);
+        if (newVol < 0) newVol = 0;
+        if (newVol > 11) newVol = 11;
+        if (newVol != gState.masterVolIdx) {
+          gState.masterVolIdx = newVol;
+          if (newVol > 0) savedVolBeforeMute = newVol;
+          applyMasterVolumeImmediate();
+          drawVolumeSliderBar();
+          drawTopHeader();
+        }
+      } else if (!touchHeld) {
+        touchHeld = true;
 
         // 1. Top Header Bar (y < 28)
         if (ty < 28) {
@@ -1373,8 +1492,17 @@ extern "C" void app_main(const LakatosApi* os) {
             lastDrawnRow = -1;
             drawFullScreen();
           } else if (tx >= 263) {
-            gState.masterVolIdx = (gState.masterVolIdx + 1) % 5;
+            if (gState.masterVolIdx > 0) {
+              savedVolBeforeMute = gState.masterVolIdx;
+              gState.masterVolIdx = 0;
+            } else {
+              gState.masterVolIdx = (savedVolBeforeMute > 0) ? savedVolBeforeMute : 7;
+            }
+            applyMasterVolumeImmediate();
             drawTopHeader();
+            if (!gState.inBrowserView) {
+              drawVolumeSliderBar();
+            }
           }
         } else if (gState.inBrowserView) {
           // 2. Browser View Touch Handling
@@ -1443,7 +1571,7 @@ extern "C" void app_main(const LakatosApi* os) {
           }
         } else {
           // 3. Tracker View Touch Handling
-          if (ty >= 50 && ty < 80) {
+          if (ty >= 50 && ty < 78) {
             // Channel Header Mute Toggle (CH1..CH4)
             int chIdx = tx / 80;
             if (chIdx >= 0 && chIdx < 4) {
@@ -1485,6 +1613,7 @@ extern "C" void app_main(const LakatosApi* os) {
       }
     } else {
       touchHeld = false;
+      draggingVolSlider = false;
     }
 
     os->delay_ms(12);

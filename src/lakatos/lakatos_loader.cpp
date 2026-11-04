@@ -503,13 +503,8 @@ static void audioMixerTimerCb(void* arg) {
       gAudioDcBias++;
     }
 
-    // Scale 4-channel mix with soft-knee limiting so 3-4 channel chords never hard-clip
-    int32_t scaled = (mix * 3) >> 9; // 1.5x single-channel gain, +/-192 max on 4-channel full-scale peak
-    if (scaled > 96) {
-      scaled = 96 + ((scaled - 96) >> 2);
-    } else if (scaled < -96) {
-      scaled = -96 + ((scaled + 96) >> 2);
-    }
+    // Scale 4-channel mix (vol 64 = normal 1.0x; vol > 64 drives into overmodulation up to [4, 252])
+    int32_t scaled = (mix * 3) >> 9;
     int32_t out = scaled + (int32_t)gAudioDcBias;
     if (out < 4) out = 4;
     else if (out > 252) out = 252;
@@ -604,7 +599,6 @@ static void api_audio_set_voice(int ch, const int8_t* pcm, uint32_t len,
                                 uint32_t loop_start, uint32_t loop_len,
                                 uint32_t step_fp16, uint8_t vol, bool reset_pos) {
   if (ch < 0 || ch >= 4) return;
-  if (vol > 64) vol = 64;
   LakatosVoiceState& v = gVoices[ch];
   if (pcm == nullptr) {
     if (len == LAKATOS_WAVE_NONE || step_fp16 == 0 || vol == 0) {
