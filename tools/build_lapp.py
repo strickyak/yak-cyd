@@ -289,6 +289,7 @@ def main():
     apps = [
         ("piano", "Piano", [os.path.join(REPO_DIR, "apps", "piano", "piano.cpp")]),
         ("modtrack", "MOD Tracker", [os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp")]),
+        ("midiplay", "MIDI Player", [os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp")]),
     ]
     for name, title, srcs in apps:
         build_app(name, title, srcs)
