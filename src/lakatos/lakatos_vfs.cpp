@@ -85,20 +85,112 @@ static bool ensureSdMounted() {
   if (gSdMounted) return true;
   uint32_t now = millis();
   if (now - gLastSdRetryMs < 1500 && gLastSdRetryMs != 0) {
+    gLastVfsErr = "ENOMEDIUM";
     return false;
   }
   gLastSdRetryMs = now;
+  SD.end();
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   if (SD.begin(SD_CS_PIN, SPI, 16000000)) {
     gSdMounted = true;
     Serial.println("[Lakatos VFS] Mounted /sd (MicroSD card).");
     return true;
   }
+  gLastVfsErr = "ENOMEDIUM";
   return false;
 }
 
 bool lakatosSdIsMounted() {
   return ensureSdMounted();
+}
+
+void lakatosGetFlashStorageInfo(LakatosStorageInfo* outInfo) {
+  if (!outInfo) return;
+  outInfo->flashMounted    = false;
+  outInfo->flashTotalBytes = 0;
+  outInfo->flashUsedBytes  = 0;
+  outInfo->flashFreeBytes  = 0;
+  if (gLoMounted) {
+    outInfo->flashMounted    = true;
+    outInfo->flashTotalBytes = (uint64_t)LittleFS.totalBytes();
+    outInfo->flashUsedBytes  = (uint64_t)LittleFS.usedBytes();
+    outInfo->flashFreeBytes  = (outInfo->flashTotalBytes >= outInfo->flashUsedBytes)
+                                   ? (outInfo->flashTotalBytes - outInfo->flashUsedBytes)
+                                   : 0;
+  }
+}
+
+bool lakatosProbeSdMounted(LakatosStorageInfo* outInfo, bool forceProbeSd) {
+  if (!outInfo) return false;
+  outInfo->sdMounted    = false;
+  outInfo->sdCardType   = "None";
+  outInfo->sdTotalBytes = 0;
+  outInfo->sdUsedBytes  = 0;
+  outInfo->sdFreeBytes  = 0;
+
+  if (forceProbeSd) {
+    gLastSdRetryMs = 0;
+    if (gSdMounted) {
+      File root = SD.open("/");
+      if (!root) {
+        SD.end();
+        gSdMounted = false;
+      } else {
+        root.close();
+      }
+    }
+  }
+
+  if (ensureSdMounted()) {
+    if (SD.cardSize() == 0) {
+      SD.end();
+      gSdMounted = false;
+      gLastVfsErr = "ENOMEDIUM";
+      return false;
+    }
+    outInfo->sdMounted = true;
+    sdcard_type_t ct = SD.cardType();
+    if (ct == CARD_SDHC) {
+      outInfo->sdCardType = "SDHC";
+    } else if (ct == CARD_SD) {
+      outInfo->sdCardType = "SD";
+    } else if (ct == CARD_MMC) {
+      outInfo->sdCardType = "MMC";
+    } else {
+      outInfo->sdCardType = "SD";
+    }
+    return true;
+  }
+  return false;
+}
+
+bool lakatosGetSdStorageSpace(LakatosStorageInfo* outInfo) {
+  if (!outInfo || !outInfo->sdMounted) return false;
+  uint64_t tot = SD.totalBytes();
+  if (tot == 0) {
+    SD.end();
+    gSdMounted = false;
+    gLastVfsErr = "ENOMEDIUM";
+    outInfo->sdMounted = false;
+    outInfo->sdCardType = "None";
+    return false;
+  }
+  outInfo->sdTotalBytes = tot;
+  outInfo->sdUsedBytes  = SD.usedBytes();
+  outInfo->sdFreeBytes  = (outInfo->sdTotalBytes >= outInfo->sdUsedBytes)
+                              ? (outInfo->sdTotalBytes - outInfo->sdUsedBytes)
+                              : 0;
+  return true;
+}
+
+void lakatosGetStorageInfo(LakatosStorageInfo* outInfo, bool forceProbeSd) {
+  if (!outInfo) return;
+  memset(outInfo, 0, sizeof(*outInfo));
+  outInfo->sdCardType = "None";
+  lakatosGetFlashStorageInfo(outInfo);
+  if (lakatosProbeSdMounted(outInfo, forceProbeSd)) {
+    lakatosGetSdStorageSpace(outInfo);
+  }
 }
 
 static bool ensurePrefetchWorkerStarted();
@@ -382,7 +474,17 @@ static int lakatosFsLsCommon(const char* path, LakatosFsEntry* outEntries, int m
   if (b == VFS_LO) {
     if (gLoMounted) count = lsFsImpl(LittleFS, subPath, outEntries, maxEntries, cb, cbUser);
   } else if (b == VFS_SD) {
-    if (ensureSdMounted()) count = lsFsImpl(SD, subPath, outEntries, maxEntries, cb, cbUser);
+    if (ensureSdMounted()) {
+      count = lsFsImpl(SD, subPath, outEntries, maxEntries, cb, cbUser);
+      if (count < 0 && subPath == "/") {
+        SD.end();
+        gSdMounted = false;
+        gLastSdRetryMs = 0;
+        if (ensureSdMounted()) {
+          count = lsFsImpl(SD, subPath, outEntries, maxEntries, cb, cbUser);
+        }
+      }
+    }
   } else if (b == VFS_SH) {
     if (WiFi.status() != WL_CONNECTED) return -1;
     WiFiClient cli;
@@ -422,6 +524,7 @@ int lakatosFsLsEach(const char* path, LakatosFsEntryCallback cb, void* userData)
 }
 
 bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
+  gLastVfsErr = "EIO";
   if (!outEntry) return false;
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);
@@ -430,7 +533,10 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
     if (b == VFS_LO && !gLoMounted) return false;
     if (b == VFS_SD && !ensureSdMounted()) return false;
     File f = fsPtr->open(subPath.c_str(), "r");
-    if (!f) return false;
+    if (!f) {
+      gLastVfsErr = "ENOENT";
+      return false;
+    }
     memset(outEntry, 0, sizeof(*outEntry));
     const char* nm = f.name();
     const char* slash = strrchr(nm, '/');
@@ -476,6 +582,7 @@ bool lakatosFsStat(const char* path, LakatosFsEntry* outEntry) {
 }
 
 int32_t lakatosFsRead(const char* path, uint32_t offset, void* buf, size_t len) {
+  gLastVfsErr = "EIO";
   if (!buf || len == 0) return 0;
   String subPath;
   VfsBackend b = parseVfsPath(path, subPath);

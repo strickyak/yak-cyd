@@ -161,6 +161,9 @@ func (b *TetherBridge) callFuse(cmd string, timeout time.Duration) (fuseRpcReply
 	select {
 	case rep := <-ch:
 		if !rep.ok {
+			if rep.errCode == "ENOMEDIUM" {
+				return rep, fmt.Errorf("no MicroSD card mounted at /sd (ENOMEDIUM)")
+			}
 			return rep, fmt.Errorf("fuse remote error: %s", rep.errCode)
 		}
 		return rep, nil

@@ -899,12 +899,12 @@ static void drawHomeHeaderBar() {
 static void drawHomeDropdownMenu() {
   if (!gHomeMenuOpen) return;
   LakatosTftGuard tftGuard;
-  // Dropdown panel anchored below [MENU] at top-right (x: 204..318, y: 24..114)
-  tft.fillRoundRect(204, 24, 114, 90, 5, 0x10A2);
-  tft.drawRoundRect(204, 24, 114, 90, 5, TFT_CYAN);
+  // Dropdown panel anchored below [MENU] at top-right (x: 204..318, y: 24..143)
+  tft.fillRoundRect(204, 24, 114, 119, 5, 0x10A2);
+  tft.drawRoundRect(204, 24, 114, 119, 5, TFT_CYAN);
 
-  const char* items[3] = {"Config", "FileBrowser", "About"};
-  for (int i = 0; i < 3; i++) {
+  const char* items[4] = {"Config", "FileBrowser", "Storage", "About"};
+  for (int i = 0; i < 4; i++) {
     int iy = 27 + i * 29;
     tft.fillRoundRect(208, iy, 106, 25, 4, 0x18E3);
     tft.drawRoundRect(208, iy, 106, 25, 4, TFT_CYAN);
@@ -1437,7 +1437,7 @@ static void handleFuseCommand(const String& line) {
     int32_t got = lakatosFsRead(path.c_str(), offset, buf, reqLen);
     if (got < 0) {
       free(buf);
-      Serial.printf("@@FUSE %s ERR EIO\r\n", seq.c_str());
+      Serial.printf("@@FUSE %s ERR %s\r\n", seq.c_str(), lakatosFsLastError());
       return;
     }
     String b64 = fuseBase64Encode(buf, (size_t)got);
@@ -1599,7 +1599,7 @@ void lakatosPollSerialFuse() {
       }
       continue;
     }
-    if (!gLCodeAppRunning) {
+    if (!gLCodeAppRunning && !lakatosIsNativeAppRunning()) {
       String line = Serial.readStringUntil('\n');
       line.trim();
       if (line.length() > 0) {
@@ -1650,12 +1650,16 @@ static void handleSerialCommandLine(const String& line) {
     LakatosFsEntry* entries = (LakatosFsEntry*)malloc(sizeof(LakatosFsEntry) * 32);
     if (entries) {
       int n = lakatosFsLs(path.c_str(), entries, 32);
-      Serial.printf("LS %s -> %d entries\r\n", path.c_str(), n);
-      for (int i = 0; i < n; i++) {
-        Serial.printf("  %s %-24s %lld\r\n",
-                      entries[i].isDir ? "[DIR] " : "[FILE]",
-                      entries[i].name,
-                      (long long)entries[i].size);
+      if (n < 0 && (path == "/sd" || path.startsWith("/sd/")) && !lakatosSdIsMounted()) {
+        Serial.printf("LS %s -> not mounted (no MicroSD card)\r\n", path.c_str());
+      } else {
+        Serial.printf("LS %s -> %d entries\r\n", path.c_str(), n);
+        for (int i = 0; i < n; i++) {
+          Serial.printf("  %s %-24s %lld\r\n",
+                        entries[i].isDir ? "[DIR] " : "[FILE]",
+                        entries[i].name,
+                        (long long)entries[i].size);
+        }
       }
       free(entries);
     }
@@ -1759,6 +1763,34 @@ static void handleSerialCommandLine(const String& line) {
       runLakatosConfigScreen(false);
       refreshActiveScreen();
     }
+  } else if (line == "df") {
+    LakatosStorageInfo stInfo;
+    memset(&stInfo, 0, sizeof(stInfo));
+    lakatosGetFlashStorageInfo(&stInfo);
+    if (stInfo.flashMounted) {
+      Serial.printf("Storage /flash: MOUNTED     | Free: %llu KB (%llu B) | Used: %llu KB / %llu KB\r\n",
+                    (unsigned long long)(stInfo.flashFreeBytes / 1024ULL),
+                    (unsigned long long)stInfo.flashFreeBytes,
+                    (unsigned long long)(stInfo.flashUsedBytes / 1024ULL),
+                    (unsigned long long)(stInfo.flashTotalBytes / 1024ULL));
+    } else {
+      Serial.println("Storage /flash: NOT MOUNTED");
+    }
+    if (lakatosProbeSdMounted(&stInfo, true) && lakatosGetSdStorageSpace(&stInfo)) {
+      Serial.printf("Storage /sd:    MOUNTED (%s) | Free: %llu KB (%llu B) | Used: %llu KB / %llu KB\r\n",
+                    stInfo.sdCardType ? stInfo.sdCardType : "SD",
+                    (unsigned long long)(stInfo.sdFreeBytes / 1024ULL),
+                    (unsigned long long)stInfo.sdFreeBytes,
+                    (unsigned long long)(stInfo.sdUsedBytes / 1024ULL),
+                    (unsigned long long)(stInfo.sdTotalBytes / 1024ULL));
+    } else {
+      Serial.println("Storage /sd:    NOT MOUNTED (no MicroSD card detected)");
+    }
+  } else if (line == "storage") {
+    if (!gInConfigScreen) {
+      runLakatosStorageScreen();
+      refreshActiveScreen();
+    }
   } else if (line == "dev" || line == "spot" ||
              line.startsWith("dev ") || line.startsWith("spot ")) {
     int pfx = line.startsWith("spot") ? 4 : 3;
@@ -1771,7 +1803,7 @@ static void handleSerialCommandLine(const String& line) {
     }
     Serial.printf("Developer Mode: %s\r\n", lakatosGetDeveloperMode() ? "ON" : "OFF");
   } else if (line == "help" || line == "?") {
-    Serial.println("Commands: info | ls [path] | run <path> | preview <path> | cp <src> <dst> | netpass <pw> | neturl <url> | devname <name> | serial <sn> | airport <iata> | wifi <ssid> [pw] | config | dev [on|off]");
+    Serial.println("Commands: info | df | storage | ls [path] | run <path> | preview <path> | cp <src> <dst> | netpass <pw> | neturl <url> | devname <name> | serial <sn> | airport <iata> | wifi <ssid> [pw] | config | dev [on|off]");
   } else {
     Serial.printf("Unknown command '%s'. Type 'help' for commands.\r\n", line.c_str());
   }
@@ -1860,8 +1892,8 @@ void loop() {
   // =========================================================================
   if (gScreenMode == SCREEN_HOME) {
     if (gHomeMenuOpen) {
-      // Check if user tapped one of the 3 dropdown items (x: 204..318, y: 27..113)
-      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 114) {
+      // Check if user tapped one of the 4 dropdown items (x: 204..318, y: 26..143)
+      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 143) {
         int itemIdx = (ty - 27) / 29;
         gHomeMenuOpen = false;
         if (itemIdx == 0) {
@@ -1877,6 +1909,12 @@ void loop() {
           drawFileBrowserScreen();
           return;
         } else if (itemIdx == 2) {
+          lakatosDevLogf("Menu: Storage (%d,%d)", tx, ty);
+          runLakatosStorageScreen();
+          refreshHomeApps();
+          drawHomeScreen();
+          return;
+        } else if (itemIdx == 3) {
           lakatosDevLogf("Menu: About (%d,%d)", tx, ty);
           runLakatosAboutScreen();
           refreshHomeApps();

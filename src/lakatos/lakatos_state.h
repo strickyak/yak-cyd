@@ -104,13 +104,31 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
 
 // Enters the interactive Settings / Calibration UI (returns when user taps HOME)
 void runLakatosConfigScreen(bool startInCalibration = false);
+void runLakatosStorageScreen();
 void runLakatosAboutScreen();
 
 // ---------------------------------------------------------------------------
 // Unified VFS (/flash/..., /sd/..., /net/...) (implemented in lakatos_vfs.cpp)
 // ---------------------------------------------------------------------------
+struct LakatosStorageInfo {
+  bool        flashMounted;
+  uint64_t    flashTotalBytes;
+  uint64_t    flashUsedBytes;
+  uint64_t    flashFreeBytes;
+
+  bool        sdMounted;
+  const char* sdCardType;
+  uint64_t    sdTotalBytes;
+  uint64_t    sdUsedBytes;
+  uint64_t    sdFreeBytes;
+};
+
 void initLakatosVfs();
 bool lakatosSdIsMounted();
+void lakatosGetFlashStorageInfo(LakatosStorageInfo* outInfo);
+bool lakatosProbeSdMounted(LakatosStorageInfo* outInfo, bool forceProbeSd = false);
+bool lakatosGetSdStorageSpace(LakatosStorageInfo* outInfo);
+void lakatosGetStorageInfo(LakatosStorageInfo* outInfo, bool forceProbeSd = false);
 
 typedef void (*LakatosFsEntryCallback)(const LakatosFsEntry& entry, void* userData);
 

@@ -931,6 +931,218 @@ static bool runAirportSelectorModal() {
 }
 
 // ---------------------------------------------------------------------------
+// STORAGE Status Screen (/flash & /sd Mounted State and Disk Free)
+// ---------------------------------------------------------------------------
+static void formatStorageBytes(uint64_t bytes, char* out, size_t cap) {
+  if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+    snprintf(out, cap, "%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+  } else if (bytes >= 10ULL * 1024ULL * 1024ULL) {
+    snprintf(out, cap, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+  } else if (bytes >= 1024ULL * 1024ULL) {
+    snprintf(out, cap, "%.2f MB", (double)bytes / (1024.0 * 1024.0));
+  } else if (bytes >= 1024ULL) {
+    snprintf(out, cap, "%llu KB", (unsigned long long)(bytes / 1024ULL));
+  } else {
+    snprintf(out, cap, "%llu B", (unsigned long long)bytes);
+  }
+}
+
+static void drawStoragePartitionCard(int cardY, const char* title, bool mounted,
+                                     bool calculating,
+                                     uint64_t totalB, uint64_t usedB, uint64_t freeB,
+                                     const char* unmountedMsg, const char* unmountedHint) {
+  LakatosTftGuard tftLock;
+  tft.fillRoundRect(6, cardY, 308, 98, 6, 0x1082);
+  tft.drawRoundRect(6, cardY, 308, 98, 6, (mounted || calculating) ? TFT_CYAN : 0x7BEF);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x1082);
+  tft.drawString(title, 14, cardY + 5, 2);
+
+  uint16_t badgeBg     = calculating ? (mounted ? TFT_DARKGREEN : 0x2945) : (mounted ? TFT_DARKGREEN : TFT_MAROON);
+  uint16_t badgeBorder = calculating ? (mounted ? TFT_GREEN : TFT_CYAN)   : (mounted ? TFT_GREEN : TFT_RED);
+  const char* badgeTxt = calculating ? (mounted ? "MOUNTED" : "CHECKING...")
+                                     : (mounted ? "MOUNTED" : "NOT MOUNTED");
+  tft.fillRoundRect(216, cardY + 5, 90, 18, 4, badgeBg);
+  tft.drawRoundRect(216, cardY + 5, 90, 18, 4, badgeBorder);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, badgeBg);
+  tft.drawString(badgeTxt, 261, cardY + 14, 1);
+
+  tft.drawFastHLine(14, cardY + 26, 292, 0x39E7);
+
+  if (calculating) {
+    tft.fillRect(14, cardY + 32, 292, 16, 0x0841);
+    tft.drawRect(14, cardY + 32, 292, 16, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x0841);
+    tft.drawString("Calculating free space...", 160, cardY + 40, 1);
+
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Disk Free:", 14, cardY + 53, 2);
+    tft.setTextColor(TFT_YELLOW, 0x1082);
+    tft.drawString("Calculating...", 104, cardY + 53, 2);
+
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Used/Total:", 14, cardY + 74, 2);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Scanning partition...", 104, cardY + 74, 2);
+    return;
+  }
+
+  if (mounted && totalB > 0) {
+    int usedPct = (int)((usedB * 100ULL + totalB / 2ULL) / totalB);
+    if (usedPct < 0) usedPct = 0;
+    if (usedPct > 100) usedPct = 100;
+    int freePct = 100 - usedPct;
+
+    tft.fillRect(14, cardY + 32, 292, 14, 0x0841);
+    tft.drawRect(14, cardY + 32, 292, 14, 0x39E7);
+    int fillW = (int)((usedB * 290ULL) / totalB);
+    if (fillW > 290) fillW = 290;
+    if (fillW > 0) {
+      tft.fillRect(15, cardY + 33, fillW, 12, (usedPct >= 85) ? TFT_ORANGE : 0x04FF);
+    }
+
+    char freeStr[24], usedStr[24], totStr[24], line1[64], line2[64];
+    formatStorageBytes(freeB, freeStr, sizeof(freeStr));
+    formatStorageBytes(usedB, usedStr, sizeof(usedStr));
+    formatStorageBytes(totalB, totStr, sizeof(totStr));
+    snprintf(line1, sizeof(line1), "%s  (%d%% free)", freeStr, freePct);
+    snprintf(line2, sizeof(line2), "%s / %s  (%d%% used)", usedStr, totStr, usedPct);
+
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Disk Free:", 14, cardY + 51, 2);
+    tft.setTextColor(TFT_GREEN, 0x1082);
+    tft.drawString(line1, 104, cardY + 51, 2);
+
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Used/Total:", 14, cardY + 73, 2);
+    tft.setTextColor(TFT_WHITE, 0x1082);
+    tft.drawString(line2, 104, cardY + 73, 2);
+  } else {
+    tft.fillRect(14, cardY + 32, 292, 16, 0x0841);
+    tft.drawRect(14, cardY + 32, 292, 16, 0x39E7);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_ORANGE, 0x0841);
+    tft.drawString(unmountedMsg, 160, cardY + 40, 1);
+
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Disk Free:", 14, cardY + 53, 2);
+    tft.setTextColor(TFT_YELLOW, 0x1082);
+    tft.drawString("--  (Not Mounted)", 104, cardY + 53, 2);
+
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString("Status:", 14, cardY + 74, 2);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString(unmountedHint, 104, cardY + 74, 2);
+  }
+}
+
+static void drawStorageScreen(bool forceProbeSd) {
+  // 1. Render page skeleton and "Calculating..." placeholders immediately
+  {
+    LakatosTftGuard tftLock;
+    tft.fillScreen(0x0841);
+    tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+
+    // [ HOME ] (top-left -> goes back to Home page)
+    tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
+    tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, 0x2945);
+    tft.drawString("HOME", 31, 12, 2);
+
+    tft.setTextColor(TFT_WHITE, TFT_NAVY);
+    tft.drawString("STORAGE", 160, 12, 2);
+  }
+
+  drawStoragePartitionCard(
+      30, "Flash  (/flash - LittleFS)", false, true,
+      0, 0, 0,
+      "Internal LittleFS partition not mounted",
+      "Check spiffs partition table");
+  drawStoragePartitionCard(
+      134, "SD Card  (/sd - MicroSD)", false, true,
+      0, 0, 0,
+      "No MicroSD card detected in slot",
+      "No card present");
+
+  // 2. Calculate /flash first (fast) and update the /flash card immediately
+  LakatosStorageInfo info;
+  memset(&info, 0, sizeof(info));
+  info.sdCardType = "None";
+  lakatosGetFlashStorageInfo(&info);
+  drawStoragePartitionCard(
+      30, "Flash  (/flash - LittleFS)", info.flashMounted, false,
+      info.flashTotalBytes, info.flashUsedBytes, info.flashFreeBytes,
+      "Internal LittleFS partition not mounted",
+      "Check spiffs partition table");
+
+  // 3. Probe /sd mount state; if mounted, show MOUNTED + "Calculating..." while scanning FAT
+  bool sdPresent = lakatosProbeSdMounted(&info, forceProbeSd);
+  char sdTitle[48];
+  if (sdPresent && info.sdCardType && info.sdCardType[0]) {
+    snprintf(sdTitle, sizeof(sdTitle), "SD Card  (/sd - %s)", info.sdCardType);
+  } else {
+    snprintf(sdTitle, sizeof(sdTitle), "SD Card  (/sd - MicroSD)");
+  }
+
+  if (sdPresent) {
+    drawStoragePartitionCard(
+        134, sdTitle, true, true,
+        0, 0, 0,
+        "No MicroSD card detected in slot",
+        "No card present");
+    lakatosGetSdStorageSpace(&info);
+  }
+
+  // 4. Update /sd card with final free/used/total space (or NOT MOUNTED)
+  drawStoragePartitionCard(
+      134, sdTitle, info.sdMounted, false,
+      info.sdTotalBytes, info.sdUsedBytes, info.sdFreeBytes,
+      "No MicroSD card detected in slot",
+      "No card present");
+}
+
+void runLakatosStorageScreen() {
+  lakatosSetInConfigScreen(true);
+  drawStorageScreen(true);
+  lakatosWaitTouchRelease();
+
+  bool wasDown = false;
+  uint32_t lastRel = millis();
+  while (true) {
+    updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      lakatosSetInConfigScreen(false);
+      return;
+    }
+    LakatosTouchSample t = lakatosReadTouch();
+    uint32_t now = millis();
+    if (t.touched) {
+      if (!wasDown && (now - lastRel > 100)) {
+        wasDown = true;
+        if (t.y <= 25 && t.x <= 62) {
+          lakatosDevLogf("Button: STORAGE -> HOME (%d,%d)", t.x, t.y);
+          lakatosSetInConfigScreen(false);
+          return;
+        }
+      }
+    } else {
+      if (wasDown) {
+        wasDown = false;
+        lastRel = now;
+      }
+    }
+    delay(15);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ABOUT Lakatos Operating System Screen
 // ---------------------------------------------------------------------------
 void runLakatosAboutScreen() {

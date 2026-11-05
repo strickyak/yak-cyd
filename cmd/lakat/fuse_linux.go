@@ -153,7 +153,7 @@ func (lfs *lakatosFS) listDir(dirPath string, forceRefresh bool) ([]FuseRemoteEn
 
 	entries, err := lfs.bridge.FuseLs(dirPath)
 	if err != nil {
-		return nil, syscall.EIO
+		return nil, fuseErrno(err)
 	}
 
 	lfs.mu.Lock()
@@ -363,6 +363,10 @@ func fuseErrno(err error) error {
 		return syscall.EFBIG
 	case strings.HasSuffix(msg, "ENOMEM"):
 		return syscall.ENOMEM
+	case strings.Contains(msg, "ENOMEDIUM"):
+		return syscall.ENOMEDIUM
+	case strings.Contains(msg, "ENODEV"):
+		return syscall.ENODEV
 	default:
 		return syscall.EIO
 	}

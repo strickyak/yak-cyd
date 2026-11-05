@@ -248,10 +248,12 @@ static void api_set_rgb_led(bool r, bool g, bool b, uint32_t duration_ms) {
 }
 
 static int api_serial_available(void) {
+  lakatosPollSerialFuse();
   return Serial.available();
 }
 
 static int api_serial_read(void) {
+  lakatosPollSerialFuse();
   return Serial.read();
 }
 
