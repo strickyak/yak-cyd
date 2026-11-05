@@ -31,7 +31,8 @@ static constexpr uint16_t kColScopeTrace = RGB565(60, 255, 160);
 // ---------------------------------------------------------------------------
 struct RadioPreset {
   const char* label;
-  const char* title;
+  const char* stationName;
+  const char* location;
   const char* url;
   const char* fallbackUrl;
 };
@@ -39,42 +40,55 @@ struct RadioPreset {
 static const RadioPreset kPresets[] = {
   {
     "WREK",
-    "WREK 91.1 FM (Georgia Tech - Atlanta)",
+    "WREK 91.1 FM",
+    "Georgia Tech - Atlanta, GA",
     "http://streaming.wrek.org:8000/main/24kb.mp3",
     nullptr
   },
   {
     "WREK-2",
-    "WREK HD2 (Georgia Tech - Atlanta)",
+    "WREK 91.1 HD2",
+    "Georgia Tech - Atlanta, GA",
     "http://streaming.wrek.org:8000/hd2/24kb.mp3",
     nullptr
   },
   {
     "WDAV",
-    "WDAV 89.9 FM (Davidson College, NC)",
+    "WDAV 89.9 FM",
+    "Davidson College - Davidson, NC",
     "http://audio-mp3.ibiblio.org:8000/wdav-24k",
     "http://audio-mp3.ibiblio.org:8000/wdav-56k"
   },
   {
     "WNCW",
-    "WNCW 88.7 FM (Spindale, NC)",
+    "WNCW 88.7 FM",
+    "Isothermal CC - Spindale, NC",
     "http://audio-mp3.ibiblio.org:8000/wncw-24k",
     "https://audio-mp3.ibiblio.org/wncw-24k"
   },
   {
     "WFMU",
-    "WFMU 91.1 FM (Freeform - Jersey City, NJ)",
+    "WFMU 91.1 FM",
+    "Freeform - East Orange / Jersey City, NJ",
     "http://stream0.wfmu.org/freeform-32k",
     nullptr
   },
   {
     "WRVO",
-    "WRVO Public Media (SUNY Oswego, NY)",
+    "WRVO Public Media",
+    "SUNY Oswego - Oswego, NY",
     "http://wrvo-ice.streamguys.org/wrvo1-low",
     "http://playerservices.streamtheworld.com/api/livestream-redirect/WRVOHD2.mp3"
   },
+  {
+    "BBC",
+    "BBC World Service",
+    "BBC Broadcasting House - London, UK",
+    "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+    nullptr
+  },
 };
-static constexpr int kNumPresets = 6;
+static constexpr int kNumPresets = 7;
 
 // ---------------------------------------------------------------------------
 // Audio & Network Ring Buffers
@@ -121,8 +135,9 @@ enum StreamState {
 };
 
 static StreamState gState             = ST_DISCONNECTED;
-static int         gPresetIdx         = 0;
-static char        gStationTitle[48]  = "WREK 91.1 FM (Georgia Tech - Atlanta)";
+static int         gPresetIdx         = 0; // 0..6 = preset, 7 = custom URL
+static char        gCustomUrl[128]    = "http://streaming.wrek.org:8000/main/24kb.mp3";
+static char        gStationTitle[48]  = "Georgia Tech - Atlanta, GA";
 static uint8_t     gMasterVolStep     = 8;  // 0..11 (0=silence, 8=100%, 9..11=overmodulated)
 static uint32_t    gBytesReceived     = 0;
 static uint32_t    gFramesDecoded     = 0;
@@ -267,7 +282,7 @@ static bool connectToStream(const char* url, const char* fallbackUrl, const char
 static bool connectToPreset(int idx) {
   if (idx < 0 || idx >= kNumPresets) return false;
   gPresetIdx = idx;
-  return connectToStream(kPresets[idx].url, kPresets[idx].fallbackUrl, kPresets[idx].title);
+  return connectToStream(kPresets[idx].url, kPresets[idx].fallbackUrl, kPresets[idx].location);
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +541,7 @@ static void decodeAvailableFrames() {
 // ---------------------------------------------------------------------------
 // UI Rendering (320x240 Landscape)
 // ---------------------------------------------------------------------------
-static constexpr int kVolBarY = 164;
+static constexpr int kVolBarY = 156;
 static constexpr int kVolBarH = 22;
 static constexpr int kVolTrkX = 48;
 static constexpr int kVolTrkW = 198;
@@ -547,11 +562,11 @@ static void drawStatusBadge() {
     bg  = RGB565(50, 65, 95);
   }
 
-  gOs->tft_fill_round_rect(206, 2, 62, 18, 4, bg);
-  gOs->tft_draw_round_rect(206, 2, 62, 18, 4, kColGridBorder);
+  gOs->tft_fill_round_rect(254, 2, 62, 18, 4, bg);
+  gOs->tft_draw_round_rect(254, 2, 62, 18, 4, kColGridBorder);
   gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
   gOs->tft_set_text_color(fg, bg);
-  gOs->tft_draw_string(txt, 237, 11, 1);
+  gOs->tft_draw_string(txt, 285, 11, 1);
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
 }
 
@@ -559,37 +574,32 @@ static void drawHeaderBar() {
   gOs->tft_fill_rect(0, 0, 320, 22, kColHeader);
   gOs->tft_draw_fast_h_line(0, 22, 320, kColGtGold);
 
-  // Active Station Callsign Badge
-  const char* callsign = (gPresetIdx >= 0 && gPresetIdx < kNumPresets)
-                             ? kPresets[gPresetIdx].label
-                             : "RADIO";
-  gOs->tft_fill_round_rect(4, 3, 56, 16, 3, kColGtGold);
-  gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
-  gOs->tft_set_text_color(kColBg, kColGtGold);
-  gOs->tft_draw_string(callsign, 32, 11, 2);
-
-  gOs->tft_set_text_datum(LAKATOS_ML_DATUM);
-  gOs->tft_set_text_color(kColGtGoldBright, kColHeader);
-  gOs->tft_draw_string("COLLEGE RADIO", 66, 11, 2);
-
-  drawStatusBadge();
-
-  // EXIT Button
-  gOs->tft_fill_round_rect(272, 2, 44, 18, 4, RGB565(135, 30, 42));
-  gOs->tft_draw_round_rect(272, 2, 44, 18, 4, RGB565(225, 90, 105));
+  // EXIT Button on Top Left
+  gOs->tft_fill_round_rect(4, 2, 44, 18, 4, RGB565(135, 30, 42));
+  gOs->tft_draw_round_rect(4, 2, 44, 18, 4, RGB565(225, 90, 105));
   gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
   gOs->tft_set_text_color(kColText, RGB565(135, 30, 42));
-  gOs->tft_draw_string("EXIT", 294, 11, 1);
+  gOs->tft_draw_string("EXIT", 26, 11, 1);
+
+  // Station Name in Top Bar
+  const char* stName = (gPresetIdx >= 0 && gPresetIdx < kNumPresets)
+                           ? kPresets[gPresetIdx].stationName
+                           : "Custom Stream";
+  gOs->tft_set_text_datum(LAKATOS_ML_DATUM);
+  gOs->tft_set_text_color(kColGtGoldBright, kColHeader);
+  gOs->tft_draw_string(stName, 56, 11, 2);
+
+  drawStatusBadge();
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
 }
 
 static void drawInfoPanel() {
-  gOs->tft_fill_rect(4, 25, 312, 32, kColPanel);
-  gOs->tft_draw_rect(4, 25, 312, 32, kColGridBorder);
+  gOs->tft_fill_rect(4, 25, 312, 31, kColPanel);
+  gOs->tft_draw_rect(4, 25, 312, 31, kColGridBorder);
 
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
   gOs->tft_set_text_color(kColText, kColPanel);
-  gOs->tft_draw_string(gStationTitle, 10, 28, 2);
+  gOs->tft_draw_string(gStationTitle, 10, 27, 2);
 
   char spec[64];
   uint32_t pcmBuffered = (gPcmWriteIdx >= gPcmReadIdx) ? (gPcmWriteIdx - gPcmReadIdx) : 0;
@@ -601,11 +611,11 @@ static void drawInfoPanel() {
            (gStreamChans == 2) ? "J-ST" : "MONO",
            (unsigned long)(gBytesReceived >> 10));
   gOs->tft_set_text_color(kColAccent, kColPanel);
-  gOs->tft_draw_string(spec, 10, 45, 1);
+  gOs->tft_draw_string(spec, 10, 44, 1);
 
   // Buffer health bar on right of info panel
   int bx = 228;
-  int by = 45;
+  int by = 44;
   int bw = 80;
   int bh = 8;
   gOs->tft_fill_rect(bx, by, bw, bh, RGB565(8, 12, 20));
@@ -618,19 +628,19 @@ static void drawInfoPanel() {
 }
 
 static void drawVisualizerFrames() {
-  // Left Box: 16-Band Spectrum / Energy Analyzer (x=4..158, y=60..160)
-  gOs->tft_fill_rect(4, 60, 154, 100, kColPanel);
-  gOs->tft_draw_rect(4, 60, 154, 100, kColGridBorder);
+  // Left Box: 16-Band Spectrum / Energy Analyzer (x=4..158, y=59..153)
+  gOs->tft_fill_rect(4, 59, 154, 94, kColPanel);
+  gOs->tft_draw_rect(4, 59, 154, 94, kColGridBorder);
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
   gOs->tft_set_text_color(kColSub, kColPanel);
-  gOs->tft_draw_string("SPECTRUM / LEVEL", 10, 63, 1);
+  gOs->tft_draw_string("SPECTRUM / LEVEL", 10, 62, 1);
 
-  // Right Box: Live Waveform Oscilloscope (x=162..316, y=60..160)
-  gOs->tft_fill_rect(162, 60, 154, 100, kColPanel);
-  gOs->tft_draw_rect(162, 60, 154, 100, kColGridBorder);
+  // Right Box: Live Waveform Oscilloscope (x=162..316, y=59..153)
+  gOs->tft_fill_rect(162, 59, 154, 94, kColPanel);
+  gOs->tft_draw_rect(162, 59, 154, 94, kColGridBorder);
   gOs->tft_set_text_color(kColSub, kColPanel);
-  gOs->tft_draw_string("WAVEFORM SCOPE", 168, 63, 1);
-  gOs->tft_draw_fast_h_line(166, 114, kScopeCols, RGB565(25, 38, 62));
+  gOs->tft_draw_string("WAVEFORM SCOPE", 168, 62, 1);
+  gOs->tft_draw_fast_h_line(166, 110, kScopeCols, RGB565(25, 38, 62));
 
   for (int i = 0; i < kNumBars; i++) {
     gPrevBarH[i]  = -1;
@@ -642,9 +652,9 @@ static void drawVisualizerFrames() {
 }
 
 static void updateVisualizersIncremental() {
-  // 1. Update 16 Spectrum Bars (x=8..152, bottom=156, maxH=80)
-  const int baseBottom = 156;
-  const int maxBarH    = 80;
+  // 1. Update 16 Spectrum Bars (x=8..152, bottom=150, maxH=74)
+  const int baseBottom = 150;
+  const int maxBarH    = 74;
 
   for (int b = 0; b < kNumBars; b++) {
     int bx = 9 + b * 9;
@@ -663,14 +673,14 @@ static void updateVisualizersIncremental() {
       }
       if (h > 0) {
         // Segmented green -> gold -> red bar
-        int lowH = (h > 48) ? 48 : h;
+        int lowH = (h > 44) ? 44 : h;
         gOs->tft_fill_rect(bx, baseBottom - lowH, bw, lowH, kColGreen);
-        if (h > 48) {
-          int midH = (h > 66) ? 18 : (h - 48);
-          gOs->tft_fill_rect(bx, baseBottom - 48 - midH, bw, midH, kColGtGold);
+        if (h > 44) {
+          int midH = (h > 60) ? 16 : (h - 44);
+          gOs->tft_fill_rect(bx, baseBottom - 44 - midH, bw, midH, kColGtGold);
         }
-        if (h > 66) {
-          int hiH = h - 66;
+        if (h > 60) {
+          int hiH = h - 60;
           gOs->tft_fill_rect(bx, baseBottom - h, bw, hiH, kColRed);
         }
       }
@@ -681,8 +691,8 @@ static void updateVisualizersIncremental() {
     int pkH = ((int)gBarPeak[b] * maxBarH) >> 8;
     if (pkH > maxBarH) pkH = maxBarH;
     int pkY = baseBottom - pkH - 2;
-    if (pkY < 74) pkY = 74;
-    if (gPrevPeakY[b] >= 74 && gPrevPeakY[b] != pkY && gPrevPeakY[b] < baseBottom - h) {
+    if (pkY < 73) pkY = 73;
+    if (gPrevPeakY[b] >= 73 && gPrevPeakY[b] != pkY && gPrevPeakY[b] < baseBottom - h) {
       gOs->tft_draw_fast_h_line(bx, gPrevPeakY[b], bw, kColPanel);
     }
     if (pkH > 2) {
@@ -697,10 +707,10 @@ static void updateVisualizersIncremental() {
     else gBarPeak[b] = 0;
   }
 
-  // 2. Update Live Oscilloscope Trace (x=166..309, center Y=114, 2x Y-scale)
+  // 2. Update Live Oscilloscope Trace (x=166..309, center Y=110, 2x Y-scale)
   uint32_t rBase = gPcmReadIdx;
   const int scopeX0  = 166;
-  const int centerY  = 114;
+  const int centerY  = 110;
 
   for (int x = 0; x < kScopeCols; x++) {
     int8_t s = 0;
@@ -708,11 +718,11 @@ static void updateVisualizersIncremental() {
       s = gPcmRing[(rBase + (uint32_t)(x * 2)) & kPcmRingMask];
     }
     int y = centerY - (((int)s * 72) >> 7);
-    if (y < 75) y = 75;
-    if (y > 155) y = 155;
+    if (y < 73) y = 73;
+    if (y > 149) y = 149;
 
     int prevY = gPrevScopeY[x];
-    if (prevY >= 75 && prevY != y) {
+    if (prevY >= 73 && prevY != y) {
       gOs->tft_fill_rect(scopeX0 + x, prevY - 1, 1, 3, kColPanel);
       if (prevY - 1 <= centerY && centerY <= prevY + 1) {
         gOs->tft_fill_rect(scopeX0 + x, centerY, 1, 1, RGB565(25, 38, 62));
@@ -805,23 +815,29 @@ static bool handleVolumeTouch(int tx, int ty) {
 }
 
 static void drawBottomButtons() {
-  const int by   = 190;
-  const int bh   = 46;
-  const int btnW = 50;
-  const int gap  = 2;
+  // 8 buttons arranged in 2 rows of 4 buttons (y = 181..236)
+  const int btnW = 74;
+  const int btnH = 26;
+  const int gapX = 4;
 
   gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
-  for (int i = 0; i < kNumPresets; i++) {
-    int bx = 5 + i * (btnW + gap);
+  for (int i = 0; i < 8; i++) {
+    int row = i / 4;
+    int col = i % 4;
+    int bx  = 6 + col * (btnW + gapX);
+    int by  = (row == 0) ? 181 : 210;
+
     bool active = (gPresetIdx == i);
-    uint16_t bg     = active ? RGB565(55, 45, 12) : RGB565(22, 36, 62);
+    const char* label = (i < kNumPresets) ? kPresets[i].label : "URL...";
+    uint16_t baseBg = (i < kNumPresets) ? RGB565(22, 36, 62) : RGB565(45, 32, 75);
+    uint16_t bg     = active ? RGB565(55, 45, 12) : baseBg;
     uint16_t border = active ? kColGtGoldBright   : kColGridBorder;
     uint16_t fg     = active ? kColGtGoldBright   : kColText;
 
-    gOs->tft_fill_round_rect(bx, by, btnW, bh, 5, bg);
-    gOs->tft_draw_round_rect(bx, by, btnW, bh, 5, border);
+    gOs->tft_fill_round_rect(bx, by, btnW, btnH, 4, bg);
+    gOs->tft_draw_round_rect(bx, by, btnW, btnH, 4, border);
     gOs->tft_set_text_color(fg, bg);
-    gOs->tft_draw_string(kPresets[i].label, bx + btnW / 2, by + bh / 2, 2);
+    gOs->tft_draw_string(label, bx + btnW / 2, by + btnH / 2, 2);
   }
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
 }
@@ -866,7 +882,11 @@ void app_main(const LakatosApi* os) {
     // Auto-reconnect on transient network drop (every 4s)
     uint32_t now = os->millis();
     if (gState == ST_ERROR && (uint32_t)(now - gLastReconnectMs) >= 4000u) {
-      connectToPreset(gPresetIdx);
+      if (gPresetIdx >= 0 && gPresetIdx < kNumPresets) {
+        connectToPreset(gPresetIdx);
+      } else {
+        connectToStream(gCustomUrl, nullptr, gCustomUrl);
+      }
     }
 
     if (gState != prevDrawnState) {
@@ -886,19 +906,42 @@ void app_main(const LakatosApi* os) {
       if (handleVolumeTouch(ts.x, ts.y)) {
         prevTouch = true;
       } else if (!prevTouch) {
-        // EXIT button
-        if (ts.y <= 24 && ts.x >= 268) {
+        // EXIT button (top left)
+        if (ts.y <= 24 && ts.x <= 54) {
           break;
         }
-        // Bottom 6 station callsign buttons (y = 190..236)
-        if (ts.y >= 190) {
-          int idx = (ts.x - 5) / 52;
-          if (idx >= 0 && idx < kNumPresets) {
+        // Bottom 2x4 button grid (y = 181..238)
+        if (ts.y >= 180) {
+          int row = (ts.y >= 209) ? 1 : 0;
+          int col = (ts.x - 6) / 78;
+          if (col < 0) col = 0;
+          if (col > 3) col = 3;
+          int idx = row * 4 + col;
+          if (idx < kNumPresets) {
             gPresetIdx = idx;
             drawHeaderBar();
             drawBottomButtons();
             drawInfoPanel();
             connectToPreset(idx);
+            drawStatusBadge();
+            drawInfoPanel();
+          } else {
+            // 8th button: Custom URL keyboard prompt
+            closeCurrentStream();
+            int r = os->prompt_keyboard("STREAM URL (HTTP MP3):", gCustomUrl, sizeof(gCustomUrl), false);
+            os->set_rgb_led(true, false, false, 0);
+            if (r == 1 && gCustomUrl[0]) {
+              gPresetIdx = 7;
+              drawFullUi();
+              connectToStream(gCustomUrl, nullptr, gCustomUrl);
+            } else {
+              drawFullUi();
+              if (gPresetIdx >= 0 && gPresetIdx < kNumPresets) {
+                connectToPreset(gPresetIdx);
+              } else {
+                connectToStream(gCustomUrl, nullptr, gCustomUrl);
+              }
+            }
             drawStatusBadge();
             drawInfoPanel();
           }
