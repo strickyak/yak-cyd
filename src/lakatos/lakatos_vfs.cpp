@@ -1258,3 +1258,65 @@ const uint8_t* lakatosPrefetchBuffer(uint32_t* outBytesGot) {
   if (outBytesGot) *outBytesGot = gPrefetchBytesGot;
   return gPrefetchDstBuf;
 }
+
+// ---------------------------------------------------------------------------
+// Live HTTP Audio/Data Stream (Non-Blocking Reader for Radio / Streaming Apps)
+// ---------------------------------------------------------------------------
+static WiFiClient gLiveStreamClient;
+static HTTPClient gLiveStreamHttp;
+static bool       gLiveStreamOpen = false;
+
+void lakatosHttpStreamClose() {
+  if (gLiveStreamOpen) {
+    gLiveStreamHttp.end();
+    gLiveStreamClient.stop();
+    gLiveStreamOpen = false;
+  }
+}
+
+bool lakatosHttpStreamOpen(const char* url) {
+  lakatosHttpStreamClose();
+  if (!url || !url[0] || WiFi.status() != WL_CONNECTED) return false;
+  gLiveStreamClient.setNoDelay(true);
+  gLiveStreamHttp.useHTTP10(true);
+  gLiveStreamHttp.setTimeout(8000);
+  gLiveStreamHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  gLiveStreamHttp.setUserAgent("Lakatos-CYD/1.0");
+  if (!gLiveStreamHttp.begin(gLiveStreamClient, url)) {
+    return false;
+  }
+  int code = gLiveStreamHttp.GET();
+  if (code < 200 || code >= 300) {
+    gLiveStreamHttp.end();
+    gLiveStreamClient.stop();
+    return false;
+  }
+  gLiveStreamOpen = true;
+  Serial.printf("[Lakatos HTTP] Stream opened: %s (HTTP %d, heap=%u)\r\n",
+                url, code, (unsigned)ESP.getFreeHeap());
+  return true;
+}
+
+int32_t lakatosHttpStreamRead(void* buf, size_t maxLen) {
+  if (!gLiveStreamOpen || !buf || maxLen == 0) return -1;
+  if (lakatosShouldExitApp()) {
+    lakatosHttpStreamClose();
+    return -1;
+  }
+  WiFiClient* stream = gLiveStreamHttp.getStreamPtr();
+  if (!stream) {
+    lakatosHttpStreamClose();
+    return -1;
+  }
+  size_t avail = stream->available();
+  if (avail > 0) {
+    size_t toRead = (avail > maxLen) ? maxLen : avail;
+    int r = stream->read((uint8_t*)buf, toRead);
+    return (r > 0) ? (int32_t)r : 0;
+  }
+  if (!gLiveStreamHttp.connected() && !stream->connected()) {
+    lakatosHttpStreamClose();
+    return -1;
+  }
+  return 0;
+}

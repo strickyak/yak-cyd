@@ -218,6 +218,11 @@ typedef struct LakatosApi {
 
   // --- Streaming VFS Reader with Transparent .zip Extraction ---
   int32_t  (*fs_read_stream)(const char* path, lakatos_stream_cb_t on_chunk, void* user);
+
+  // --- Live HTTP Audio/Data Stream ---
+  bool     (*http_stream_open)(const char* url);
+  int32_t  (*http_stream_read)(void* buf, size_t max_len);
+  void     (*http_stream_close)(void);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);

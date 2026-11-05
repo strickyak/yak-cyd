@@ -882,6 +882,9 @@ static const LakatosApi gLakatosApi = {
     .audio_set_voice      = api_audio_set_voice,
     .audio_set_tick_cb    = api_audio_set_tick_cb,
     .fs_read_stream       = api_fs_read_stream,
+    .http_stream_open     = lakatosHttpStreamOpen,
+    .http_stream_read     = lakatosHttpStreamRead,
+    .http_stream_close    = lakatosHttpStreamClose,
 };
 
 // ---------------------------------------------------------------------------
@@ -1203,6 +1206,7 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
 
   gAppRunning = false;
   api_audio_stop();
+  lakatosHttpStreamClose();
   pinMode(26, OUTPUT);
   digitalWrite(26, LOW);
   lakatosPrefetchFree();

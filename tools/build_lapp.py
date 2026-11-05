@@ -165,7 +165,7 @@ def dump_section(elf_path, sec_name):
             os.remove(tmp_path)
 
 
-def build_app(app_name, title, src_files):
+def build_app(app_name, title, src_files, extra_flags=None, extra_libs=None):
     os.makedirs(BUILD_DIR, exist_ok=True)
     elf_path = os.path.join(BUILD_DIR, f"{app_name}.elf")
     lapp_path = os.path.join(BUILD_DIR, f"{app_name}.lapp")
@@ -190,8 +190,9 @@ def build_app(app_name, title, src_files):
             "-Os",
             "-Wall",
             f"-I{INCLUDE_DIR}",
+        ] + (extra_flags or []) + [
             crt0_cpp,
-        ] + src_files + [
+        ] + src_files + (extra_libs or []) + [
             "-nostdlib",
             "-Wl,-T," + LD_SCRIPT,
             "-Wl,--gc-sections",
@@ -286,13 +287,28 @@ def build_app(app_name, title, src_files):
 
 
 def main():
+    esp32_libs_dir = os.path.expanduser(
+        "~/.platformio/packages/framework-arduinoespressif32-esp32-libs"
+    )
+    helix_inc = os.path.join(
+        esp32_libs_dir, "include", "chmorgan__esp-libhelix-mp3", "libhelix-mp3", "pub"
+    )
+    helix_lib = os.path.join(esp32_libs_dir, "lib", "libchmorgan__esp-libhelix-mp3.a")
+
     apps = [
-        ("piano", "Piano", [os.path.join(REPO_DIR, "apps", "piano", "piano.cpp")]),
-        ("modtrack", "MOD Tracker", [os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp")]),
-        ("midiplay", "MIDI Player", [os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp")]),
+        ("piano", "Piano", [os.path.join(REPO_DIR, "apps", "piano", "piano.cpp")], [], []),
+        ("modtrack", "MOD Tracker", [os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp")], [], []),
+        ("midiplay", "MIDI Player", [os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp")], [], []),
+        (
+            "wrek-fm",
+            "WREK 91.1 FM",
+            [os.path.join(REPO_DIR, "apps", "wrek-fm", "wrek-fm.cpp")],
+            [f"-I{helix_inc}"],
+            [helix_lib],
+        ),
     ]
-    for name, title, srcs in apps:
-        build_app(name, title, srcs)
+    for name, title, srcs, flags, libs in apps:
+        build_app(name, title, srcs, flags, libs)
 
 
 if __name__ == "__main__":

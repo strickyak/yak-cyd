@@ -127,6 +127,9 @@ const char* lakatosFsLastError();
 int64_t lakatosFsDu(const char* path);
 int     lakatosHttpGet(const char* url, void* buf, size_t maxLen);
 int     lakatosHttpGetCached(const char* url, void* buf, size_t maxLen, uint32_t maxAgeSec);
+bool    lakatosHttpStreamOpen(const char* url);
+int32_t lakatosHttpStreamRead(void* buf, size_t maxLen);
+void    lakatosHttpStreamClose();
 
 struct LakatosVfsStream;
 LakatosVfsStream* lakatosFsOpenRead(const char* path);
