@@ -48,6 +48,7 @@ void _lakatos_app_entry(const LakatosApi* os) {
 }
 
 void* memcpy(void* dst, const void* src, size_t n) {
+  if ((int32_t)n <= 0 || n > 0x100000u) return dst;
   uint8_t* d = (uint8_t*)dst;
   const uint8_t* s = (const uint8_t*)src;
   for (size_t i = 0; i < n; i++) d[i] = s[i];
@@ -55,6 +56,7 @@ void* memcpy(void* dst, const void* src, size_t n) {
 }
 
 void* memmove(void* dst, const void* src, size_t n) {
+  if ((int32_t)n <= 0 || n > 0x100000u) return dst;
   uint8_t* d = (uint8_t*)dst;
   const uint8_t* s = (const uint8_t*)src;
   if (d < s) {
@@ -66,6 +68,7 @@ void* memmove(void* dst, const void* src, size_t n) {
 }
 
 void* memset(void* dst, int c, size_t n) {
+  if ((int32_t)n <= 0 || n > 0x100000u) return dst;
   uint8_t* d = (uint8_t*)dst;
   for (size_t i = 0; i < n; i++) d[i] = (uint8_t)c;
   return dst;
@@ -300,9 +303,9 @@ def main():
         ("modtrack", "MOD Tracker", [os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp")], [], []),
         ("midiplay", "MIDI Player", [os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp")], [], []),
         (
-            "wrek-fm",
-            "WREK 91.1 FM",
-            [os.path.join(REPO_DIR, "apps", "wrek-fm", "wrek-fm.cpp")],
+            "radio",
+            "Radio",
+            [os.path.join(REPO_DIR, "apps", "radio", "radio.cpp")],
             [f"-I{helix_inc}"],
             [helix_lib],
         ),

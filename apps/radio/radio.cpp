@@ -258,17 +258,17 @@ static bool connectToStream(const char* url, const char* fallbackUrl, const char
     return false;
   }
   gState = ST_CONNECTING;
-  serialLogf("[WREK-FM] Connecting to %s ...\r\n", url);
+  serialLogf("[RADIO] Connecting to %s ...\r\n", url);
   if (!gOs->http_stream_open(url)) {
     if (fallbackUrl && fallbackUrl[0]) {
-      serialLogf("[WREK-FM] Primary failed, trying fallback %s ...\r\n", fallbackUrl);
+      serialLogf("[RADIO] Primary failed, trying fallback %s ...\r\n", fallbackUrl);
       if (gOs->http_stream_open(fallbackUrl)) {
         gOs->set_rgb_led(true, false, false, 0);
         gState = ST_BUFFERING;
         return true;
       }
     }
-    serialLogf("[WREK-FM] Connection failed: %s\r\n", url);
+    serialLogf("[RADIO] Connection failed: %s\r\n", url);
     gState = ST_ERROR;
     gLastReconnectMs = gOs->millis();
     return false;
@@ -475,9 +475,37 @@ static void decodeAvailableFrames() {
       refillMp3LinearBuffer();
     }
 
-    if (gMp3InBytes < 512) {
-      // Wait for at least 512 bytes so a complete frame + next sync header is present
+    if (gMp3InBytes < 640) {
+      // Wait for at least 640 bytes so a complete frame + next sync header is present
       break;
+    }
+
+    // Validate MPEG-1/2 Layer III frame header + next frame sync word before calling MP3Decode
+    MP3FrameInfo nextFi;
+    int hdrErr = MP3GetNextFrameInfo(gMp3Dec, &nextFi, gMp3InBuf);
+    if (hdrErr != ERR_MP3_NONE || nextFi.layer != 3 || nextFi.samprate <= 0 || nextFi.bitrate <= 0) {
+      for (int i = 0; i < gMp3InBytes - 1; i++) gMp3InBuf[i] = gMp3InBuf[i + 1];
+      gMp3InBytes--;
+      continue;
+    }
+    int coeff = (nextFi.version == MPEG1) ? 144 : 72;
+    int pad   = (gMp3InBuf[2] >> 1) & 1;
+    int expectedFrameBytes = (coeff * nextFi.bitrate) / nextFi.samprate + pad;
+    if (expectedFrameBytes < 24 || expectedFrameBytes > 1440) {
+      for (int i = 0; i < gMp3InBytes - 1; i++) gMp3InBuf[i] = gMp3InBuf[i + 1];
+      gMp3InBytes--;
+      continue;
+    }
+    if (expectedFrameBytes + 2 <= gMp3InBytes) {
+      if (gMp3InBuf[expectedFrameBytes] != 0xFF ||
+          (gMp3InBuf[expectedFrameBytes + 1] & 0xF0) != 0xF0) {
+        // False sync word in mid-frame data: skip 1 byte and rescan
+        for (int i = 0; i < gMp3InBytes - 1; i++) gMp3InBuf[i] = gMp3InBuf[i + 1];
+        gMp3InBytes--;
+        continue;
+      }
+    } else {
+      break; // Wait until next sync word is in buffer
     }
 
     unsigned char* readPtr = gMp3InBuf;
@@ -524,7 +552,7 @@ static void decodeAvailableFrames() {
     if (pcmBuffered >= kPrebufferSamps) {
       gState = ST_PLAYING;
       startLockstepPlayback();
-      serialLogf("[WREK-FM] Playing! (%d kbps, %d Hz, ch=%d, buf=%lu samps)\r\n",
+      serialLogf("[RADIO] Playing! (%d kbps, %d Hz, ch=%d, buf=%lu samps)\r\n",
                  gStreamBitrate, gStreamSamprate, gStreamChans, (unsigned long)pcmBuffered);
     }
   } else if (gState == ST_PLAYING) {
