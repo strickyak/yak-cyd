@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Compiles standalone native binary Lakatos applications (.lapp) using
+Compiles the multi-headed native binary (build/apps/native.bin) containing all
+4 native Lakatos applications (piano, modtrack, midiplay, radio) using
 xtensa-esp32-elf-g++ and ld/lakatos_app.ld, producing:
-  - build/apps/<name>.elf
-  - build/apps/<name>.lapp (128-byte LakatosAppHeader + .text + .rodata + .data)
+  - build/apps/native.elf
+  - build/apps/native.bin (128-byte LakatosAppHeader + .text + .rodata + .data)
 """
 import hashlib
 import os
@@ -36,6 +37,26 @@ extern "C" {
 typedef void (*init_fn_t)(void);
 extern init_fn_t __init_array_start[];
 extern init_fn_t __init_array_end[];
+
+void piano_main(const LakatosApi* os);
+void modtrack_main(const LakatosApi* os);
+void midiplay_main(const LakatosApi* os);
+void radio_main(const LakatosApi* os);
+
+int strcmp(const char* a, const char* b);
+
+void app_main(const LakatosApi* os) {
+  const char* arg = lakatos_app_arg();
+  if (strcmp(arg, "piano") == 0) {
+    piano_main(os);
+  } else if (strcmp(arg, "modtrack") == 0) {
+    modtrack_main(os);
+  } else if (strcmp(arg, "midiplay") == 0) {
+    midiplay_main(os);
+  } else if (strcmp(arg, "radio") == 0) {
+    radio_main(os);
+  }
+}
 
 __attribute__((section(".entry.text"), used))
 void _lakatos_app_entry(const LakatosApi* os) {
@@ -168,43 +189,63 @@ def dump_section(elf_path, sec_name):
             os.remove(tmp_path)
 
 
-def build_app(app_name, title, src_files, extra_flags=None, extra_libs=None):
+def build_native_bin(heads, extra_libs=None):
     os.makedirs(BUILD_DIR, exist_ok=True)
-    elf_path = os.path.join(BUILD_DIR, f"{app_name}.elf")
-    lapp_path = os.path.join(BUILD_DIR, f"{app_name}.lapp")
+    elf_path = os.path.join(BUILD_DIR, "native.elf")
+    bin_path = os.path.join(BUILD_DIR, "native.bin")
+
+    common_flags = [
+        "-mlongcalls",
+        "-mtext-section-literals",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-fno-exceptions",
+        "-fno-rtti",
+        "-fno-threadsafe-statics",
+        "-fno-common",
+        "-fno-builtin",
+        "-fno-tree-loop-distribute-patterns",
+        "-Os",
+        "-Wall",
+        f"-I{INCLUDE_DIR}",
+    ]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         crt0_cpp = os.path.join(tmpdir, "crt0.cpp")
+        crt0_obj = os.path.join(tmpdir, "crt0.o")
         with open(crt0_cpp, "w") as f:
             f.write(CRT0_SRC)
+        subprocess.run([CXX] + common_flags + ["-c", crt0_cpp, "-o", crt0_obj], check=True)
 
-        cmd = [
-            CXX,
-            "-mlongcalls",
-            "-mtext-section-literals",
-            "-ffunction-sections",
-            "-fdata-sections",
-            "-fno-exceptions",
-            "-fno-rtti",
-            "-fno-threadsafe-statics",
-            "-fno-common",
-            "-fno-builtin",
-            "-fno-tree-loop-distribute-patterns",
-            "-Os",
-            "-Wall",
-            f"-I{INCLUDE_DIR}",
-        ] + (extra_flags or []) + [
-            crt0_cpp,
-        ] + src_files + (extra_libs or []) + [
-            "-nostdlib",
-            "-Wl,-T," + LD_SCRIPT,
-            "-Wl,--gc-sections",
-            "-lm",
-            "-lgcc",
-            "-o",
-            elf_path,
-        ]
-        subprocess.run(cmd, check=True)
+        obj_files = [crt0_obj]
+        for head_name, src_path, head_flags in heads:
+            obj_path = os.path.join(tmpdir, f"{head_name}.o")
+            cmd_compile = (
+                [CXX]
+                + common_flags
+                + [f"-Dapp_main={head_name}_main"]
+                + (head_flags or [])
+                + ["-c", src_path, "-o", obj_path]
+            )
+            subprocess.run(cmd_compile, check=True)
+            obj_files.append(obj_path)
+
+        cmd_link = (
+            [CXX]
+            + common_flags
+            + obj_files
+            + (extra_libs or [])
+            + [
+                "-nostdlib",
+                "-Wl,-T," + LD_SCRIPT,
+                "-Wl,--gc-sections",
+                "-lm",
+                "-lgcc",
+                "-o",
+                elf_path,
+            ]
+        )
+        subprocess.run(cmd_link, check=True)
 
     syms = get_symbols(elf_path)
     entry_addr = syms["_lakatos_app_entry"]
@@ -249,6 +290,7 @@ def build_app(app_name, title, src_files, extra_flags=None, extra_libs=None):
     total_file_size = 0x80 + len(payload)
     sha256_digest = hashlib.sha256(payload).digest()
 
+    title = "native.bin"
     name_bytes = title.encode("utf-8")[:31].ljust(32, b"\x00")
 
     header = struct.pack(
@@ -274,19 +316,20 @@ def build_app(app_name, title, src_files, extra_flags=None, extra_libs=None):
     )
     assert len(header) == 128
 
-    lapp_bytes = header + payload
-    with open(lapp_path, "wb") as f:
-        f.write(lapp_bytes)
+    bin_bytes = header + payload
+    with open(bin_path, "wb") as f:
+        f.write(bin_bytes)
 
+    head_list = ", ".join(h[0] for h in heads)
     print(
-        f"[Lakatos Native App] Built {lapp_path} ({total_file_size} bytes)\n"
+        f"[Lakatos Native Pack] Built {bin_path} ({total_file_size} bytes) [{head_list}]\n"
         f"  entry  = 0x{entry_addr:08X}\n"
         f"  .text  = 0x{text_start:08X} ({text_size} B, file+0x{text_offset:X})\n"
         f"  .rodata= 0x{rodata_start:08X} ({rodata_size} B, file+0x{rodata_offset:X})\n"
         f"  .data  = 0x{data_start:08X} ({data_size} B, file+0x{data_offset:X})\n"
-        f"  .bss   = 0x{bss_start:08X} ({bss_size} B)"
+        f"  .bss   = 0x{bss_start:08X} ({bss_size} B, overlaid across {len(heads)} heads)"
     )
-    return lapp_path, lapp_bytes
+    return bin_path, bin_bytes
 
 
 def main():
@@ -298,20 +341,13 @@ def main():
     )
     helix_lib = os.path.join(esp32_libs_dir, "lib", "libchmorgan__esp-libhelix-mp3.a")
 
-    apps = [
-        ("piano", "Piano", [os.path.join(REPO_DIR, "apps", "piano", "piano.cpp")], [], []),
-        ("modtrack", "MOD Tracker", [os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp")], [], []),
-        ("midiplay", "MIDI Player", [os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp")], [], []),
-        (
-            "radio",
-            "Radio",
-            [os.path.join(REPO_DIR, "apps", "radio", "radio.cpp")],
-            [f"-I{helix_inc}"],
-            [helix_lib],
-        ),
+    heads = [
+        ("piano", os.path.join(REPO_DIR, "apps", "piano", "piano.cpp"), []),
+        ("modtrack", os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp"), []),
+        ("midiplay", os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp"), []),
+        ("radio", os.path.join(REPO_DIR, "apps", "radio", "radio.cpp"), [f"-I{helix_inc}"]),
     ]
-    for name, title, srcs, flags, libs in apps:
-        build_app(name, title, srcs, flags, libs)
+    build_native_bin(heads, [helix_lib])
 
 
 if __name__ == "__main__":

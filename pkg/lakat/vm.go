@@ -95,6 +95,8 @@ type VM struct {
 	PrefetchBytes      uint32
 	PrefetchBuf        []byte
 	CornerExitDisabled bool
+	AppArg             string
+	JoinNativeBin      string
 }
 
 func NewVM(lappOrLcod []byte) (*VM, error) {
@@ -2357,6 +2359,20 @@ func (vm *VM) execSyscall(sysId byte) error {
 		}
 		n, _ := vm.Stdout.Write(vm.Memory[bufAddr : bufAddr+ln])
 		vm.push(uint32(n))
+	case SysSetAppArg:
+		arg, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		vm.AppArg = arg
+	case SysJoinNative:
+		binName, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		vm.JoinNativeBin = binName
+		vm.ExitCode = 0
+		vm.Running = false
 
 	default:
 		return vm.errf("unimplemented syscall 0x%02X", sysId)

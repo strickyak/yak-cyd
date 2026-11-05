@@ -26,7 +26,7 @@ all:
 	@echo "================================================================"
 
 push: lakatos
-	$(LAKAT) push build/apps/*.lapp /sd/apps/
+	$(LAKAT) push build/apps/*.lapp build/apps/native.bin /sd/apps/
 
 lakat:
 	mkdir -p build build/flash build/sd build/net
@@ -50,6 +50,10 @@ apps: lakat
 	$(LAKAT) compile -title "15-Puzzle" -o build/apps/puzzle15.lapp apps/puzzle15/puzzle15.lgolf
 	$(LAKAT) compile -title "Dendrite DLA" -o build/apps/dendrite.lapp apps/dendrite/dendrite.lgolf
 	$(LAKAT) compile -title "Paint" -o build/apps/paint.lapp apps/paint/paint.lgolf
+	$(LAKAT) compile -title "Piano" -o build/apps/piano.lapp apps/piano/piano.lgolf
+	$(LAKAT) compile -title "MOD Tracker" -o build/apps/modtrack.lapp apps/modtrack/modtrack.lgolf
+	$(LAKAT) compile -title "MIDI Player" -o build/apps/midiplay.lapp apps/midiplay/midiplay.lgolf
+	$(LAKAT) compile -title "Radio" -o build/apps/radio.lapp apps/radio/radio.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps
@@ -64,8 +68,8 @@ web-installer: build-lakatos
 	cp web-installer/index.html web-installer/manifest.json web-installer/manifest-os-only.json build/web-installer/
 	cp .pio/build/lakatos/bootloader.bin .pio/build/lakatos/partitions.bin .pio/build/lakatos/firmware.bin build/web-installer/
 	cp $(BOOT_APP0) build/web-installer/boot_app0.bin
-	cp build/apps/*.lapp build/web-installer/apps/
-	cp build/apps/*.lapp build/web-installer/fs_root/apps/
+	cp build/apps/*.lapp build/apps/native.bin build/web-installer/apps/
+	cp build/apps/*.lapp build/apps/native.bin build/web-installer/fs_root/apps/
 	$(MKLITTLEFS) -c build/web-installer/fs_root -b 4096 -p 256 -s 1769472 build/web-installer/littlefs.bin
 	rm -rf build/web-installer/fs_root
 	$(PYTHON) -c 'import json, os; apps = sorted(f for f in os.listdir("build/web-installer/apps") if f.endswith(".lapp")); open("build/web-installer/apps/apps.json", "w").write(json.dumps(apps, indent=2) + "\n")'

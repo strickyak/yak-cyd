@@ -165,6 +165,10 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
                         size_t payloadLen, int* outExitCode = nullptr,
                         String* outErrMsg = nullptr);
 uint32_t lakatosCityHash32(const void* buf, size_t len);
+void        lakatosSetAppArg(const char* arg);
+const char* lakatosGetAppArg();
+void        lakatosRequestJoinNative(const char* binName);
+const char* lakatosGetJoinNativeTarget();
 
 // ---------------------------------------------------------------------------
 // PNG Image Decoder & Renderer (implemented in lakatos_png.cpp)

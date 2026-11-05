@@ -1,0 +1,6 @@
+package main
+
+func main() {
+	set_app_arg("piano")
+	join_native("native.bin")
+}

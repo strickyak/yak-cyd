@@ -227,9 +227,16 @@ typedef struct LakatosApi {
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);
 
-// Helper for apps to retrieve the LakatosApi pointer from the fixed RAM slot
+// Helper for apps to retrieve the LakatosApi pointer from the fixed RAM slot (0x3FFC8000)
 static inline const LakatosApi* lakatos_os(void) {
   return *(const LakatosApi* const*)(uintptr_t)LAKATOS_APP_DRAM_BASE;
+}
+
+// Helper for multi-headed native binaries (native.bin) to retrieve the global
+// argument string (e.g. "piano", "modtrack", "midiplay", "radio") from 0x3FFC8004
+static inline const char* lakatos_app_arg(void) {
+  const char* arg = *(const char* const*)(uintptr_t)(LAKATOS_APP_DRAM_BASE + 4u);
+  return arg ? arg : "";
 }
 
 // Entry point declaration that every .lapp must implement

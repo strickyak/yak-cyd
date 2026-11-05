@@ -476,6 +476,14 @@ extern "C" void app_main(const LakatosApi* os) {
     }
 
     if (activeNote < 0) {
+      while (os->serial_available && os->serial_available() > 0) {
+        int ch = os->serial_read();
+        if (ch == 'q' || ch == 'Q' || ch == 3) {
+          speakerSilence();
+          os->set_rgb_led(false, false, false, 0);
+          os->exit(0);
+        }
+      }
       os->delay_ms(8);
     }
   }

@@ -227,6 +227,8 @@ enum LCodeSyscall : uint8_t {
   SysPrefetchCancel = 0x45,
   SysTftDrawPal4    = 0x46,
   SysSavePngPal4    = 0x47,
+  SysSetAppArg      = 0x48,
+  SysJoinNative     = 0x49,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -1098,6 +1100,20 @@ struct LCodeVM {
         if (ln > 0 && !checkAddr(bufAddr, ln)) return false;
         size_t w = Serial.write(mem + bufAddr, ln);
         return push((uint32_t)w);
+      }
+      case SysSetAppArg: {
+        char argBuf[64];
+        if (!popSliceAsCStr(argBuf, sizeof(argBuf))) return false;
+        lakatosSetAppArg(argBuf);
+        return true;
+      }
+      case SysJoinNative: {
+        char binBuf[64];
+        if (!popSliceAsCStr(binBuf, sizeof(binBuf))) return false;
+        lakatosRequestJoinNative(binBuf);
+        exitCode = 0;
+        running  = 0;
+        return true;
       }
       default:
         setErr("Unknown syscall");
@@ -2245,6 +2261,8 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   if (vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);
   heap_caps_free(vm);
-  lakatosEndAppSession();
+  if (lakatosGetJoinNativeTarget()[0] == '\0') {
+    lakatosEndAppSession();
+  }
   return !hadErr;
 }

@@ -971,9 +971,9 @@ static void drawLoaderStatusBox(const char* title, const char* detail, int pct) 
   tft.setTextDatum(TL_DATUM);
 }
 
-static __attribute__((noinline)) bool verifyPayloadSha256(const uint8_t* payloadBuf,
-                                                          uint32_t payloadLen,
-                                                          const uint8_t expectedSha[32]) {
+static bool verifyPayloadSha256(const uint8_t* payloadBuf,
+                                uint32_t payloadLen,
+                                const uint8_t expectedSha[32]) {
   uint8_t calcSha[32];
   mbedtls_sha256_context shaCtx;
   mbedtls_sha256_init(&shaCtx);
@@ -984,11 +984,89 @@ static __attribute__((noinline)) bool verifyPayloadSha256(const uint8_t* payload
   return memcmp(calcSha, expectedSha, 32) == 0;
 }
 
+static char gLakatosAppArg[64]           = {0};
+static char gLakatosJoinNativeTarget[64] = {0};
+
+void lakatosSetAppArg(const char* arg) {
+  if (!arg) {
+    gLakatosAppArg[0] = '\0';
+    return;
+  }
+  strncpy(gLakatosAppArg, arg, sizeof(gLakatosAppArg) - 1);
+  gLakatosAppArg[sizeof(gLakatosAppArg) - 1] = '\0';
+}
+
+const char* lakatosGetAppArg() {
+  return gLakatosAppArg;
+}
+
+void lakatosRequestJoinNative(const char* binName) {
+  if (!binName) {
+    gLakatosJoinNativeTarget[0] = '\0';
+    return;
+  }
+  strncpy(gLakatosJoinNativeTarget, binName, sizeof(gLakatosJoinNativeTarget) - 1);
+  gLakatosJoinNativeTarget[sizeof(gLakatosJoinNativeTarget) - 1] = '\0';
+}
+
+const char* lakatosGetJoinNativeTarget() {
+  return gLakatosJoinNativeTarget;
+}
+
+// Resolves a native binary filename (e.g. "native.bin") across /{sd,net,flash}/apps
+// using the same priority order as Home Screen .lapp discovery.
+static bool resolveNativeBinHeader(const char* binName, char* outPath, size_t outPathCap,
+                                   LakatosAppHeader* outHdr) {
+  if (!binName || !binName[0]) return false;
+
+  if (binName[0] == '/') {
+    if (lakatosFsRead(binName, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      strncpy(outPath, binName, outPathCap - 1);
+      outPath[outPathCap - 1] = '\0';
+      return true;
+    }
+    return false;
+  }
+
+  // Priority 1: /sd/apps/<binName>
+  if (lakatosSdIsMounted()) {
+    snprintf(outPath, outPathCap, "/sd/apps/%s", binName);
+    if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      return true;
+    }
+  }
+
+  // Priority 2: /net/apps/<binName>
+  if (lakatosWifiIsConnected() && strlen(lakatosGetSuperhighwayPassword()) > 0) {
+    snprintf(outPath, outPathCap, "/net/apps/%s", binName);
+    if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      return true;
+    }
+  }
+
+  // Priority 3: /flash/apps/<binName>
+  snprintf(outPath, outPathCap, "/flash/apps/%s", binName);
+  if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+      outHdr->magic == LAKATOS_APP_MAGIC) {
+    return true;
+  }
+
+  outPath[0] = '\0';
+  return false;
+}
+
 bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErrMsg) {
   if (!gAppSlotPart) {
     if (outErrMsg) *outErrMsg = "app_slot partition missing";
     return false;
   }
+
+  gLakatosAppArg[0]           = '\0';
+  gLakatosJoinNativeTarget[0] = '\0';
+  static char resolvedBinPath[128];
 
   drawLoaderStatusBox("LAKATOS APP LOADER", vfsPath, 5);
 
@@ -1065,7 +1143,36 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
     bool ok = lakatosRunLCodeApp(hdr, payloadBuf, payloadLen, outExitCode, outErrMsg);
     tft.setTextDatum(TL_DATUM);
     if (heapAllocated) free(payloadBuf);
-    return ok;
+    if (!ok || gLakatosJoinNativeTarget[0] == '\0') {
+      return ok;
+    }
+
+    // LCode app requested join_native(gLakatosJoinNativeTarget) with gLakatosAppArg:
+    // resolve across /{sd,net,flash}/apps/<target>, or fall back to app_slot if
+    // the matching native image is already burned into flash.
+    Serial.printf("[Lakatos] Joining native '%s' (arg='%s')...\r\n",
+                  gLakatosJoinNativeTarget, gLakatosAppArg);
+    memset(&hdr, 0, sizeof(hdr));
+    if (resolveNativeBinHeader(gLakatosJoinNativeTarget, resolvedBinPath,
+                               sizeof(resolvedBinPath), &hdr)) {
+      vfsPath = resolvedBinPath;
+    } else {
+      LakatosAppHeader slotCheck;
+      memset(&slotCheck, 0, sizeof(slotCheck));
+      if (esp_partition_read(gAppSlotPart, 0, &slotCheck, sizeof(slotCheck)) == ESP_OK &&
+          slotCheck.magic == LAKATOS_APP_MAGIC &&
+          strcmp(slotCheck.name, gLakatosJoinNativeTarget) == 0) {
+        hdr = slotCheck;
+        resolvedBinPath[0] = '\0';
+        vfsPath = gLakatosJoinNativeTarget;
+      } else {
+        lakatosEndAppSession();
+        if (outErrMsg) {
+          *outErrMsg = String("Missing ") + gLakatosJoinNativeTarget;
+        }
+        return false;
+      }
+    }
   }
 
   if (hdr.total_file_size > gAppSlotPart->size) {
@@ -1157,7 +1264,8 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
 
   // 5. Initialize App Static DRAM Arena (0x3FFC8000 .. 0x3FFCFFFF)
   memset(gLakatosAppRamArena, 0, LAKATOS_APP_DRAM_SIZE);
-  *(const LakatosApi**)(uintptr_t)LAKATOS_APP_DRAM_BASE = &gLakatosApi;
+  *(const LakatosApi**)(uintptr_t)LAKATOS_APP_DRAM_BASE        = &gLakatosApi;
+  *(const char**)(uintptr_t)(LAKATOS_APP_DRAM_BASE + 4u)       = gLakatosAppArg;
 
   if (hdr.data_size > 0) {
     if (hdr.data_dst_addr < LAKATOS_APP_DRAM_BASE + 8 ||
@@ -1194,8 +1302,8 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
   gAppLastExitCode = 0;
   gAppRunning = true;
 
-  Serial.printf("[Lakatos] Launching '%s' at entry 0x%08lX (size %lu bytes)\r\n",
-                hdr.name, (unsigned long)hdr.entry_addr,
+  Serial.printf("[Lakatos] Launching '%s' (arg='%s') at entry 0x%08lX (size %lu bytes)\r\n",
+                hdr.name, gLakatosAppArg, (unsigned long)hdr.entry_addr,
                 (unsigned long)hdr.total_file_size);
 
   int jmpVal = setjmp(gAppExitJmp);

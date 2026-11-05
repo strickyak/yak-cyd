@@ -3676,6 +3676,15 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "os_serial_write", "serial_write":
 		c.emitOp("SYSCALL", "SYS_SERIAL_WRITE")
 		return ScalarInt, nil
+	case "set_app_arg", "os_set_app_arg":
+		c.emitOp("SYSCALL", "SYS_SET_APP_ARG")
+		return VoidType, nil
+	case "join_native", "os_join_native", "chain_native", "os_chain_native":
+		if len(argTypes) == 2 {
+			c.emitOp("SYSCALL", "SYS_SET_APP_ARG")
+		}
+		c.emitOp("SYSCALL", "SYS_JOIN_NATIVE")
+		return VoidType, nil
 	}
 
 	return TypeDesc{}, fmt.Errorf("line %d: unknown function or syscall %q", line, name)

@@ -249,6 +249,10 @@ const (
 	// 4-Bit Indexed Palette Rendering & PNG Encoder (0x46 .. 0x47)
 	SysTftDrawPal4 = byte(0x46) // (x y w h palAddr pix4bppAddr -- )
 	SysSavePngPal4 = byte(0x47) // (pathSlice w h palAddr pix4bppAddr -- ok)
+
+	// Multi-Head Native Binary Chaining (0x48 .. 0x49)
+	SysSetAppArg  = byte(0x48) // (argSlice -- )
+	SysJoinNative = byte(0x49) // (binNameSlice -- )
 )
 
 type ArgType string
@@ -453,6 +457,8 @@ var SyscallByName = map[string]byte{
 	"SYS_PREFETCH_CANCEL":     SysPrefetchCancel,
 	"SYS_TFT_DRAW_PAL4":       SysTftDrawPal4,
 	"SYS_SAVE_PNG_PAL4":       SysSavePngPal4,
+	"SYS_SET_APP_ARG":         SysSetAppArg,
+	"SYS_JOIN_NATIVE":         SysJoinNative,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,

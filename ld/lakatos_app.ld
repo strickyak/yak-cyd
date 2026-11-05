@@ -60,9 +60,36 @@ SECTIONS
 
   _data_size = _data_end - _data_start;
 
+  /*
+   * Overlay .bss sections of multi-headed native apps (piano, modtrack,
+   * midiplay, radio) at the same RAM base address since only one head runs
+   * at a time and the loader zeroes all 32 KB before entry.
+   */
+  . = ALIGN(8);
+  _bss_start = ABSOLUTE(.);
+
+  OVERLAY _bss_start : NOCROSSREFS AT(0x3F7B0000)
+  {
+    .bss.piano
+    {
+      *piano.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
+    .bss.modtrack
+    {
+      *modtrack.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
+    .bss.midiplay
+    {
+      *midiplay.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
+    .bss.radio
+    {
+      *radio.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
+  }
+
   .bss (NOLOAD) : ALIGN(8)
   {
-    _bss_start = ABSOLUTE(.);
     *(.bss .bss.* .gnu.linkonce.b.*)
     *(.sbss .sbss.* .gnu.linkonce.sb.* .scommon)
     *(COMMON)
