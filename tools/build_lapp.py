@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Compiles the multi-headed native binary (build/apps/native.bin) containing all
-5 native Lakatos applications (piano, modtrack, midiplay, radio, ham) using
-xtensa-esp32-elf-g++ and ld/lakatos_app.ld, producing:
+6 native Lakatos applications (piano, modtrack, midiplay, radio, ham, smallertalk)
+using xtensa-esp32-elf-g++ and ld/lakatos_app.ld, producing:
   - build/apps/native.elf
   - build/apps/native.bin (128-byte LakatosAppHeader + .text + .rodata + .data)
 """
@@ -43,6 +43,7 @@ void modtrack_main(const LakatosApi* os);
 void midiplay_main(const LakatosApi* os);
 void radio_main(const LakatosApi* os);
 void ham_main(const LakatosApi* os);
+void smallertalk_main(const LakatosApi* os);
 
 int strcmp(const char* a, const char* b);
 
@@ -58,6 +59,8 @@ void app_main(const LakatosApi* os) {
     radio_main(os);
   } else if (strcmp(arg, "ham") == 0) {
     ham_main(os);
+  } else if (strcmp(arg, "smallertalk") == 0) {
+    smallertalk_main(os);
   }
 }
 
@@ -136,6 +139,75 @@ char* strncpy(char* dst, const char* src, size_t n) {
   for (; i < n && src[i] != 0; i++) dst[i] = src[i];
   for (; i < n; i++) dst[i] = 0;
   return dst;
+}
+
+char* strcat(char* dst, const char* src) {
+  char* d = dst;
+  while (*d) d++;
+  while ((*d++ = *src++) != 0) {}
+  return dst;
+}
+
+char* strchr(const char* s, int c) {
+  char ch = (char)c;
+  for (; *s != '\0'; s++) {
+    if (*s == ch) return (char*)s;
+  }
+  return (ch == '\0') ? (char*)s : 0;
+}
+
+char* strrchr(const char* s, int c) {
+  char ch = (char)c;
+  const char* last = 0;
+  for (; *s != '\0'; s++) {
+    if (*s == ch) last = s;
+  }
+  return (ch == '\0') ? (char*)s : (char*)last;
+}
+
+static int g_dummy_errno = 0;
+int* __errno(void) {
+  return &g_dummy_errno;
+}
+
+double strtod(const char* nptr, char** endptr) {
+  const char* p = nptr;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  double sign = 1.0;
+  if (*p == '-') { sign = -1.0; p++; }
+  else if (*p == '+') { p++; }
+
+  double val = 0.0;
+  while (*p >= '0' && *p <= '9') {
+    val = val * 10.0 + (double)(*p - '0');
+    p++;
+  }
+  if (*p == '.') {
+    p++;
+    double place = 0.1;
+    while (*p >= '0' && *p <= '9') {
+      val += (double)(*p - '0') * place;
+      place *= 0.1;
+      p++;
+    }
+  }
+  if (*p == 'e' || *p == 'E') {
+    p++;
+    int expSign = 1;
+    if (*p == '-') { expSign = -1; p++; }
+    else if (*p == '+') { p++; }
+    int expVal = 0;
+    while (*p >= '0' && *p <= '9') {
+      expVal = expVal * 10 + (*p - '0');
+      p++;
+    }
+    double factor = 1.0;
+    for (int i = 0; i < expVal; i++) factor *= 10.0;
+    if (expSign < 0) val /= factor;
+    else val *= factor;
+  }
+  if (endptr) *endptr = (char*)p;
+  return val * sign;
 }
 
 void* malloc(size_t sz) { return lakatos_os()->malloc(sz); }
@@ -221,17 +293,21 @@ def build_native_bin(heads, extra_libs=None):
         subprocess.run([CXX] + common_flags + ["-c", crt0_cpp, "-o", crt0_obj], check=True)
 
         obj_files = [crt0_obj]
-        for head_name, src_path, head_flags in heads:
-            obj_path = os.path.join(tmpdir, f"{head_name}.o")
-            cmd_compile = (
-                [CXX]
-                + common_flags
-                + [f"-Dapp_main={head_name}_main"]
-                + (head_flags or [])
-                + ["-c", src_path, "-o", obj_path]
-            )
-            subprocess.run(cmd_compile, check=True)
-            obj_files.append(obj_path)
+        for head_name, src_paths, head_flags in heads:
+            if isinstance(src_paths, str):
+                src_paths = [src_paths]
+            for idx, src_path in enumerate(src_paths):
+                suffix = f"_{idx}" if len(src_paths) > 1 else ""
+                obj_path = os.path.join(tmpdir, f"{head_name}{suffix}.o")
+                cmd_compile = (
+                    [CXX]
+                    + common_flags
+                    + [f"-Dapp_main={head_name}_main"]
+                    + (head_flags or [])
+                    + ["-c", src_path, "-o", obj_path]
+                )
+                subprocess.run(cmd_compile, check=True)
+                obj_files.append(obj_path)
 
         cmd_link = (
             [CXX]
@@ -344,12 +420,27 @@ def main():
     )
     helix_lib = os.path.join(esp32_libs_dir, "lib", "libchmorgan__esp-libhelix-mp3.a")
 
+    st_dir = os.path.join(REPO_DIR, "apps", "smallertalk")
+    st_srcs = [
+        os.path.join(st_dir, f)
+        for f in [
+            "st_memory.cpp",
+            "st_compiler.cpp",
+            "st_bootstrap.cpp",
+            "st_vm.cpp",
+            "touch_filter.cpp",
+            "st_ui.cpp",
+            "app_main.cpp",
+        ]
+    ]
+
     heads = [
         ("piano", os.path.join(REPO_DIR, "apps", "piano", "piano.cpp"), []),
         ("modtrack", os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp"), []),
         ("midiplay", os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp"), []),
         ("radio", os.path.join(REPO_DIR, "apps", "radio", "radio.cpp"), [f"-I{helix_inc}"]),
         ("ham", os.path.join(REPO_DIR, "apps", "ham", "ham.cpp"), []),
+        ("smallertalk", st_srcs, [f"-I{st_dir}"]),
     ]
     build_native_bin(heads, [helix_lib])
 

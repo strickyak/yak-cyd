@@ -90,6 +90,10 @@ SECTIONS
     {
       *ham.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
     }
+    .bss.smallertalk
+    {
+      *smallertalk*.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
   }
 
   .bss (NOLOAD) : ALIGN(8)
