@@ -1,0 +1,1134 @@
+// ============================================================================
+// Wind Chimes (wind.lgolf) for Lakatos OS on ESP32-2432S028R (CYD)
+// ============================================================================
+// Plays gentle sine-wave wind chime tones with:
+//   - Scale 0: E Min Pentatonic (Just)  -- E3..E6 (1/1, 6/5, 4/3, 3/2, 9/5)
+//   - Scale 1: G Maj Pentatonic (Just)  -- G3..G6 (1/1, 9/8, 5/4, 3/2, 5/3)
+//   - Scale 2: Diminished (Even)        -- G3..G6 (minor thirds: G, Bb, Db, E)
+// Features an Attack/Decay/Sustain/Release (ADSR) envelope holding each tone
+// > 3 seconds and a Poisson arrival process averaging 2.0 seconds.
+// ============================================================================
+
+package main
+
+import "wedge"
+
+const (
+	MAX_NOTES  = 16
+	NUM_VOICES = 12
+
+	SCALE_E_MIN_PENT = 0
+	SCALE_G_MAJ_PENT = 1
+	SCALE_DIMINISHED = 2
+
+	// ADSR envelope stage identifiers
+	ENV_IDLE    = 0
+	ENV_ATTACK  = 1
+	ENV_DECAY   = 2
+	ENV_SUSTAIN = 3
+	ENV_RELEASE = 4
+
+	// ADSR stage durations in milliseconds:
+	// Attack (0.12s) + Decay (0.88s) + Sustain (2.20s) = 3.20s held before 2.00s Release (5.20s total)
+	ATTACK_MS  = 120
+	DECAY_MS   = 880
+	SUSTAIN_MS = 2200
+	RELEASE_MS = 2000
+
+	// Sustain level as permille of peak (600 / 1000 = 60%)
+	SUSTAIN_PERMILLE = 600
+
+	// Theme RGB565 colors
+	COL_BG         = 0x0842
+	COL_HEADER     = 0x10A4
+	COL_PANEL      = 0x1083
+	COL_WOOD       = 0x6A22
+	COL_WOOD_HI    = 0x9B65
+	COL_STRING     = 0x52AA
+	COL_TUBE_IDLE  = 0x3A09
+	COL_TUBE_RIM   = 0x5B0D
+	COL_TRACK_BG   = 0x0821
+	COL_BTN_BG     = 0x1926
+	COL_BTN_ACTIVE = 0x03EF
+	COL_BTN_BORDER = 0x4A69
+)
+
+var scaleMode int = 0
+var numNotes int = 16
+var menuOpen int = 0
+
+var noteSteps [16]int
+var noteHz [16]int
+var tubeLens [16]int
+var noteScaleWeight [16]int
+
+// Volume curve for VOL slider 0 (silent) .. 11 (overmodulated), default 6 (somewhat soft)
+var volPeakTable [12]int
+
+// Polyphonic voice pool (12 channels mapped to hardware channels 0..11)
+var vNote [12]int
+var vState [12]int
+var vStageMs [12]int
+var vLevel [12]int // 0..1000 permille envelope level
+var vStartLv [12]int
+var vLastVol [12]int
+
+// Per-note visual state (0..1000 envelope level and last drawn quantized bar)
+var noteVisLv [16]int
+var prevTubeGlow [16]int
+var prevEnvBar [16]int
+
+var volLevel int = 6       // 0..11, default 6
+var speedTenths int = 20   // 5..50 (0.5s .. 5.0s in 0.5s steps), default 20 (2.0s)
+var meanArrivalMs int = 2000
+var nextStrikeAtMs int = 0
+var lastNoteStruck int = -1
+var totalStrikes int = 0
+var prevActiveVoices int = -1
+var prevLastNote int = -2
+
+func silenceAllVoices() {
+	for c := 0; c < NUM_VOICES; c++ {
+		vNote[c] = -1
+		vState[c] = ENV_IDLE
+		vStageMs[c] = 0
+		vLevel[c] = 0
+		vStartLv[c] = 0
+		vLastVol[c] = 0
+		audio_set_voice(c, WAVE_NONE, 0, 0, 0)
+	}
+}
+
+func loadScale(mode int) {
+	scaleMode = mode
+	lastNoteStruck = -1
+	prevActiveVoices = -1
+	prevLastNote = -2
+
+	if mode == SCALE_E_MIN_PENT {
+		numNotes = 16
+		// Just Intonation E Minor Pentatonic (1/1, 6/5, 4/3, 3/2, 9/5) from E3 (165 Hz) to E6 (1320 Hz)
+		noteSteps[0] = 177167
+		noteHz[0] = 165
+		noteSteps[1] = 212601
+		noteHz[1] = 198
+		noteSteps[2] = 236223
+		noteHz[2] = 220
+		noteSteps[3] = 265751
+		noteHz[3] = 248
+		noteSteps[4] = 318901
+		noteHz[4] = 297
+
+		noteSteps[5] = 354335
+		noteHz[5] = 330
+		noteSteps[6] = 425202
+		noteHz[6] = 396
+		noteSteps[7] = 472446
+		noteHz[7] = 440
+		noteSteps[8] = 531502
+		noteHz[8] = 495
+		noteSteps[9] = 637803
+		noteHz[9] = 594
+
+		noteSteps[10] = 708670
+		noteHz[10] = 660
+		noteSteps[11] = 850404
+		noteHz[11] = 792
+		noteSteps[12] = 944893
+		noteHz[12] = 880
+		noteSteps[13] = 1063004
+		noteHz[13] = 990
+		noteSteps[14] = 1275605
+		noteHz[14] = 1188
+		noteSteps[15] = 1417339
+		noteHz[15] = 1320
+	} else if mode == SCALE_G_MAJ_PENT {
+		numNotes = 16
+		// Just Intonation G Major Pentatonic (1/1, 9/8, 5/4, 3/2, 5/3) from G3 (198 Hz) to G6 (1584 Hz)
+		noteSteps[0] = 212601
+		noteHz[0] = 198
+		noteSteps[1] = 239176
+		noteHz[1] = 223
+		noteSteps[2] = 265751
+		noteHz[2] = 248
+		noteSteps[3] = 318901
+		noteHz[3] = 297
+		noteSteps[4] = 354335
+		noteHz[4] = 330
+
+		noteSteps[5] = 425202
+		noteHz[5] = 396
+		noteSteps[6] = 478352
+		noteHz[6] = 446
+		noteSteps[7] = 531502
+		noteHz[7] = 495
+		noteSteps[8] = 637803
+		noteHz[8] = 594
+		noteSteps[9] = 708670
+		noteHz[9] = 660
+
+		noteSteps[10] = 850404
+		noteHz[10] = 792
+		noteSteps[11] = 956704
+		noteHz[11] = 891
+		noteSteps[12] = 1063004
+		noteHz[12] = 990
+		noteSteps[13] = 1275605
+		noteHz[13] = 1188
+		noteSteps[14] = 1417339
+		noteHz[14] = 1320
+		noteSteps[15] = 1700808
+		noteHz[15] = 1584
+	} else {
+		numNotes = 13
+		// Even-Tempered Diminished 7th (G, Bb, Db, E -- minor 3rds) from G3 (196 Hz) to G6 (1568 Hz)
+		noteSteps[0] = 210453
+		noteHz[0] = 196
+		noteSteps[1] = 250269
+		noteHz[1] = 233
+		noteSteps[2] = 297622
+		noteHz[2] = 277
+		noteSteps[3] = 353935
+		noteHz[3] = 330
+
+		noteSteps[4] = 420906
+		noteHz[4] = 392
+		noteSteps[5] = 500539
+		noteHz[5] = 466
+		noteSteps[6] = 595245
+		noteHz[6] = 554
+		noteSteps[7] = 707870
+		noteHz[7] = 659
+
+		noteSteps[8] = 841812
+		noteHz[8] = 784
+		noteSteps[9] = 1001078
+		noteHz[9] = 932
+		noteSteps[10] = 1190490
+		noteHz[10] = 1109
+		noteSteps[11] = 1415740
+		noteHz[11] = 1319
+		noteSteps[12] = 1683624
+		noteHz[12] = 1568
+	}
+
+	for i := 0; i < MAX_NOTES; i++ {
+		if numNotes == 13 {
+			tubeLens[i] = 92 - i*5
+			noteScaleWeight[i] = 100 - (i*38)/12
+		} else {
+			tubeLens[i] = 92 - i*4
+			noteScaleWeight[i] = 100 - (i*38)/15
+		}
+		noteVisLv[i] = 0
+		prevTubeGlow[i] = -1
+		prevEnvBar[i] = -1
+	}
+}
+
+func initScaleTables() {
+	volLevel = 6
+	speedTenths = 20
+	meanArrivalMs = 2000
+	scaleMode = SCALE_E_MIN_PENT
+	menuOpen = 0
+	totalStrikes = 0
+
+	// Peak hardware voice volume for VOL 0..11:
+	// 0 = silent, 6 = soft default (22), 9 = full clean (58), 10..11 = overmodulated (95..155)
+	volPeakTable[0] = 0
+	volPeakTable[1] = 3
+	volPeakTable[2] = 5
+	volPeakTable[3] = 8
+	volPeakTable[4] = 12
+	volPeakTable[5] = 16
+	volPeakTable[6] = 22
+	volPeakTable[7] = 30
+	volPeakTable[8] = 42
+	volPeakTable[9] = 58
+	volPeakTable[10] = 95
+	volPeakTable[11] = 155
+
+	for c := 0; c < NUM_VOICES; c++ {
+		vNote[c] = -1
+		vState[c] = ENV_IDLE
+		vStageMs[c] = 0
+		vLevel[c] = 0
+		vStartLv[c] = 0
+		vLastVol[c] = 0
+	}
+
+	loadScale(SCALE_E_MIN_PENT)
+}
+
+func scaleTitleStr(mode int) string {
+	if mode == SCALE_E_MIN_PENT {
+		return "E Min Pentatonic (Just)"
+	}
+	if mode == SCALE_G_MAJ_PENT {
+		return "G Maj Pentatonic (Just)"
+	}
+	return "Diminished"
+}
+
+func scaleIdleSummaryStr() string {
+	if scaleMode == SCALE_E_MIN_PENT {
+		return "Scale: E G A B D  (1/1 6/5 4/3 3/2 9/5)"
+	}
+	if scaleMode == SCALE_G_MAJ_PENT {
+		return "Scale: G A B D E  (1/1 9/8 5/4 3/2 5/3)"
+	}
+	return "Scale: G Bb Db E  (Even Minor 3rds)"
+}
+
+func noteName(idx int) string {
+	if scaleMode == SCALE_E_MIN_PENT {
+		if idx == 0 {
+			return "E3"
+		}
+		if idx == 1 {
+			return "G3"
+		}
+		if idx == 2 {
+			return "A3"
+		}
+		if idx == 3 {
+			return "B3"
+		}
+		if idx == 4 {
+			return "D4"
+		}
+		if idx == 5 {
+			return "E4"
+		}
+		if idx == 6 {
+			return "G4"
+		}
+		if idx == 7 {
+			return "A4"
+		}
+		if idx == 8 {
+			return "B4"
+		}
+		if idx == 9 {
+			return "D5"
+		}
+		if idx == 10 {
+			return "E5"
+		}
+		if idx == 11 {
+			return "G5"
+		}
+		if idx == 12 {
+			return "A5"
+		}
+		if idx == 13 {
+			return "B5"
+		}
+		if idx == 14 {
+			return "D6"
+		}
+		return "E6"
+	}
+
+	if scaleMode == SCALE_G_MAJ_PENT {
+		if idx == 0 {
+			return "G3"
+		}
+		if idx == 1 {
+			return "A3"
+		}
+		if idx == 2 {
+			return "B3"
+		}
+		if idx == 3 {
+			return "D4"
+		}
+		if idx == 4 {
+			return "E4"
+		}
+		if idx == 5 {
+			return "G4"
+		}
+		if idx == 6 {
+			return "A4"
+		}
+		if idx == 7 {
+			return "B4"
+		}
+		if idx == 8 {
+			return "D5"
+		}
+		if idx == 9 {
+			return "E5"
+		}
+		if idx == 10 {
+			return "G5"
+		}
+		if idx == 11 {
+			return "A5"
+		}
+		if idx == 12 {
+			return "B5"
+		}
+		if idx == 13 {
+			return "D6"
+		}
+		if idx == 14 {
+			return "E6"
+		}
+		return "G6"
+	}
+
+	// Diminished (G3..G6, 13 notes)
+	if idx == 0 {
+		return "G3"
+	}
+	if idx == 1 {
+		return "Bb3"
+	}
+	if idx == 2 {
+		return "Db4"
+	}
+	if idx == 3 {
+		return "E4"
+	}
+	if idx == 4 {
+		return "G4"
+	}
+	if idx == 5 {
+		return "Bb4"
+	}
+	if idx == 6 {
+		return "Db5"
+	}
+	if idx == 7 {
+		return "E5"
+	}
+	if idx == 8 {
+		return "G5"
+	}
+	if idx == 9 {
+		return "Bb5"
+	}
+	if idx == 10 {
+		return "Db6"
+	}
+	if idx == 11 {
+		return "E6"
+	}
+	return "G6"
+}
+
+func noteRatioStr(idx int) string {
+	if scaleMode == SCALE_E_MIN_PENT {
+		deg := idx % 5
+		if deg == 0 {
+			return "1/1"
+		}
+		if deg == 1 {
+			return "6/5"
+		}
+		if deg == 2 {
+			return "4/3"
+		}
+		if deg == 3 {
+			return "3/2"
+		}
+		return "9/5"
+	}
+	if scaleMode == SCALE_G_MAJ_PENT {
+		deg := idx % 5
+		if deg == 0 {
+			return "1/1"
+		}
+		if deg == 1 {
+			return "9/8"
+		}
+		if deg == 2 {
+			return "5/4"
+		}
+		if deg == 3 {
+			return "3/2"
+		}
+		return "5/3"
+	}
+	return "12-TET"
+}
+
+func isRootNote(idx int) int {
+	if scaleMode == SCALE_DIMINISHED {
+		if idx%4 == 0 {
+			return 1
+		}
+		return 0
+	}
+	if idx%5 == 0 {
+		return 1
+	}
+	return 0
+}
+
+func tubeGeomX(i int) int {
+	if numNotes == 13 {
+		return 13 + i*23
+	}
+	return 10 + i*19
+}
+
+func tubeGeomW() int {
+	if numNotes == 13 {
+		return 16
+	}
+	return 14
+}
+
+// Samples an exponential random variable with mean `meanMs` for a Poisson process:
+// dt = -meanMs * ln(U), where U ~ Uniform(0.0001, 1.0).
+func samplePoissonIntervalMs(meanMs int) int {
+	r := rand(10000) + 1
+	u := float32(r) / 10000.0
+	negLn := float32(0.0)
+	for u < 0.5 {
+		u = u * 2.0
+		negLn = negLn + 0.69314718
+	}
+	z := (1.0 - u) / (1.0 + u)
+	z2 := z * z
+	z3 := z2 * z
+	z5 := z3 * z2
+	negLn = negLn + 2.0*(z+z3/3.0+z5/5.0)
+
+	dt := int(float32(meanMs) * negLn)
+	if dt < 80 {
+		dt = 80
+	}
+	maxDt := meanMs * 6
+	if dt > maxDt {
+		dt = maxDt
+	}
+	return dt
+}
+
+func computeHwVol(noteIdx int, levelPermille int) int {
+	if levelPermille <= 0 || volLevel <= 0 {
+		return 0
+	}
+	basePeak := volPeakTable[volLevel]
+	peak := (basePeak * noteScaleWeight[noteIdx] + 50) / 100
+	if peak < 1 {
+		peak = 1
+	}
+	vol := (peak * levelPermille + 500) / 1000
+	if vol < 1 {
+		vol = 1
+	}
+	if vol > 200 {
+		vol = 200
+	}
+	return vol
+}
+
+func refreshActiveVoiceVolumes() {
+	for c := 0; c < NUM_VOICES; c++ {
+		if vState[c] != ENV_IDLE {
+			nIdx := vNote[c]
+			if nIdx >= 0 && nIdx < numNotes {
+				vol := computeHwVol(nIdx, vLevel[c])
+				if vol != vLastVol[c] {
+					vLastVol[c] = vol
+					audio_set_voice(c, WAVE_SINE, noteSteps[nIdx], vol, 0)
+				}
+			}
+		}
+	}
+}
+
+func strikeChime(noteIdx int) {
+	if noteIdx < 0 || noteIdx >= numNotes {
+		return
+	}
+
+	// 1. Check if this note is already ringing on a voice channel; if so, re-strike smoothly
+	chosen := -1
+	for c := 0; c < NUM_VOICES; c++ {
+		if vState[c] != ENV_IDLE && vNote[c] == noteIdx {
+			chosen = c
+			break
+		}
+	}
+
+	// 2. Otherwise pick an idle voice channel
+	if chosen < 0 {
+		for c := 0; c < NUM_VOICES; c++ {
+			if vState[c] == ENV_IDLE {
+				chosen = c
+				break
+			}
+		}
+	}
+
+	// 3. Otherwise steal the quietest voice in Release (or lowest level overall)
+	if chosen < 0 {
+		bestLv := 999999
+		for c := 0; c < NUM_VOICES; c++ {
+			score := vLevel[c]
+			if vState[c] != ENV_RELEASE {
+				score = score + 2000
+			}
+			if score < bestLv {
+				bestLv = score
+				chosen = c
+			}
+		}
+	}
+
+	isRestrike := vState[chosen] != ENV_IDLE && vNote[chosen] == noteIdx
+	startLv := 0
+	if isRestrike {
+		startLv = vLevel[chosen]
+	}
+
+	vNote[chosen] = noteIdx
+	vState[chosen] = ENV_ATTACK
+	vStageMs[chosen] = 0
+	vStartLv[chosen] = startLv
+	if startLv < 350 {
+		vLevel[chosen] = 350
+	} else {
+		vLevel[chosen] = startLv
+	}
+
+	vol := computeHwVol(noteIdx, vLevel[chosen])
+	vLastVol[chosen] = vol
+	resetPhase := 1
+	if isRestrike {
+		resetPhase = 0
+	}
+	if vol > 0 {
+		audio_set_voice(chosen, WAVE_SINE, noteSteps[noteIdx], vol, resetPhase)
+	}
+
+	if vLevel[chosen] > noteVisLv[noteIdx] {
+		noteVisLv[noteIdx] = vLevel[chosen]
+	}
+	if menuOpen == 0 {
+		drawTubeAndMeter(noteIdx)
+	}
+
+	lastNoteStruck = noteIdx
+	totalStrikes = totalStrikes + 1
+	// Brief cyan/blue LED shimmer on chime strike (keep Red=1 so SC8002B amp stays enabled!)
+	os_set_rgb_led(1, 0, 1, 0)
+}
+
+func updateEnvelopes(dtMs int) int {
+	for i := 0; i < numNotes; i++ {
+		noteVisLv[i] = 0
+	}
+
+	activeCount := 0
+	anyAttack := 0
+
+	for c := 0; c < NUM_VOICES; c++ {
+		st := vState[c]
+		if st == ENV_IDLE {
+			continue
+		}
+		vStageMs[c] = vStageMs[c] + dtMs
+		t := vStageMs[c]
+		lv := vLevel[c]
+
+		if st == ENV_ATTACK {
+			anyAttack = 1
+			if t >= ATTACK_MS {
+				lv = 1000
+				vState[c] = ENV_DECAY
+				vStageMs[c] = t - ATTACK_MS
+			} else {
+				lv = vStartLv[c] + ((1000-vStartLv[c])*t)/ATTACK_MS
+			}
+		} else if st == ENV_DECAY {
+			if t >= DECAY_MS {
+				lv = SUSTAIN_PERMILLE
+				vState[c] = ENV_SUSTAIN
+				vStageMs[c] = t - DECAY_MS
+			} else {
+				lv = 1000 - ((1000-SUSTAIN_PERMILLE)*t)/DECAY_MS
+			}
+		} else if st == ENV_SUSTAIN {
+			lv = SUSTAIN_PERMILLE
+			if t >= SUSTAIN_MS {
+				vState[c] = ENV_RELEASE
+				vStageMs[c] = t - SUSTAIN_MS
+				vStartLv[c] = SUSTAIN_PERMILLE
+			}
+		} else if st == ENV_RELEASE {
+			if t >= RELEASE_MS {
+				lv = 0
+				vState[c] = ENV_IDLE
+				vStageMs[c] = 0
+				vLastVol[c] = 0
+				audio_set_voice(c, WAVE_NONE, 0, 0, 0)
+				continue
+			} else {
+				rem := RELEASE_MS - t
+				lv = (vStartLv[c] * rem) / RELEASE_MS
+				lv = (lv * (rem + RELEASE_MS)) / (2 * RELEASE_MS)
+			}
+		}
+
+		vLevel[c] = lv
+		activeCount = activeCount + 1
+
+		nIdx := vNote[c]
+		if nIdx >= 0 && nIdx < numNotes {
+			if lv > noteVisLv[nIdx] {
+				noteVisLv[nIdx] = lv
+			}
+			vol := computeHwVol(nIdx, lv)
+			if vol != vLastVol[c] {
+				vLastVol[c] = vol
+				audio_set_voice(c, WAVE_SINE, noteSteps[nIdx], vol, 0)
+			}
+		}
+	}
+
+	if anyAttack == 0 {
+		os_set_rgb_led(1, 0, 0, 0)
+	}
+	return activeCount
+}
+
+func tubeFillColor(glow int) int {
+	if glow <= 0 {
+		return COL_TUBE_IDLE
+	}
+	if glow == 1 {
+		return 0x330D
+	}
+	if glow == 2 {
+		return 0x3BD0
+	}
+	if glow == 3 {
+		return 0x4493
+	}
+	if glow == 4 {
+		return 0x4D56
+	}
+	if glow == 5 {
+		return 0x5639
+	}
+	if glow == 6 {
+		return 0x6EFD
+	}
+	if glow == 7 {
+		return 0x9F7F
+	}
+	return WHITE
+}
+
+func tubeHighlightColor(glow int) int {
+	if glow <= 0 {
+		return COL_TUBE_RIM
+	}
+	if glow <= 3 {
+		return 0x6679
+	}
+	if glow <= 6 {
+		return CYAN
+	}
+	return WHITE
+}
+
+func drawTubeAndMeter(i int) {
+	lv := noteVisLv[i]
+	glow := (lv * 8 + 499) / 1000
+	if glow > 8 {
+		glow = 8
+	}
+	barH := (lv * 22 + 499) / 1000
+	if barH > 22 {
+		barH = 22
+	}
+
+	x := tubeGeomX(i)
+	w := tubeGeomW()
+	topY := 54
+	tLen := tubeLens[i]
+
+	if glow != prevTubeGlow[i] {
+		prevTubeGlow[i] = glow
+		fillCol := tubeFillColor(glow)
+		hiCol := tubeHighlightColor(glow)
+
+		cx := x + w/2
+		tft_draw_fast_vline(cx, 49, 5, COL_STRING)
+
+		tft_fill_round_rect(x, topY, w, tLen, 2, fillCol)
+		tft_draw_round_rect(x, topY, w, tLen, 2, hiCol)
+		tft_draw_fast_vline(x+3, topY+2, tLen-4, hiCol)
+	}
+
+	if barH != prevEnvBar[i] {
+		prevEnvBar[i] = barH
+		meterTop := 152
+		meterH := 22
+		tft_fill_rect(x+2, meterTop, w-4, meterH, COL_PANEL)
+		if barH > 0 {
+			barCol := 0x051D
+			if barH > 16 {
+				barCol = CYAN
+			} else if barH > 9 {
+				barCol = 0x07F5
+			}
+			tft_fill_rect(x+2, meterTop+(meterH-barH), w-4, barH, barCol)
+		}
+		tft_draw_rect(x+1, meterTop-1, w-2, meterH+2, 0x2965)
+	}
+}
+
+func drawStatusHeader(activeVoices int) {
+	if activeVoices == prevActiveVoices && lastNoteStruck == prevLastNote {
+		return
+	}
+	prevActiveVoices = activeVoices
+	prevLastNote = lastNoteStruck
+
+	tft_fill_rect(6, 25, 308, 16, COL_BG)
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(0x9E7F, COL_BG)
+	if lastNoteStruck >= 0 && lastNoteStruck < numNotes {
+		x := 8
+		x = x + tft_draw_string("Chime: ", x, 33, 2)
+		x = x + tft_draw_string(noteName(lastNoteStruck), x, 33, 2)
+		x = x + tft_draw_string(" (", x, 33, 2)
+		x = x + tft_draw_int(noteHz[lastNoteStruck], x, 33, 2)
+		x = x + tft_draw_string(" Hz, ", x, 33, 2)
+		x = x + tft_draw_string(noteRatioStr(lastNoteStruck), x, 33, 2)
+		tft_draw_string(")", x, 33, 2)
+	} else {
+		tft_draw_string(scaleIdleSummaryStr(), 8, 33, 2)
+	}
+
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(GREENYELLOW, COL_BG)
+	vx := 252
+	vx = vx + tft_draw_string("Voices: ", vx, 33, 2)
+	tft_draw_int(activeVoices, vx, 33, 2)
+}
+
+func drawBottomControls() {
+	tft_fill_rect(0, 192, 320, 48, COL_HEADER)
+	tft_draw_fast_hline(0, 192, 320, COL_BTN_BORDER)
+	tft_draw_fast_vline(159, 193, 47, COL_BTN_BORDER)
+
+	trackY := 220
+	trackH := 10
+
+	// -------------------------------------------------------------------------
+	// Left Half (x = 0..158): PACE Slider (0.5s .. 5.0s, default 2.0s)
+	// -------------------------------------------------------------------------
+	secWhole := speedTenths / 10
+	secFrac := speedTenths % 10
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(CYAN, COL_HEADER)
+	sx := 10
+	sx = sx + tft_draw_string("PACE: ", sx, 203, 2)
+	sx = sx + tft_draw_int(secWhole, sx, 203, 2)
+	sx = sx + tft_draw_string(".", sx, 203, 2)
+	sx = sx + tft_draw_int(secFrac, sx, 203, 2)
+	tft_draw_string("s", sx, 203, 2)
+
+	spdTrackX := 12
+	spdTrackW := 135
+	tft_fill_round_rect(spdTrackX, trackY, spdTrackW, trackH, 4, COL_TRACK_BG)
+	tft_draw_round_rect(spdTrackX, trackY, spdTrackW, trackH, 4, COL_BTN_BORDER)
+
+	spdStep := (speedTenths - 5) / 5
+	if spdStep < 0 {
+		spdStep = 0
+	}
+	if spdStep > 9 {
+		spdStep = 9
+	}
+	spdKnobX := spdTrackX + spdStep*15
+	spdFillW := spdKnobX - spdTrackX
+	if spdFillW > 0 {
+		tft_fill_round_rect(spdTrackX+1, trackY+1, spdFillW, trackH-2, 3, 0x03EF)
+	}
+	tft_draw_fast_vline(spdTrackX+3*15, trackY-3, trackH+6, LIGHTGREY)
+	tft_fill_round_rect(spdKnobX-5, trackY-4, 11, trackH+8, 3, CYAN)
+	tft_draw_round_rect(spdKnobX-5, trackY-4, 11, trackH+8, 3, WHITE)
+
+	// -------------------------------------------------------------------------
+	// Right Half (x = 160..319): VOL Slider (0 = silent .. 11 = overmodulated)
+	// -------------------------------------------------------------------------
+	tft_set_text_datum(ML_DATUM)
+	volCol := YELLOW
+	if volLevel == 0 {
+		volCol = LIGHTGREY
+	} else if volLevel >= 10 {
+		volCol = ORANGE
+	}
+	tft_set_text_color(volCol, COL_HEADER)
+	vx := 170
+	vx = vx + tft_draw_string("VOL: ", vx, 203, 2)
+	vx = vx + tft_draw_int(volLevel, vx, 203, 2)
+	if volLevel == 0 {
+		tft_set_text_color(LIGHTGREY, COL_HEADER)
+		tft_draw_string(" (MUTE)", vx, 203, 1)
+	} else if volLevel >= 10 {
+		tft_set_text_color(RED, COL_HEADER)
+		tft_draw_string(" (OVER)", vx, 203, 1)
+	}
+
+	volTrackX := 172
+	volTrackW := 132
+	tft_fill_round_rect(volTrackX, trackY, volTrackW, trackH, 4, COL_TRACK_BG)
+	tft_draw_round_rect(volTrackX, trackY, volTrackW, trackH, 4, COL_BTN_BORDER)
+
+	volKnobX := volTrackX + volLevel*12
+	fillW := volKnobX - volTrackX
+	if fillW > 0 {
+		fillCol := 0x051D
+		if volLevel >= 10 {
+			fillCol = RED
+		}
+		tft_fill_round_rect(volTrackX+1, trackY+1, fillW, trackH-2, 3, fillCol)
+	}
+	tft_draw_fast_vline(volTrackX+6*12, trackY-3, trackH+6, LIGHTGREY)
+	tft_fill_round_rect(volKnobX-5, trackY-4, 11, trackH+8, 3, volCol)
+	tft_draw_round_rect(volKnobX-5, trackY-4, 11, trackH+8, 3, WHITE)
+}
+
+func drawScalePopupMenu() {
+	// Modal popup card over the chime area
+	tft_fill_round_rect(44, 30, 232, 134, 6, COL_HEADER)
+	tft_draw_round_rect(44, 30, 232, 134, 6, CYAN)
+	tft_draw_round_rect(45, 31, 230, 132, 5, COL_BTN_BORDER)
+
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, COL_HEADER)
+	tft_draw_string("SELECT CHIME SCALE", 160, 43, 2)
+
+	for m := 0; m < 3; m++ {
+		by := 56 + m*34
+		bg := COL_BTN_BG
+		fg := WHITE
+		border := COL_BTN_BORDER
+		if m == scaleMode {
+			bg = COL_BTN_ACTIVE
+			border = WHITE
+		}
+		tft_fill_round_rect(56, by, 208, 28, 4, bg)
+		tft_draw_round_rect(56, by, 208, 28, 4, border)
+		tft_set_text_color(fg, bg)
+		tft_draw_string(scaleTitleStr(m), 160, by+14, 2)
+	}
+}
+
+func drawStaticScene() {
+	tft_fill_screen(COL_BG)
+
+	// Top title bar
+	tft_fill_rect(0, 0, 320, 24, COL_HEADER)
+	tft_draw_fast_hline(0, 24, 320, COL_BTN_BORDER)
+
+	// Top-left [EXIT] button (next to 10x10 corner exit wedge)
+	tft_fill_round_rect(12, 3, 40, 18, 3, MAROON)
+	tft_draw_round_rect(12, 3, 40, 18, 3, PINK)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, MAROON)
+	tft_draw_string("EXIT", 32, 12, 1)
+	DrawExitWedge()
+
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(CYAN, COL_HEADER)
+	tft_draw_string("WIND", 58, 12, 2)
+
+	// Clickable Scale Selector button on top bar (x = 104..316, y = 3..21)
+	tft_fill_round_rect(104, 3, 212, 18, 3, COL_BTN_BG)
+	tft_draw_round_rect(104, 3, 212, 18, 3, COL_BTN_BORDER)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, COL_BTN_BG)
+	tft_draw_string(scaleTitleStr(scaleMode), 204, 12, 1)
+	// Dropdown indicator triangle on right edge of scale button
+	tft_fill_triangle(303, 9, 311, 9, 307, 15, CYAN)
+
+	// Wooden chime suspension cross-beam
+	tft_fill_round_rect(6, 43, 308, 6, 2, COL_WOOD)
+	tft_draw_fast_hline(8, 44, 304, COL_WOOD_HI)
+
+	// Note labels below each tube's ADSR meter
+	w := tubeGeomW()
+	tft_set_text_datum(TC_DATUM)
+	for i := 0; i < numNotes; i++ {
+		cx := tubeGeomX(i) + w/2
+		lblCol := LIGHTGREY
+		if isRootNote(i) != 0 {
+			lblCol = YELLOW // Root notes (E or G) highlighted in gold
+		}
+		tft_set_text_color(lblCol, COL_BG)
+		tft_draw_string(noteName(i), cx, 179, 1)
+		prevTubeGlow[i] = -1
+		prevEnvBar[i] = -1
+		drawTubeAndMeter(i)
+	}
+
+	prevActiveVoices = -1
+	prevLastNote = -2
+	drawStatusHeader(0)
+	drawBottomControls()
+
+	if menuOpen != 0 {
+		drawScalePopupMenu()
+	}
+}
+
+func main() {
+	initScaleTables()
+	drawStaticScene()
+	audio_start()
+
+	lastTickMs := millis()
+	// Strike an initial gentle chime shortly after launch
+	nextStrikeAtMs = lastTickMs + 350
+	lastStruckTube := -1
+	touchWasDown := 0
+
+	for {
+		nowMs := millis()
+		dtMs := nowMs - lastTickMs
+		if dtMs < 0 {
+			dtMs = 0
+		}
+		if dtMs >= 20 {
+			if dtMs > 100 {
+				dtMs = 100
+			}
+			lastTickMs = nowMs
+
+			// Poisson arrival process: trigger a random chime in the active scale
+			if nowMs >= nextStrikeAtMs {
+				nIdx := rand(numNotes)
+				strikeChime(nIdx)
+				nextStrikeAtMs = nowMs + samplePoissonIntervalMs(meanArrivalMs)
+			}
+
+			active := updateEnvelopes(dtMs)
+			if menuOpen == 0 {
+				for i := 0; i < numNotes; i++ {
+					drawTubeAndMeter(i)
+				}
+				drawStatusHeader(active)
+			}
+		}
+
+		// Poll touch input
+		touched, tx, ty := os_read_touch()
+		if touched != 0 {
+			// Top-left [EXIT] button always active
+			if tx <= 56 && ty <= 28 {
+				audio_stop()
+				return
+			}
+
+			if menuOpen != 0 {
+				if touchWasDown == 0 {
+					touchWasDown = 1
+					// Check if user tapped one of the 3 scale options in the popup menu
+					if tx >= 52 && tx <= 268 && ty >= 54 && ty <= 156 {
+						chosenScale := (ty - 56) / 34
+						if chosenScale < 0 {
+							chosenScale = 0
+						}
+						if chosenScale > 2 {
+							chosenScale = 2
+						}
+						menuOpen = 0
+						if chosenScale != scaleMode {
+							silenceAllVoices()
+							loadScale(chosenScale)
+						}
+						drawStaticScene()
+						// Strike a welcoming root chime in the chosen scale
+						strikeChime(0)
+						nextStrikeAtMs = nowMs + samplePoissonIntervalMs(meanArrivalMs)
+					} else {
+						// Tapped outside the menu options -> close popup
+						menuOpen = 0
+						drawStaticScene()
+					}
+				}
+			} else {
+				// Top scale label button (x >= 100, y <= 28) -> open scale popup menu
+				if tx >= 100 && ty <= 28 {
+					if touchWasDown == 0 {
+						touchWasDown = 1
+						menuOpen = 1
+						drawScalePopupMenu()
+					}
+				} else if ty >= 192 {
+					lastStruckTube = -1
+					// Bottom slider bar: left = PACE (0.5..5.0s), right = VOL (0..11)
+					if tx < 160 {
+						spdStep := ((tx - 12) * 9 + 67) / 135
+						if spdStep < 0 {
+							spdStep = 0
+						}
+						if spdStep > 9 {
+							spdStep = 9
+						}
+						newTenths := 5 + spdStep*5
+						if newTenths != speedTenths {
+							speedTenths = newTenths
+							meanArrivalMs = speedTenths * 100
+							if nextStrikeAtMs > nowMs+meanArrivalMs {
+								nextStrikeAtMs = nowMs + samplePoissonIntervalMs(meanArrivalMs)
+							}
+							drawBottomControls()
+						}
+					} else {
+						newVol := ((tx - 172) * 11 + 66) / 132
+						if newVol < 0 {
+							newVol = 0
+						}
+						if newVol > 11 {
+							newVol = 11
+						}
+						if newVol != volLevel {
+							volLevel = newVol
+							refreshActiveVoiceVolumes()
+							drawBottomControls()
+						}
+					}
+				} else if ty >= 44 && ty < 188 && tx >= 8 && tx < 314 {
+					// Tapping or swiping across the chime tubes (y = 44..188)
+					var tubeIdx int
+					if numNotes == 13 {
+						tubeIdx = (tx - 13) / 23
+					} else {
+						tubeIdx = (tx - 10) / 19
+					}
+					if tubeIdx < 0 {
+						tubeIdx = 0
+					}
+					if tubeIdx >= numNotes {
+						tubeIdx = numNotes - 1
+					}
+					if tubeIdx != lastStruckTube {
+						lastStruckTube = tubeIdx
+						strikeChime(tubeIdx)
+					}
+				}
+				touchWasDown = 1
+			}
+		} else {
+			lastStruckTube = -1
+			touchWasDown = 0
+		}
+
+		delay_ms(10)
+	}
+}

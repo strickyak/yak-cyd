@@ -55,6 +55,8 @@ apps: lakat
 	$(LAKAT) compile -title "MIDI Player" -o build/apps/midiplay.lapp apps/midiplay/midiplay.lgolf
 	$(LAKAT) compile -title "Radio" -o build/apps/radio.lapp apps/radio/radio.lgolf
 	$(LAKAT) compile -title "Ham SDR" -o build/apps/ham.lapp apps/ham/ham.lgolf
+	$(LAKAT) compile -title "SmallerTalk-80" -o build/apps/smallertalk.lapp apps/smallertalk/smallertalk.lgolf
+	$(LAKAT) compile -title "Wind Chimes" -o build/apps/wind.lapp apps/wind/wind.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps

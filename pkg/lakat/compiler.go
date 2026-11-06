@@ -283,9 +283,13 @@ type StructDef struct {
 }
 
 type VarSym struct {
-	Name     string
-	IsGlobal bool
-	Type     TypeDesc
+	Name        string
+	IsGlobal    bool
+	Type        TypeDesc
+	HasInit     bool
+	IsFloatInit bool
+	InitInt     int64
+	InitFloat   float64
 }
 
 type FuncDecl struct {
@@ -347,9 +351,23 @@ var BuiltinConsts = map[string]int64{
 	"ML_DATUM":          3,
 	"MC_DATUM":          4,
 	"MR_DATUM":          5,
-	"BL_DATUM":          6,
-	"BC_DATUM":          7,
-	"BR_DATUM":          8,
+	"BL_DATUM":              6,
+	"BC_DATUM":              7,
+	"BR_DATUM":              8,
+	"AUDIO_RATE":            15625,
+	"AUDIO_VOICES":          16,
+	"WAVE_NONE":             0,
+	"WAVE_SINE":             1,
+	"WAVE_RAMP":             2,
+	"WAVE_SQUARE":           3,
+	"WAVE_TRIANGLE":         4,
+	"WAVE_NOISE":            5,
+	"LAKATOS_WAVE_NONE":     0,
+	"LAKATOS_WAVE_SINE":     1,
+	"LAKATOS_WAVE_RAMP":     2,
+	"LAKATOS_WAVE_SQUARE":   3,
+	"LAKATOS_WAVE_TRIANGLE": 4,
+	"LAKATOS_WAVE_NOISE":    5,
 }
 
 var BuiltinFloatConsts = map[string]float64{
@@ -894,6 +912,9 @@ func (c *Compiler) parseSingleGlobalVarDecl() error {
 		return err
 	}
 	var td TypeDesc
+	var hasInit, isFloatInit bool
+	var initInt int64
+	var initFloat float64
 	if !c.matchPunct("=") {
 		td, err = c.parseType()
 		if err != nil {
@@ -901,24 +922,52 @@ func (c *Compiler) parseSingleGlobalVarDecl() error {
 		}
 		if c.matchPunct("=") {
 			savePos := c.pos
-			if _, err := c.evalConstExpr(); err != nil {
-				c.pos = savePos
-				_, _ = c.evalFloatConstExpr()
+			if !isFloatType(td) {
+				if iv, err := c.evalConstExpr(); err == nil {
+					hasInit = iv != 0
+					initInt = iv
+				} else {
+					c.pos = savePos
+					if fv, ferr := c.evalFloatConstExpr(); ferr == nil {
+						hasInit = fv != 0
+						initInt = int64(fv)
+					}
+				}
+			} else {
+				if fv, ferr := c.evalFloatConstExpr(); ferr == nil {
+					hasInit = fv != 0
+					isFloatInit = true
+					initFloat = fv
+				}
 			}
 		}
 	} else {
 		savePos := c.pos
-		if _, err := c.evalConstExpr(); err == nil {
+		if iv, err := c.evalConstExpr(); err == nil && (c.peek().Kind == TokEOF || (c.peek().Kind == TokPunct && (c.peek().Val == ";" || c.peek().Val == ")"))) {
 			td = TypeDesc{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4}
+			hasInit = iv != 0
+			initInt = iv
 		} else {
 			c.pos = savePos
-			if _, err := c.evalFloatConstExpr(); err != nil {
-				return err
+			fv, ferr := c.evalFloatConstExpr()
+			if ferr != nil {
+				return ferr
 			}
 			td = TypeDesc{Kind: "scalar", ScalarType: "float32", ByteSize: 4, ElemSize: 4}
+			hasInit = fv != 0
+			isFloatInit = true
+			initFloat = fv
 		}
 	}
-	vs := VarSym{Name: name, IsGlobal: true, Type: td}
+	vs := VarSym{
+		Name:        name,
+		IsGlobal:    true,
+		Type:        td,
+		HasInit:     hasInit,
+		IsFloatInit: isFloatInit,
+		InitInt:     initInt,
+		InitFloat:   initFloat,
+	}
 	c.globals = append(c.globals, vs)
 	c.globalMap[name] = vs
 	return nil
@@ -1369,6 +1418,19 @@ func (c *Compiler) emitFunction(fn *FuncDecl) error {
 	// Buffer body instructions first so all discovered locals can be emitted in header
 	savedOut := c.asmOut
 	c.asmOut = strings.Builder{}
+
+	if fn.Name == "main" {
+		for _, g := range c.globals {
+			if g.HasInit {
+				if g.IsFloatInit {
+					c.emitPushFloat32(float32(g.InitFloat))
+				} else {
+					c.emitPushInt(g.InitInt)
+				}
+				c.emitStoreVar(g)
+			}
+		}
+	}
 
 	c.toks = fn.BodyTokens
 	c.pos = 0
@@ -3684,6 +3746,37 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 			c.emitOp("SYSCALL", "SYS_SET_APP_ARG")
 		}
 		c.emitOp("SYSCALL", "SYS_JOIN_NATIVE")
+		return VoidType, nil
+	case "audio_start", "os_audio_start":
+		c.emitOp("SYSCALL", "SYS_AUDIO_START")
+		return VoidType, nil
+	case "audio_stop", "os_audio_stop":
+		c.emitOp("SYSCALL", "SYS_AUDIO_STOP")
+		return VoidType, nil
+	case "audio_set_voice", "os_audio_set_voice", "audio_tone", "os_audio_tone":
+		if len(argTypes) == 5 {
+			// 5-arg built-in waveform convenience form:
+			// audio_set_voice(ch, waveType, stepFp16, vol, resetPos)
+			rstTmp := c.allocTemp(ScalarInt)
+			volTmp := c.allocTemp(ScalarInt)
+			stpTmp := c.allocTemp(ScalarInt)
+			wavTmp := c.allocTemp(ScalarInt)
+			chTmp := c.allocTemp(ScalarInt)
+			c.emitStoreVar(rstTmp)
+			c.emitStoreVar(volTmp)
+			c.emitStoreVar(stpTmp)
+			c.emitStoreVar(wavTmp)
+			c.emitStoreVar(chTmp)
+			c.emitLoadVar(chTmp)
+			c.emitOp("PUSH_0") // pcmAddr = nullptr
+			c.emitLoadVar(wavTmp)
+			c.emitOp("PUSH_0") // loopStart = 0
+			c.emitPushInt(256) // loopLen = 256
+			c.emitLoadVar(stpTmp)
+			c.emitLoadVar(volTmp)
+			c.emitLoadVar(rstTmp)
+		}
+		c.emitOp("SYSCALL", "SYS_AUDIO_SET_VOICE")
 		return VoidType, nil
 	}
 

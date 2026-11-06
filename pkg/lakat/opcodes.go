@@ -253,6 +253,11 @@ const (
 	// Multi-Head Native Binary Chaining (0x48 .. 0x49)
 	SysSetAppArg  = byte(0x48) // (argSlice -- )
 	SysJoinNative = byte(0x49) // (binNameSlice -- )
+
+	// Core 0 16-Channel Audio Synthesizer & Mixer (0x4A .. 0x4C)
+	SysAudioStart    = byte(0x4A) // ( -- )
+	SysAudioStop     = byte(0x4B) // ( -- )
+	SysAudioSetVoice = byte(0x4C) // (ch pcmAddr len loopStart loopLen stepFp16 vol resetPos -- )
 )
 
 type ArgType string
@@ -459,6 +464,9 @@ var SyscallByName = map[string]byte{
 	"SYS_SAVE_PNG_PAL4":       SysSavePngPal4,
 	"SYS_SET_APP_ARG":         SysSetAppArg,
 	"SYS_JOIN_NATIVE":         SysJoinNative,
+	"SYS_AUDIO_START":         SysAudioStart,
+	"SYS_AUDIO_STOP":          SysAudioStop,
+	"SYS_AUDIO_SET_VOICE":     SysAudioSetVoice,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,

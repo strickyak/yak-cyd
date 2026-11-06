@@ -229,6 +229,10 @@ enum LCodeSyscall : uint8_t {
   SysSavePngPal4    = 0x47,
   SysSetAppArg      = 0x48,
   SysJoinNative     = 0x49,
+
+  SysAudioStart     = 0x4A,
+  SysAudioStop      = 0x4B,
+  SysAudioSetVoice  = 0x4C,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -537,6 +541,7 @@ struct LCodeVM {
           running = 0;
           return true;
         }
+        lakatosPollSerialFuse();
         updateLakatosConfigBackground();
         lakatosUpdateRgbLed();
         yield();
@@ -560,6 +565,7 @@ struct LCodeVM {
             running = 0;
             return true;
           }
+          lakatosPollSerialFuse();
           updateLakatosConfigBackground();
           lakatosUpdateRgbLed();
           uint32_t rem = ms - (uint32_t)(millis() - start);
@@ -1113,6 +1119,28 @@ struct LCodeVM {
         lakatosRequestJoinNative(binBuf);
         exitCode = 0;
         running  = 0;
+        return true;
+      }
+      case SysAudioStart:
+        lakatosAudioStart();
+        return true;
+      case SysAudioStop:
+        lakatosAudioStop();
+        return true;
+      case SysAudioSetVoice: {
+        uint32_t resetPos = 0, vol = 0, stepFp16 = 0, loopLen = 0, loopStart = 0, ln = 0, pcmAddr = 0, ch = 0;
+        if (!pop(resetPos) || !pop(vol) || !pop(stepFp16) || !pop(loopLen) ||
+            !pop(loopStart) || !pop(ln) || !pop(pcmAddr) || !pop(ch)) {
+          return false;
+        }
+        const int8_t* pcm = nullptr;
+        if (pcmAddr != 0) {
+          if (ln > 0 && !checkAddr(pcmAddr, ln)) return false;
+          pcm = (const int8_t*)(mem + pcmAddr);
+        }
+        if (vol > 255u) vol = 255u;
+        lakatosAudioSetVoice((int)(int32_t)ch, pcm, ln, loopStart, loopLen,
+                             stepFp16, (uint8_t)vol, resetPos != 0);
         return true;
       }
       default:
@@ -2262,6 +2290,7 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   free(vm->mem);
   heap_caps_free(vm);
   if (lakatosGetJoinNativeTarget()[0] == '\0') {
+    lakatosAudioStop();
     lakatosEndAppSession();
   }
   return !hadErr;

@@ -676,6 +676,20 @@ static void api_audio_set_tick_cb(lakatos_audio_tick_cb_t cb, void* user, uint32
   gAudioTickCb       = cb;
 }
 
+void lakatosAudioStart() {
+  api_audio_start();
+}
+
+void lakatosAudioStop() {
+  api_audio_stop();
+}
+
+void lakatosAudioSetVoice(int ch, const int8_t* pcm, uint32_t len,
+                          uint32_t loopStart, uint32_t loopLen,
+                          uint32_t stepFp16, uint8_t vol, bool resetPos) {
+  api_audio_set_voice(ch, pcm, len, loopStart, loopLen, stepFp16, vol, resetPos);
+}
+
 // ---------------------------------------------------------------------------
 // Streaming VFS Reader with Transparent .zip (Store / Deflate) Decompression
 // ---------------------------------------------------------------------------

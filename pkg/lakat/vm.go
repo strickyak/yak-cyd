@@ -2373,6 +2373,27 @@ func (vm *VM) execSyscall(sysId byte) error {
 		vm.JoinNativeBin = binName
 		vm.ExitCode = 0
 		vm.Running = false
+	case SysAudioStart:
+		// Audio synth started (no-op in headless VM)
+	case SysAudioStop:
+		// Audio synth stopped (no-op in headless VM)
+	case SysAudioSetVoice:
+		_, _ = vm.pop() // resetPos
+		_, _ = vm.pop() // vol
+		_, _ = vm.pop() // stepFp16
+		_, _ = vm.pop() // loopLen
+		_, _ = vm.pop() // loopStart
+		ln, _ := vm.pop()
+		pcmAddr, _ := vm.pop()
+		_, err := vm.pop() // ch
+		if err != nil {
+			return err
+		}
+		if pcmAddr != 0 && ln > 0 {
+			if err := vm.checkAddr(pcmAddr, int(ln)); err != nil {
+				return err
+			}
+		}
 
 	default:
 		return vm.errf("unimplemented syscall 0x%02X", sysId)

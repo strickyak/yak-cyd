@@ -189,6 +189,13 @@ const char* lakatosGetAppArg();
 void        lakatosRequestJoinNative(const char* binName);
 const char* lakatosGetJoinNativeTarget();
 
+// Core 0 16-Channel Audio Synthesizer & Mixer (implemented in lakatos_loader.cpp)
+void lakatosAudioStart();
+void lakatosAudioStop();
+void lakatosAudioSetVoice(int ch, const int8_t* pcm, uint32_t len,
+                          uint32_t loopStart, uint32_t loopLen,
+                          uint32_t stepFp16, uint8_t vol, bool resetPos);
+
 // ---------------------------------------------------------------------------
 // PNG Image Decoder & Renderer (implemented in lakatos_png.cpp)
 // ---------------------------------------------------------------------------
