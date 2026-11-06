@@ -1367,23 +1367,55 @@ const uint8_t* lakatosPrefetchBuffer(uint32_t* outBytesGot) {
 }
 
 // ---------------------------------------------------------------------------
-// Live HTTP Audio/Data Stream (Non-Blocking Reader for Radio / Streaming Apps)
+// Live HTTP / Raw TCP Audio/Data Stream (Non-Blocking Reader/Writer for Radio & Ham SDR)
 // ---------------------------------------------------------------------------
 static WiFiClient gLiveStreamClient;
 static HTTPClient gLiveStreamHttp;
-static bool       gLiveStreamOpen = false;
+static bool       gLiveStreamOpen  = false;
+static bool       gLiveStreamIsRaw = false;
 
 void lakatosHttpStreamClose() {
   if (gLiveStreamOpen) {
-    gLiveStreamHttp.end();
+    if (!gLiveStreamIsRaw) {
+      gLiveStreamHttp.end();
+    }
     gLiveStreamClient.stop();
-    gLiveStreamOpen = false;
+    gLiveStreamOpen  = false;
+    gLiveStreamIsRaw = false;
   }
 }
 
 bool lakatosHttpStreamOpen(const char* url) {
   lakatosHttpStreamClose();
   if (!url || !url[0] || WiFi.status() != WL_CONNECTED) return false;
+
+  if (strncmp(url, "tcp://", 6) == 0) {
+    const char* hp = url + 6;
+    char host[96];
+    uint16_t port = 80;
+    size_t i = 0;
+    while (hp[i] && hp[i] != ':' && hp[i] != '/' && i < sizeof(host) - 1) {
+      host[i] = hp[i];
+      i++;
+    }
+    host[i] = '\0';
+    if (hp[i] == ':') {
+      int p = atoi(hp + i + 1);
+      if (p > 0 && p <= 65535) port = (uint16_t)p;
+    }
+    if (!host[0]) return false;
+    if (!gLiveStreamClient.connect(host, port, 5000)) {
+      gLiveStreamClient.stop();
+      return false;
+    }
+    gLiveStreamClient.setNoDelay(true);
+    gLiveStreamOpen  = true;
+    gLiveStreamIsRaw = true;
+    Serial.printf("[Lakatos TCP] Stream opened: %s:%u (heap=%u)\r\n",
+                  host, (unsigned)port, (unsigned)ESP.getFreeHeap());
+    return true;
+  }
+
   gLiveStreamClient.setNoDelay(true);
   gLiveStreamHttp.useHTTP10(true);
   gLiveStreamHttp.setTimeout(8000);
@@ -1398,7 +1430,8 @@ bool lakatosHttpStreamOpen(const char* url) {
     gLiveStreamClient.stop();
     return false;
   }
-  gLiveStreamOpen = true;
+  gLiveStreamOpen  = true;
+  gLiveStreamIsRaw = false;
   Serial.printf("[Lakatos HTTP] Stream opened: %s (HTTP %d, heap=%u)\r\n",
                 url, code, (unsigned)ESP.getFreeHeap());
   return true;
@@ -1410,7 +1443,7 @@ int32_t lakatosHttpStreamRead(void* buf, size_t maxLen) {
     lakatosHttpStreamClose();
     return -1;
   }
-  WiFiClient* stream = gLiveStreamHttp.getStreamPtr();
+  WiFiClient* stream = gLiveStreamIsRaw ? &gLiveStreamClient : gLiveStreamHttp.getStreamPtr();
   if (!stream) {
     lakatosHttpStreamClose();
     return -1;
@@ -1421,9 +1454,26 @@ int32_t lakatosHttpStreamRead(void* buf, size_t maxLen) {
     int r = stream->read((uint8_t*)buf, toRead);
     return (r > 0) ? (int32_t)r : 0;
   }
-  if (!gLiveStreamHttp.connected() && !stream->connected()) {
+  bool conn = gLiveStreamIsRaw ? gLiveStreamClient.connected()
+                               : (gLiveStreamHttp.connected() || stream->connected());
+  if (!conn) {
     lakatosHttpStreamClose();
     return -1;
   }
   return 0;
+}
+
+int32_t lakatosHttpStreamWrite(const void* buf, size_t len) {
+  if (!gLiveStreamOpen || !buf || len == 0) return -1;
+  if (lakatosShouldExitApp()) {
+    lakatosHttpStreamClose();
+    return -1;
+  }
+  WiFiClient* stream = gLiveStreamIsRaw ? &gLiveStreamClient : gLiveStreamHttp.getStreamPtr();
+  if (!stream || !stream->connected()) {
+    lakatosHttpStreamClose();
+    return -1;
+  }
+  size_t w = stream->write((const uint8_t*)buf, len);
+  return (w > 0) ? (int32_t)w : -1;
 }

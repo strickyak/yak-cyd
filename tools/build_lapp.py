@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Compiles the multi-headed native binary (build/apps/native.bin) containing all
-4 native Lakatos applications (piano, modtrack, midiplay, radio) using
+5 native Lakatos applications (piano, modtrack, midiplay, radio, ham) using
 xtensa-esp32-elf-g++ and ld/lakatos_app.ld, producing:
   - build/apps/native.elf
   - build/apps/native.bin (128-byte LakatosAppHeader + .text + .rodata + .data)
@@ -42,6 +42,7 @@ void piano_main(const LakatosApi* os);
 void modtrack_main(const LakatosApi* os);
 void midiplay_main(const LakatosApi* os);
 void radio_main(const LakatosApi* os);
+void ham_main(const LakatosApi* os);
 
 int strcmp(const char* a, const char* b);
 
@@ -55,6 +56,8 @@ void app_main(const LakatosApi* os) {
     midiplay_main(os);
   } else if (strcmp(arg, "radio") == 0) {
     radio_main(os);
+  } else if (strcmp(arg, "ham") == 0) {
+    ham_main(os);
   }
 }
 
@@ -346,6 +349,7 @@ def main():
         ("modtrack", os.path.join(REPO_DIR, "apps", "modtrack", "modtrack.cpp"), []),
         ("midiplay", os.path.join(REPO_DIR, "apps", "midiplay", "midiplay.cpp"), []),
         ("radio", os.path.join(REPO_DIR, "apps", "radio", "radio.cpp"), [f"-I{helix_inc}"]),
+        ("ham", os.path.join(REPO_DIR, "apps", "ham", "ham.cpp"), []),
     ]
     build_native_bin(heads, [helix_lib])
 

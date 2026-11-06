@@ -86,6 +86,10 @@ SECTIONS
     {
       *radio.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
     }
+    .bss.ham
+    {
+      *ham.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
   }
 
   .bss (NOLOAD) : ALIGN(8)

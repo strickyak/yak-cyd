@@ -887,6 +887,7 @@ static const LakatosApi gLakatosApi = {
     .http_stream_open     = lakatosHttpStreamOpen,
     .http_stream_read     = lakatosHttpStreamRead,
     .http_stream_close    = lakatosHttpStreamClose,
+    .http_stream_write    = lakatosHttpStreamWrite,
 };
 
 // ---------------------------------------------------------------------------

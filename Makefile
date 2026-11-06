@@ -54,6 +54,7 @@ apps: lakat
 	$(LAKAT) compile -title "MOD Tracker" -o build/apps/modtrack.lapp apps/modtrack/modtrack.lgolf
 	$(LAKAT) compile -title "MIDI Player" -o build/apps/midiplay.lapp apps/midiplay/midiplay.lgolf
 	$(LAKAT) compile -title "Radio" -o build/apps/radio.lapp apps/radio/radio.lgolf
+	$(LAKAT) compile -title "Ham SDR" -o build/apps/ham.lapp apps/ham/ham.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps

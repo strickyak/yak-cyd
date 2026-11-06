@@ -219,10 +219,11 @@ typedef struct LakatosApi {
   // --- Streaming VFS Reader with Transparent .zip Extraction ---
   int32_t  (*fs_read_stream)(const char* path, lakatos_stream_cb_t on_chunk, void* user);
 
-  // --- Live HTTP Audio/Data Stream ---
+  // --- Live HTTP / TCP / WebSocket Audio/Data Stream ---
   bool     (*http_stream_open)(const char* url);
   int32_t  (*http_stream_read)(void* buf, size_t max_len);
   void     (*http_stream_close)(void);
+  int32_t  (*http_stream_write)(const void* buf, size_t len);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);
@@ -233,7 +234,7 @@ static inline const LakatosApi* lakatos_os(void) {
 }
 
 // Helper for multi-headed native binaries (native.bin) to retrieve the global
-// argument string (e.g. "piano", "modtrack", "midiplay", "radio") from 0x3FFC8004
+// argument string (e.g. "piano", "modtrack", "midiplay", "radio", "ham") from 0x3FFC8004
 static inline const char* lakatos_app_arg(void) {
   const char* arg = *(const char* const*)(uintptr_t)(LAKATOS_APP_DRAM_BASE + 4u);
   return arg ? arg : "";
