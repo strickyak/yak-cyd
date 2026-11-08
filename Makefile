@@ -57,6 +57,7 @@ apps: lakat
 	$(LAKAT) compile -title "Ham SDR" -o build/apps/ham.lapp apps/ham/ham.lgolf
 	$(LAKAT) compile -title "SmallerTalk-80" -o build/apps/smallertalk.lapp apps/smallertalk/smallertalk.lgolf
 	$(LAKAT) compile -title "Wind Chimes" -o build/apps/wind.lapp apps/wind/wind.lgolf
+	$(LAKAT) compile -title "3D Dice Roller" -o build/apps/dice-3d.lapp apps/dice-3d/dice-3d.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps

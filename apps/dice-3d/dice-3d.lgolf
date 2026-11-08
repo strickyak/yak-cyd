@@ -1,0 +1,1191 @@
+package main
+
+import "wedge"
+
+// ---------------------------------------------------------------------------
+// DICE-3D: 3D Perspective 5-Dice Tabletop Roller for Lakatos OS (LGolf)
+// ---------------------------------------------------------------------------
+
+const NUM_DICE = 5
+const DIE_HALF = 11.5
+
+// Camera & projection parameters (looking down at tabletop at ~55 deg)
+const CAM_CX = 160.0
+const CAM_CY = 132.0
+const CAM_DIST = 320.0
+const CAM_FOCAL = 310.0
+const SIN_A = 0.8192
+const COS_A = 0.5736
+
+// Camera pinhole in 3D world space: (0, CAM_DIST*COS_A, CAM_DIST*SIN_A)
+const CAM_WX = 0.0
+const CAM_WY = 183.55
+const CAM_WZ = 262.14
+
+// Directional light unit vector (from upper-left-front)
+const LIGHT_X = -0.38
+const LIGHT_Y = -0.45
+const LIGHT_Z = 0.81
+
+// Colors
+const COL_HUD_BG = 0x10A2
+const COL_CARPET = 0x1800
+const COL_WOOD_TOP = 0x7202
+const COL_WOOD_HI = 0x9B26
+const COL_WOOD_WALL = 0x4100
+const COL_WOOD_SIDE = 0x5181
+const COL_FELT = 0x0324
+const COL_FELT_SHAD = 0x01E2
+const COL_EDGE = 0x8C51
+const COL_PIP_BLACK = 0x1082
+const COL_PIP_RED = 0xD000
+
+// Per-die physics and rendering state
+var dieX [5]float32
+var dieY [5]float32
+var dieZ [5]float32
+var dieVX [5]float32
+var dieVY [5]float32
+var dieVZ [5]float32
+
+var dieRX [5]float32
+var dieRY [5]float32
+var dieRZ [5]float32
+var dieVRX [5]float32
+var dieVRY [5]float32
+var dieVRZ [5]float32
+
+var dieTargetRX [5]float32
+var dieTargetRY [5]float32
+var dieTargetVal [5]int
+var dieBounces [5]int
+var dieSnapMode [5]int
+var dieSettled [5]int
+
+// Screen-space bounding boxes for dirty-rect erase
+var oldBX0 [5]int
+var oldBY0 [5]int
+var oldBX1 [5]int
+var oldBY1 [5]int
+var oldValid [5]int
+
+var newBX0 [5]int
+var newBY0 [5]int
+var newBX1 [5]int
+var newBY1 [5]int
+
+// Projected 8 vertices of each die [die][vert]
+var projVX [5][8]int
+var projVY [5][8]int
+var projOutX int = 0
+var projOutY int = 0
+
+// Shadow screen center and radius for each die
+var shadSX [5]int
+var shadSY [5]int
+var shadSR [5]int
+
+// Visible faces per die (up to 6, at most 3 visible for a convex cube)
+var visCount [5]int
+var visFaceIdx [5][6]int
+var visFaceCol [5][6]int
+var visFaceDot [5][6]float32
+
+// Depth sorting order of the 5 dice (back to front)
+var drawOrder [5]int
+var dieDepth [5]float32
+
+// Cube topology tables
+var vertSignX [8]float32
+var vertSignY [8]float32
+var vertSignZ [8]float32
+
+var faceVerts [6][4]int
+var faceVal [6]int
+
+// Audio click synthesis state (4 percussive voices)
+var voiceEnv [4]int
+var voiceFreq [4]int
+var nextVoice int = 0
+var chimeTimer int = 0
+var chimeType int = 0
+
+// Hand evaluation outputs
+var evalRank int = 0
+var evalCol int = 0
+
+// Simulation state
+var allSettled int = 0
+var rollNumber int = 0
+var fpsValue int = 55
+var fpsFrames int = 0
+var fpsLastMs int = 0
+
+func initTables() {
+	// 8 cube vertices in local space: (-1..+1)^3
+	vertSignX[0] = -1.0
+	vertSignY[0] = -1.0
+	vertSignZ[0] = -1.0
+
+	vertSignX[1] = 1.0
+	vertSignY[1] = -1.0
+	vertSignZ[1] = -1.0
+
+	vertSignX[2] = 1.0
+	vertSignY[2] = 1.0
+	vertSignZ[2] = -1.0
+
+	vertSignX[3] = -1.0
+	vertSignY[3] = 1.0
+	vertSignZ[3] = -1.0
+
+	vertSignX[4] = -1.0
+	vertSignY[4] = -1.0
+	vertSignZ[4] = 1.0
+
+	vertSignX[5] = 1.0
+	vertSignY[5] = -1.0
+	vertSignZ[5] = 1.0
+
+	vertSignX[6] = 1.0
+	vertSignY[6] = 1.0
+	vertSignZ[6] = 1.0
+
+	vertSignX[7] = -1.0
+	vertSignY[7] = 1.0
+	vertSignZ[7] = 1.0
+
+	// Face 0 (+Z): value 1
+	faceVerts[0][0] = 4
+	faceVerts[0][1] = 5
+	faceVerts[0][2] = 6
+	faceVerts[0][3] = 7
+	faceVal[0] = 1
+
+	// Face 1 (-Z): value 6
+	faceVerts[1][0] = 0
+	faceVerts[1][1] = 3
+	faceVerts[1][2] = 2
+	faceVerts[1][3] = 1
+	faceVal[1] = 6
+
+	// Face 2 (+Y): value 2
+	faceVerts[2][0] = 3
+	faceVerts[2][1] = 7
+	faceVerts[2][2] = 6
+	faceVerts[2][3] = 2
+	faceVal[2] = 2
+
+	// Face 3 (-Y): value 5
+	faceVerts[3][0] = 0
+	faceVerts[3][1] = 1
+	faceVerts[3][2] = 5
+	faceVerts[3][3] = 4
+	faceVal[3] = 5
+
+	// Face 4 (+X): value 3
+	faceVerts[4][0] = 1
+	faceVerts[4][1] = 2
+	faceVerts[4][2] = 6
+	faceVerts[4][3] = 5
+	faceVal[4] = 3
+
+	// Face 5 (-X): value 4
+	faceVerts[5][0] = 0
+	faceVerts[5][1] = 4
+	faceVerts[5][2] = 7
+	faceVerts[5][3] = 3
+	faceVal[5] = 4
+}
+
+func freqToStepFp16(freqHz int) int {
+	// round(freqHz * 256 * 65536 / 15625) = round(freqHz * 1073.7418)
+	return (freqHz * 1074)
+}
+
+func triggerClack(strength int) {
+	if strength < 8 {
+		strength = 8
+	}
+	if strength > 52 {
+		strength = 52
+	}
+	v := nextVoice & 3
+	nextVoice = nextVoice + 1
+	baseFreq := 520 + int(os_rand(380))
+	voiceFreq[v] = baseFreq
+	voiceEnv[v] = strength
+	audio_set_voice(v, WAVE_TRIANGLE, freqToStepFp16(baseFreq), strength, 1)
+}
+
+func triggerChime(kind int) {
+	chimeType = kind
+	chimeTimer = 18
+}
+
+func updateAudio() {
+	for v := 0; v < 4; v++ {
+		if voiceEnv[v] > 0 {
+			voiceEnv[v] = (voiceEnv[v] * 5) / 10
+			voiceFreq[v] = voiceFreq[v] - 45
+			if voiceFreq[v] < 140 {
+				voiceFreq[v] = 140
+			}
+			if voiceEnv[v] <= 2 {
+				voiceEnv[v] = 0
+				audio_set_voice(v, WAVE_NONE, 0, 0, 0)
+			} else {
+				audio_set_voice(v, WAVE_TRIANGLE, freqToStepFp16(voiceFreq[v]), voiceEnv[v], 0)
+			}
+		}
+	}
+
+	if chimeTimer > 0 {
+		chimeTimer = chimeTimer - 1
+		vol := chimeTimer * 2
+		if vol > 32 {
+			vol = 32
+		}
+		if chimeTimer == 0 {
+			audio_set_voice(4, WAVE_NONE, 0, 0, 0)
+			audio_set_voice(5, WAVE_NONE, 0, 0, 0)
+			audio_set_voice(6, WAVE_NONE, 0, 0, 0)
+		} else {
+			f0 := 523
+			f1 := 659
+			f2 := 784
+			if chimeType >= 5 {
+				// Yahtzee / 4 of a kind / Full House bright fanfare
+				f0 = 587
+				f1 = 740
+				f2 = 880
+				if chimeTimer < 10 {
+					f0 = 659
+					f1 = 831
+					f2 = 988
+				}
+			}
+			rst := 0
+			if chimeTimer == 17 {
+				rst = 1
+			}
+			audio_set_voice(4, WAVE_SINE, freqToStepFp16(f0), vol, rst)
+			audio_set_voice(5, WAVE_SINE, freqToStepFp16(f1), vol, rst)
+			audio_set_voice(6, WAVE_SINE, freqToStepFp16(f2), vol, rst)
+		}
+	}
+}
+
+func drawHud() {
+	tft_fill_rect(0, 0, SCREEN_W, 22, COL_HUD_BG)
+
+	// Top-left [EXIT] button + 12x12 white X mark
+	tft_fill_round_rect(14, 2, 38, 18, 3, MAROON)
+	tft_draw_round_rect(14, 2, 38, 18, 3, RED)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, MAROON)
+	tft_draw_string("EXIT", 33, 11, 1)
+	DrawExitWedge()
+
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(CYAN, COL_HUD_BG)
+	x := 58
+	x += tft_draw_string("DICE-3D", x, 3, 2)
+
+	// [ROLL] badge in center-right of header
+	tft_fill_round_rect(142, 2, 68, 18, 4, 0x0324)
+	tft_draw_round_rect(142, 2, 68, 18, 4, GREENYELLOW)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, 0x0324)
+	tft_draw_string("TAP: ROLL", 176, 11, 1)
+
+	drawFpsBadge()
+}
+
+func drawFpsBadge() {
+	tft_fill_rect(236, 2, 82, 18, COL_HUD_BG)
+	x := 238
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(GREENYELLOW, COL_HUD_BG)
+	x += tft_draw_string("FPS: ", x, 3, 2)
+	tft_set_text_color(WHITE, COL_HUD_BG)
+	tft_draw_int(fpsValue, x, 3, 2)
+}
+
+func drawTabletop() {
+	// Outer background around the 3D table
+	tft_fill_rect(0, 22, SCREEN_W, 196, COL_CARPET)
+
+	// Outer wooden rail polygon (top: 26..294 @ y=24, bottom: 2..318 @ y=216)
+	tft_fill_triangle(26, 24, 294, 24, 318, 216, COL_WOOD_TOP)
+	tft_fill_triangle(26, 24, 318, 216, 2, 216, COL_WOOD_TOP)
+
+	// Wood bevel highlights on outer & inner rail edges
+	tft_draw_line(26, 24, 294, 24, COL_WOOD_HI)
+	tft_draw_line(26, 24, 2, 216, COL_WOOD_HI)
+	tft_draw_line(294, 24, 318, 216, COL_WOOD_HI)
+	tft_draw_line(2, 216, 318, 216, COL_WOOD_WALL)
+
+	// Inner cushion wall recess (top: 40..280 @ y=33, bottom: 16..304 @ y=206)
+	// Back cushion vertical drop wall (y=33..43)
+	tft_fill_triangle(40, 33, 280, 33, 278, 43, COL_WOOD_WALL)
+	tft_fill_triangle(40, 33, 278, 43, 42, 43, COL_WOOD_WALL)
+
+	// Left inner cushion wall
+	tft_fill_triangle(40, 33, 42, 43, 18, 205, COL_WOOD_SIDE)
+	tft_fill_triangle(40, 33, 18, 205, 16, 206, COL_WOOD_SIDE)
+
+	// Right inner cushion wall
+	tft_fill_triangle(280, 33, 304, 206, 302, 205, COL_WOOD_SIDE)
+	tft_fill_triangle(280, 33, 302, 205, 278, 43, COL_WOOD_SIDE)
+
+	// Inner green baize felt playfield (top: 42..278 @ y=43, bottom: 18..302 @ y=205)
+	tft_fill_triangle(42, 43, 278, 43, 302, 205, COL_FELT)
+	tft_fill_triangle(42, 43, 302, 205, 18, 205, COL_FELT)
+
+	// Crisp inner rim outline
+	tft_draw_line(40, 33, 280, 33, COL_WOOD_HI)
+	tft_draw_line(42, 43, 278, 43, COL_FELT_SHAD)
+	tft_draw_line(16, 206, 304, 206, COL_WOOD_HI)
+
+	for i := 0; i < NUM_DICE; i++ {
+		oldValid[i] = 0
+	}
+}
+
+func evaluateHand() string {
+	var counts [7]int
+	for i := 0; i < 7; i++ {
+		counts[i] = 0
+	}
+	for i := 0; i < NUM_DICE; i++ {
+		v := dieTargetVal[i]
+		if v >= 1 && v <= 6 {
+			counts[v] = counts[v] + 1
+		}
+	}
+
+	maxCount := 0
+	pairs := 0
+	has3 := 0
+	for v := 1; v <= 6; v++ {
+		if counts[v] > maxCount {
+			maxCount = counts[v]
+		}
+		if counts[v] == 2 {
+			pairs = pairs + 1
+		}
+		if counts[v] == 3 {
+			has3 = 1
+		}
+	}
+
+	// Check consecutive run length for straights
+	maxRun := 0
+	curRun := 0
+	for v := 1; v <= 6; v++ {
+		if counts[v] > 0 {
+			curRun = curRun + 1
+			if curRun > maxRun {
+				maxRun = curRun
+			}
+		} else {
+			curRun = 0
+		}
+	}
+
+	if maxCount == 5 {
+		evalRank = 7
+		evalCol = MAGENTA
+		return "YAHTZEE! (5 OF A KIND)"
+	}
+	if maxCount == 4 {
+		evalRank = 6
+		evalCol = YELLOW
+		return "FOUR OF A KIND!"
+	}
+	if has3 == 1 && pairs == 1 {
+		evalRank = 5
+		evalCol = GREENYELLOW
+		return "FULL HOUSE!"
+	}
+	if maxRun >= 5 {
+		evalRank = 4
+		evalCol = CYAN
+		return "LARGE STRAIGHT!"
+	}
+	if maxRun >= 4 {
+		evalRank = 3
+		evalCol = CYAN
+		return "SMALL STRAIGHT!"
+	}
+	if has3 == 1 {
+		evalRank = 2
+		evalCol = ORANGE
+		return "THREE OF A KIND"
+	}
+	if pairs == 2 {
+		evalRank = 1
+		evalCol = WHITE
+		return "TWO PAIR"
+	}
+	if pairs == 1 {
+		evalRank = 0
+		evalCol = LIGHTGREY
+		return "ONE PAIR"
+	}
+	evalRank = 0
+	evalCol = LIGHTGREY
+	return "HIGH DIE"
+}
+
+func drawScoreBar(rolling int) {
+	tft_fill_rect(0, 218, SCREEN_W, 22, 0x1082)
+	tft_draw_fast_hline(0, 218, SCREEN_W, COL_WOOD_HI)
+
+	if rolling != 0 {
+		tft_set_text_datum(ML_DATUM)
+		tft_set_text_color(YELLOW, 0x1082)
+		tft_draw_string("Rolling 5 dice...", 10, 229, 2)
+		tft_set_text_datum(MR_DATUM)
+		tft_set_text_color(CYAN, 0x1082)
+		tft_draw_string("Tap to re-throw", 312, 229, 2)
+		return
+	}
+
+	// Order the 5 mini die badges left-to-right by tabletop X coordinate
+	var xOrder [5]int
+	for i := 0; i < NUM_DICE; i++ {
+		xOrder[i] = i
+	}
+	for a := 0; a < NUM_DICE-1; a++ {
+		for b := a + 1; b < NUM_DICE; b++ {
+			ia := xOrder[a]
+			ib := xOrder[b]
+			if dieX[ib] < dieX[ia] {
+				xOrder[a] = ib
+				xOrder[b] = ia
+			}
+		}
+	}
+
+	sum := 0
+	x := 6
+	tft_set_text_datum(TL_DATUM)
+	for k := 0; k < NUM_DICE; k++ {
+		i := xOrder[k]
+		v := dieTargetVal[i]
+		sum = sum + v
+		tft_fill_round_rect(x, 221, 16, 16, 2, WHITE)
+		col := COL_PIP_BLACK
+		if v == 1 || v == 4 {
+			col = COL_PIP_RED
+		}
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(col, WHITE)
+		tft_draw_int(v, x+8, 229, 2)
+		x = x + 19
+	}
+
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(WHITE, 0x1082)
+	x = x + 4
+	x += tft_draw_string("=", x, 221, 2)
+	tft_set_text_color(YELLOW, 0x1082)
+	x += tft_draw_int(sum, x+2, 221, 2)
+
+	handName := evaluateHand()
+	tft_set_text_datum(MR_DATUM)
+	tft_set_text_color(evalCol, 0x1082)
+	tft_draw_string(handName, 314, 229, 2)
+}
+
+func targetAngleRX(val int) float32 {
+	if val == 6 {
+		return PI
+	}
+	if val == 2 {
+		return HALF_PI
+	}
+	if val == 5 {
+		return -HALF_PI
+	}
+	return 0.0
+}
+
+func targetAngleRY(val int) float32 {
+	if val == 3 {
+		return -HALF_PI
+	}
+	if val == 4 {
+		return HALF_PI
+	}
+	return 0.0
+}
+
+func startRoll(tapX int, tapY int) {
+	rollNumber = rollNumber + 1
+	allSettled = 0
+	fpsFrames = 0
+	fpsLastMs = os_millis()
+
+	// Redraw clean tabletop felt so any settled dice are cleared once
+	drawTabletop()
+	drawScoreBar(1)
+
+	// Determine throw bias from tap position
+	throwSide := 0.0
+	if tapX < 120 {
+		throwSide = -1.0
+	} else if tapX > 200 {
+		throwSide = 1.0
+	}
+
+	for i := 0; i < NUM_DICE; i++ {
+		// Fair 1..6 outcome via hardware TRNG
+		val := int(os_rand(6)) + 1
+		dieTargetVal[i] = val
+		baseRX := targetAngleRX(val)
+		baseRY := targetAngleRY(val)
+
+		// Spread the 5 dice across the tabletop
+		slotX := float32((i-2)*35) + float32(int(os_rand(13))-6)
+		slotY := float32(((i&1)*2-1)*20) + float32(int(os_rand(13))-6)
+
+		dieX[i] = slotX - throwSide*26.0
+		dieY[i] = slotY + 10.0
+		dieZ[i] = 36.0 + float32(i*4) + float32(os_rand(12))
+
+		dieVX[i] = throwSide*3.0 + float32(int(os_rand(41))-20)*0.11
+		dieVY[i] = -1.0 + float32(int(os_rand(41))-20)*0.10
+		dieVZ[i] = 1.2 + float32(os_rand(18))*0.10
+
+		dieTargetRX[i] = baseRX
+		dieTargetRY[i] = baseRY
+		dieRX[i] = float32(os_rand(628)) * 0.01
+		dieRY[i] = float32(os_rand(628)) * 0.01
+		dieRZ[i] = float32(os_rand(628)) * 0.01
+
+		spX := 0.34 + float32(os_rand(18))*0.01
+		if (os_rand(2) & 1) == 0 {
+			spX = -spX
+		}
+		spY := 0.34 + float32(os_rand(18))*0.01
+		if (os_rand(2) & 1) == 0 {
+			spY = -spY
+		}
+		dieVRX[i] = spX
+		dieVRY[i] = spY
+		dieVRZ[i] = float32(int(os_rand(41))-20) * 0.016
+
+		dieBounces[i] = 0
+		dieSnapMode[i] = 0
+		dieSettled[i] = 0
+	}
+
+	triggerClack(42)
+}
+
+func stepPhysics() {
+	// Step 1: Integrate motion & bounce off table and rails
+	for i := 0; i < NUM_DICE; i++ {
+		if dieSettled[i] != 0 {
+			continue
+		}
+
+		dieX[i] = dieX[i] + dieVX[i]
+		dieY[i] = dieY[i] + dieVY[i]
+		dieVZ[i] = dieVZ[i] - 0.52 // gravity
+		dieZ[i] = dieZ[i] + dieVZ[i]
+
+		// X rail bounds (perspective trapezoid narrower at back, wider at front)
+		maxX := 76.0 + dieY[i]*0.15
+		if dieX[i] < -maxX {
+			dieX[i] = -maxX
+			dieVX[i] = -dieVX[i] * 0.65
+			dieVRZ[i] = dieVRZ[i] + 0.08
+			triggerClack(int(fabs(dieVX[i]) * 8.0))
+		} else if dieX[i] > maxX {
+			dieX[i] = maxX
+			dieVX[i] = -dieVX[i] * 0.65
+			dieVRZ[i] = dieVRZ[i] - 0.08
+			triggerClack(int(fabs(dieVX[i]) * 8.0))
+		}
+
+		// Y rail bounds
+		if dieY[i] < -40.0 {
+			dieY[i] = -40.0
+			dieVY[i] = -dieVY[i] * 0.65
+			triggerClack(int(fabs(dieVY[i]) * 8.0))
+		} else if dieY[i] > 46.0 {
+			dieY[i] = 46.0
+			dieVY[i] = -dieVY[i] * 0.65
+			triggerClack(int(fabs(dieVY[i]) * 8.0))
+		}
+
+		// Table surface bounce
+		if dieZ[i] <= DIE_HALF {
+			dieZ[i] = DIE_HALF
+			dieBounces[i] = dieBounces[i] + 1
+			if dieVZ[i] < -1.15 {
+				dieVZ[i] = -dieVZ[i] * 0.54
+				dieVX[i] = dieVX[i] * 0.80
+				dieVY[i] = dieVY[i] * 0.80
+				dieVRX[i] = dieVRX[i] * 0.78
+				dieVRY[i] = dieVRY[i] * 0.78
+				triggerClack(int(fabs(dieVZ[i]) * 9.0))
+			} else {
+				dieVZ[i] = 0.0
+				dieVX[i] = dieVX[i] * 0.70
+				dieVY[i] = dieVY[i] * 0.70
+			}
+
+			// After 3 bounces, transition from free 3D tumble to target face snap
+			if dieBounces[i] >= 3 && dieSnapMode[i] == 0 {
+				dieSnapMode[i] = 1
+				kx := round((dieRX[i] - dieTargetRX[i]) / TWO_PI)
+				ky := round((dieRY[i] - dieTargetRY[i]) / TWO_PI)
+				dieTargetRX[i] = dieTargetRX[i] + kx*TWO_PI
+				dieTargetRY[i] = dieTargetRY[i] + ky*TWO_PI
+			}
+		}
+
+		// Angular motion: free 3D tumble while airborne, then smooth snap to flat face
+		if dieSnapMode[i] == 0 {
+			dieRX[i] = dieRX[i] + dieVRX[i]
+			dieRY[i] = dieRY[i] + dieVRY[i]
+			dieRZ[i] = dieRZ[i] + dieVRZ[i]
+			dieVRZ[i] = dieVRZ[i] * 0.96
+		} else {
+			diffRX := dieTargetRX[i] - dieRX[i]
+			diffRY := dieTargetRY[i] - dieRY[i]
+			dieRX[i] = dieRX[i] + diffRX*0.26
+			dieRY[i] = dieRY[i] + diffRY*0.26
+			dieRZ[i] = dieRZ[i] + dieVRZ[i]
+			dieVRZ[i] = dieVRZ[i] * 0.85
+
+			if dieZ[i] <= DIE_HALF+0.1 && fabs(dieVZ[i]) < 0.1 {
+				speedSq := dieVX[i]*dieVX[i] + dieVY[i]*dieVY[i]
+				angErr := fabs(diffRX) + fabs(diffRY) + fabs(dieVRZ[i])
+				if speedSq < 0.04 && angErr < 0.03 {
+					dieRX[i] = dieTargetRX[i]
+					dieRY[i] = dieTargetRY[i]
+					dieZ[i] = DIE_HALF
+					dieVX[i] = 0.0
+					dieVY[i] = 0.0
+					dieVZ[i] = 0.0
+					dieVRZ[i] = 0.0
+					dieSettled[i] = 1
+				}
+			}
+		}
+	}
+
+	// Step 2: Perspective-aware die-to-die collisions so dice never occlude each other
+	minDist := 36.0
+	minDistSq := minDist * minDist
+	for iter := 0; iter < 2; iter++ {
+		for i := 0; i < NUM_DICE; i++ {
+			for j := i + 1; j < NUM_DICE; j++ {
+				dx := dieX[j] - dieX[i]
+				// Scale dy slightly to account for 55-deg camera foreshortening
+				dy := (dieY[j] - dieY[i]) * 0.82
+				distSq := dx*dx + dy*dy
+				if distSq < minDistSq {
+					dz := fabs(dieZ[j] - dieZ[i])
+					if dz < 24.0 {
+						dist := sqrt(distSq)
+						if dist < 0.5 {
+							dist = 0.5
+							dx = 0.5
+							dy = 0.0
+						}
+						nx := dx / dist
+						ny := dy / dist
+						overlap := (minDist - dist) * 0.52
+
+						dieX[i] = dieX[i] - nx*overlap
+						dieY[i] = dieY[i] - (ny*overlap)/0.82
+						dieX[j] = dieX[j] + nx*overlap
+						dieY[j] = dieY[j] + (ny*overlap)/0.82
+
+						// Clamp within felt bounds after separation
+						if dieY[i] < -40.0 {
+							dieY[i] = -40.0
+						} else if dieY[i] > 46.0 {
+							dieY[i] = 46.0
+						}
+						if dieY[j] < -40.0 {
+							dieY[j] = -40.0
+						} else if dieY[j] > 46.0 {
+							dieY[j] = 46.0
+						}
+						maxXi := 76.0 + dieY[i]*0.15
+						if dieX[i] < -maxXi {
+							dieX[i] = -maxXi
+						} else if dieX[i] > maxXi {
+							dieX[i] = maxXi
+						}
+						maxXj := 76.0 + dieY[j]*0.15
+						if dieX[j] < -maxXj {
+							dieX[j] = -maxXj
+						} else if dieX[j] > maxXj {
+							dieX[j] = maxXj
+						}
+
+						if iter == 0 && (dieSettled[i] == 0 || dieSettled[j] == 0) {
+							dieSettled[i] = 0
+							dieSettled[j] = 0
+							rvx := dieVX[j] - dieVX[i]
+							rvy := dieVY[j] - dieVY[i]
+							vn := rvx*nx + rvy*ny
+							if vn < 0.0 {
+								imp := -vn * 0.80
+								dieVX[i] = dieVX[i] - imp*nx
+								dieVY[i] = dieVY[i] - imp*ny
+								dieVX[j] = dieVX[j] + imp*nx
+								dieVY[j] = dieVY[j] + imp*ny
+								dieVRZ[i] = dieVRZ[i] - imp*0.04
+								dieVRZ[j] = dieVRZ[j] + imp*0.04
+								if imp > 0.6 {
+									triggerClack(int(imp * 12.0))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check if all 5 dice have newly settled
+	settledCount := 0
+	for i := 0; i < NUM_DICE; i++ {
+		if dieSettled[i] != 0 {
+			settledCount = settledCount + 1
+		}
+	}
+	if settledCount == NUM_DICE && allSettled == 0 {
+		allSettled = 1
+		drawScoreBar(0)
+		if evalRank >= 2 {
+			triggerChime(evalRank)
+		}
+	}
+}
+
+func projectPoint(wx float32, wy float32, wz float32) {
+	yc := wy*SIN_A - wz*COS_A
+	zc := -wy*COS_A - wz*SIN_A
+	d := CAM_DIST + zc
+	if d < 80.0 {
+		d = 80.0
+	}
+	scale := CAM_FOCAL / d
+	projOutX = int(CAM_CX + wx*scale + 0.5)
+	projOutY = int(CAM_CY + yc*scale + 0.5)
+}
+
+func shadeIvory(ndot float32) int {
+	// Map diffuse dot product [-0.4 .. +1.0] to warm ivory RGB565
+	t := (ndot + 0.35) * 0.78
+	if t < 0.0 {
+		t = 0.0
+	}
+	if t > 1.0 {
+		t = 1.0
+	}
+	r := 155 + int(t*100.0)
+	g := 148 + int(t*102.0)
+	b := 132 + int(t*104.0)
+	return rgb565(r, g, b)
+}
+
+func prepareDiceGeometry() {
+	for i := 0; i < NUM_DICE; i++ {
+		dx := dieX[i] - CAM_WX
+		dy := dieY[i] - CAM_WY
+		dz := dieZ[i] - CAM_WZ
+		dieDepth[i] = dx*dx + dy*dy + dz*dz
+		drawOrder[i] = i
+
+		cx := cos(dieRX[i])
+		sx := sin(dieRX[i])
+		cy := cos(dieRY[i])
+		sy := sin(dieRY[i])
+		cz := cos(dieRZ[i])
+		sz := sin(dieRZ[i])
+
+		// Orthonormal basis vectors AxisX, AxisY, AxisZ in world space
+		axx := cy * cz
+		axy := cy * sz
+		axz := -sy
+
+		ayx := sx*sy*cz - cx*sz
+		ayy := sx*sy*sz + cx*cz
+		ayz := sx * cy
+
+		azx := cx*sy*cz + sx*sz
+		azy := cx*sy*sz - sx*cz
+		azz := cx * cy
+
+		// Ground shadow projected on Z=0 tabletop
+		hAbove := dieZ[i] - DIE_HALF
+		if hAbove < 0.0 {
+			hAbove = 0.0
+		}
+		shX := dieX[i] + hAbove*0.32
+		shY := dieY[i] + hAbove*0.26
+		projectPoint(shX, shY, 0.0)
+		ssx := projOutX
+		ssy := projOutY
+		shadSX[i] = ssx
+		shadSY[i] = ssy
+		sr := 12 - int(hAbove*0.08)
+		if sr < 7 {
+			sr = 7
+		}
+		shadSR[i] = sr
+
+		bx0 := ssx - sr - 1
+		by0 := ssy - sr - 1
+		bx1 := ssx + sr + 1
+		by1 := ssy + sr + 1
+
+		// Project all 8 cube vertices
+		for v := 0; v < 8; v++ {
+			lx := vertSignX[v] * DIE_HALF
+			ly := vertSignY[v] * DIE_HALF
+			lz := vertSignZ[v] * DIE_HALF
+
+			wx := dieX[i] + lx*axx + ly*ayx + lz*azx
+			wy := dieY[i] + lx*axy + ly*ayy + lz*azy
+			wz := dieZ[i] + lx*axz + ly*ayz + lz*azz
+
+			projectPoint(wx, wy, wz)
+			px := projOutX
+			py := projOutY
+			projVX[i][v] = px
+			projVY[i][v] = py
+
+			if px-2 < bx0 {
+				bx0 = px - 2
+			}
+			if px+2 > bx1 {
+				bx1 = px + 2
+			}
+			if py-2 < by0 {
+				by0 = py - 2
+			}
+			if py+2 > by1 {
+				by1 = py + 2
+			}
+		}
+
+		// Clamp bounding box strictly inside the green felt trapezoid
+		if by0 < 44 {
+			by0 = 44
+		}
+		if by1 > 204 {
+			by1 = 204
+		}
+		if bx0 < 43 {
+			bx0 = 43
+		}
+		if bx1 > 277 {
+			bx1 = 277
+		}
+		newBX0[i] = bx0
+		newBY0[i] = by0
+		newBX1[i] = bx1
+		newBY1[i] = by1
+
+		// Backface culling & diffuse lighting for the 6 cube faces
+		vc := 0
+		for f := 0; f < 6; f++ {
+			nx := 0.0
+			ny := 0.0
+			nz := 0.0
+			if f == 0 {
+				nx = azx
+				ny = azy
+				nz = azz
+			} else if f == 1 {
+				nx = -azx
+				ny = -azy
+				nz = -azz
+			} else if f == 2 {
+				nx = ayx
+				ny = ayy
+				nz = ayz
+			} else if f == 3 {
+				nx = -ayx
+				ny = -ayy
+				nz = -ayz
+			} else if f == 4 {
+				nx = axx
+				ny = axy
+				nz = axz
+			} else {
+				nx = -axx
+				ny = -axy
+				nz = -axz
+			}
+
+			// Face center in world space
+			fcx := dieX[i] + nx*DIE_HALF
+			fcy := dieY[i] + ny*DIE_HALF
+			fcz := dieZ[i] + nz*DIE_HALF
+
+			// Vector from face center to camera pinhole
+			vx := CAM_WX - fcx
+			vy := CAM_WY - fcy
+			vz := CAM_WZ - fcz
+
+			viewDot := nx*vx + ny*vy + nz*vz
+			if viewDot > 0.0 {
+				lightDot := nx*LIGHT_X + ny*LIGHT_Y + nz*LIGHT_Z
+				visFaceIdx[i][vc] = f
+				visFaceCol[i][vc] = shadeIvory(lightDot)
+				visFaceDot[i][vc] = viewDot / CAM_DIST
+				vc = vc + 1
+			}
+		}
+		visCount[i] = vc
+	}
+
+	// Sort drawOrder back-to-front (largest dieDepth first)
+	for a := 0; a < NUM_DICE-1; a++ {
+		for b := a + 1; b < NUM_DICE; b++ {
+			ia := drawOrder[a]
+			ib := drawOrder[b]
+			if dieDepth[ib] > dieDepth[ia] {
+				drawOrder[a] = ib
+				drawOrder[b] = ia
+			}
+		}
+	}
+}
+
+func drawPip(x int, y int, r int, col int) {
+	if r <= 1 {
+		tft_fill_rect(x, y, 2, 2, col)
+	} else {
+		tft_fill_circle(x, y, r, col)
+	}
+}
+
+func drawDieFacePips(val int, x0 int, y0 int, x1 int, y1 int, x2 int, y2 int, x3 int, y3 int, vdot float32) {
+	if vdot < 0.16 {
+		return
+	}
+	cx := (x0 + x1 + x2 + x3) >> 2
+	cy := (y0 + y1 + y2 + y3) >> 2
+	ux := (((x1 + x2) - (x0 + x3)) * 34) >> 8
+	uy := (((y1 + y2) - (y0 + y3)) * 34) >> 8
+	vx := (((x2 + x3) - (x0 + x1)) * 34) >> 8
+	vy := (((y2 + y3) - (y0 + y1)) * 34) >> 8
+
+	r := 1
+	if vdot >= 0.42 {
+		r = 2
+	}
+
+	if val == 1 {
+		r1 := r + 1
+		tft_fill_circle(cx, cy, r1, COL_PIP_RED)
+		return
+	}
+
+	col := COL_PIP_BLACK
+	if val == 4 {
+		col = COL_PIP_RED
+	}
+
+	// Top-Left & Bottom-Right (used by 2, 3, 4, 5, 6)
+	drawPip(cx-ux-vx, cy-uy-vy, r, col)
+	drawPip(cx+ux+vx, cy+uy+vy, r, col)
+
+	if val == 3 || val == 5 {
+		drawPip(cx, cy, r, col)
+	}
+
+	if val >= 4 {
+		// Top-Right & Bottom-Left
+		drawPip(cx+ux-vx, cy+uy-vy, r, col)
+		drawPip(cx-ux+vx, cy-uy+vy, r, col)
+	}
+
+	if val == 6 {
+		// Middle-Left & Middle-Right
+		drawPip(cx-ux, cy-uy, r, col)
+		drawPip(cx+ux, cy+uy, r, col)
+	}
+}
+
+func drawSingleDie(i int) {
+	// 1. Draw drop shadow on the felt
+	tft_fill_circle(shadSX[i], shadSY[i], shadSR[i], COL_FELT_SHAD)
+
+	// 2. Draw visible faces (triangles + edges + pips)
+	vc := visCount[i]
+	for k := 0; k < vc; k++ {
+		f := visFaceIdx[i][k]
+		col := visFaceCol[i][k]
+		vdot := visFaceDot[i][k]
+
+		i0 := faceVerts[f][0]
+		i1 := faceVerts[f][1]
+		i2 := faceVerts[f][2]
+		i3 := faceVerts[f][3]
+
+		x0 := projVX[i][i0]
+		y0 := projVY[i][i0]
+		x1 := projVX[i][i1]
+		y1 := projVY[i][i1]
+		x2 := projVX[i][i2]
+		y2 := projVY[i][i2]
+		x3 := projVX[i][i3]
+		y3 := projVY[i][i3]
+
+		tft_fill_triangle(x0, y0, x1, y1, x2, y2, col)
+		tft_fill_triangle(x0, y0, x2, y2, x3, y3, col)
+
+		tft_draw_line(x0, y0, x1, y1, COL_EDGE)
+		tft_draw_line(x1, y1, x2, y2, COL_EDGE)
+		tft_draw_line(x2, y2, x3, y3, COL_EDGE)
+		tft_draw_line(x3, y3, x0, y0, COL_EDGE)
+
+		drawDieFacePips(faceVal[f], x0, y0, x1, y1, x2, y2, x3, y3, vdot)
+	}
+
+	oldBX0[i] = newBX0[i]
+	oldBY0[i] = newBY0[i]
+	oldBX1[i] = newBX1[i]
+	oldBY1[i] = newBY1[i]
+	oldValid[i] = 1
+}
+
+func boxesOverlap(ax0 int, ay0 int, ax1 int, ay1 int, bx0 int, by0 int, bx1 int, by1 int) int {
+	if ax1 < bx0 || bx1 < ax0 {
+		return 0
+	}
+	if ay1 < by0 || by1 < ay0 {
+		return 0
+	}
+	return 1
+}
+
+func renderScene() {
+	prepareDiceGeometry()
+
+	// Track which dice have already had their old bounding box erased this frame
+	var erased [5]int
+	for i := 0; i < NUM_DICE; i++ {
+		erased[i] = 0
+	}
+
+	for ord := 0; ord < NUM_DICE; ord++ {
+		i := drawOrder[ord]
+
+		// Erase i's old box right before drawing i (minimal <1ms blanking time!)
+		if oldValid[i] != 0 && erased[i] == 0 {
+			w := oldBX1[i] - oldBX0[i] + 1
+			h := oldBY1[i] - oldBY0[i] + 1
+			if w > 0 && h > 0 {
+				tft_fill_rect(oldBX0[i], oldBY0[i], w, h, COL_FELT)
+			}
+			erased[i] = 1
+		}
+
+		// Also pre-erase any later-drawn die whose oldBox overlaps i's newBox
+		// so that later die's erase won't clip i after i is drawn
+		for later := ord + 1; later < NUM_DICE; later++ {
+			j := drawOrder[later]
+			if oldValid[j] != 0 && erased[j] == 0 {
+				if boxesOverlap(newBX0[i], newBY0[i], newBX1[i], newBY1[i], oldBX0[j], oldBY0[j], oldBX1[j], oldBY1[j]) != 0 {
+					wj := oldBX1[j] - oldBX0[j] + 1
+					hj := oldBY1[j] - oldBY0[j] + 1
+					if wj > 0 && hj > 0 {
+						tft_fill_rect(oldBX0[j], oldBY0[j], wj, hj, COL_FELT)
+					}
+					erased[j] = 1
+				}
+			}
+		}
+
+		drawSingleDie(i)
+	}
+}
+
+func main() {
+	initTables()
+	audio_start()
+
+	tft_fill_screen(BLACK)
+	drawHud()
+	drawTabletop()
+
+	fpsLastMs = os_millis()
+	startRoll(160, 120)
+
+	for {
+		frameStart := os_millis()
+
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 113 || ch == 81 || ch == 3 {
+				audio_stop()
+				os_exit(0)
+				return
+			}
+			if ch == 114 || ch == 82 || ch == 32 {
+				startRoll(160, 120)
+			}
+		}
+
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if ty < 22 && tx < 54 {
+				audio_stop()
+				os_exit(0)
+				return
+			}
+			startRoll(tx, ty)
+		}
+
+		if allSettled == 0 {
+			stepPhysics()
+			renderScene()
+
+			fpsFrames = fpsFrames + 1
+			now := os_millis()
+			elapsed := now - fpsLastMs
+			if elapsed >= 350 || allSettled != 0 {
+				if elapsed > 0 {
+					fpsValue = (fpsFrames * 1000) / elapsed
+					if fpsValue > 99 {
+						fpsValue = 99
+					}
+					drawFpsBadge()
+				}
+				fpsFrames = 0
+				fpsLastMs = now
+			}
+		}
+
+		updateAudio()
+
+		// Frame pacing (~60 FPS target while rolling, low-power poll when settled)
+		spent := os_millis() - frameStart
+		if allSettled == 0 {
+			if spent < 16 {
+				os_delay_ms(16 - spent)
+			} else {
+				os_yield()
+			}
+		} else {
+			os_delay_ms(16)
+		}
+	}
+}
