@@ -16,8 +16,8 @@ This guide explains how to write, compile, emulate, debug, and deploy games and 
      - `.lapp` binaries compiled with `./build/lakat compile` set `LAKATOS_APP_FLAG_LCODE = 1` in their 128-byte SHA-256 `LakatosAppHeader` and contain a compact `LCOD` bytecode module (typically `1 KB – 16 KB`).
      - When selected on the Lakatos Home screen (which scans `/sd/apps/` and `/flash/apps/`) or File Browser, the `.lapp` streams directly into ESP32 RAM and runs inside the resident C++ LCode VM (`lakatosRunLCodeApp`) with **zero Flash erases**.
   2. **Multi-Head Native C++ Apps (`native.bin` + `.lgolf` Launcher Stubs)**:
-     - Compute- or DSP-intensive C/C++ apps (`piano`, `modtrack`, `midiplay`, `radio`, `ham`, `smallertalk`) are compiled against [`include/lakatos_api.h`](../include/lakatos_api.h) and linked together by [`tools/build_lapp.py`](../tools/build_lapp.py) into a single multi-head `native.bin` with overlaid `.bss` segments in the 32 KB `app_ram` arena (`0x3FFB8000 .. 0x3FFBFFFF`).
-     - `native.bin` is cached once in the `app_slot` flash partition (`0x310000`, `896 KB`); lightweight `.lgolf` stubs (`join_native("native.bin", "<head>")`) launch into any native head instantly without reflashing when switching between them.
+     - Compute- or DSP-intensive C/C++ apps (`piano`, `modtrack`, `midiplay`, `radio`, `ham`, `smallertalk`) are compiled against [`include/lakatos_api.h`](../include/lakatos_api.h) and linked together by [`tools/build_lapp.py`](../tools/build_lapp.py) into a single multi-head `native.bin` with overlaid `.bss` segments in the 32 KB `gLakatosAppRamArena` (`0x3FFC8000 .. 0x3FFCFFFF`).
+     - `native.bin` is cached once in the `app_slot` flash partition (`0x180000`, `768 KB`); lightweight `.lgolf` stubs (`join_native("native.bin", "<head>")`) launch into any native head instantly without reflashing when switching between them.
 - **LCode Flat 32-Bit Memory Arena (Up to 128 KB)**:
   - `0x00000 .. 0x000FF`: Null guard page (`256 B`, traps null pointer dereferences).
   - `0x00100 .. StringPoolEnd`: Read-only string pool.
@@ -315,29 +315,30 @@ Each native app lives in `apps/<name>/<name>.cpp` and exports a single entry poi
 ```cpp
 #include "../../include/lakatos_api.h"
 
-extern "C" void app_main(const LakatosApi* api) {
-  api->tft_fill_screen(LAK_BLACK);
+extern "C" void app_main(const LakatosApi* os) {
+  os->tft_fill_screen(LAKATOS_BLACK);
   // Main loop...
-  while (!api->should_exit()) {
-    int tx = 0, ty = 0;
-    if (api->read_click(&tx, &ty)) {
-      if (ty < 22 && tx < 48) break;
+  for (;;) {
+    LakatosTouchSample ts = os->read_touch();
+    if (ts.touched && ts.y < 22 && ts.x < 48) {
+      os->exit(0);
     }
-    api->delay_ms(16);
+    os->delay_ms(16);
   }
 }
 ```
 
-Key capabilities exposed in [`LakatosApi`](../include/lakatos_api.h) (`LAKATOS_API_VERSION = 7`) beyond the standard LCode syscalls:
+Key capabilities exposed in [`LakatosApi`](../include/lakatos_api.h) (`LAKATOS_API_VERSION = 1`, documented in [`doc/lakatos-abi.md`](lakatos-abi.md)) beyond the standard LCode syscalls:
 - **Core 0 Audio Sequencer Tick Callback**:
-  - `api->audio_set_tick_cb(fn, periodSamples, user)` registers a callback invoked directly by the Core 0 `15,625 Hz` synthesizer every `periodSamples` samples (e.g., `312` samples = `50 Hz` PAL tick for ProTracker `.mod` or MIDI sequencing) with zero jitter from Core 1 TFT drawing.
+  - `os->audio_set_tick_cb(cb, user, tick_samples)` registers a callback invoked directly by the Core 0 `15,625 Hz` synthesizer every `tick_samples` samples (e.g., `312` samples = `50 Hz` PAL tick for ProTracker `.mod` or MIDI sequencing) with zero jitter from Core 1 TFT drawing.
 - **Streaming VFS & Transparent `.zip` Extraction**:
-  - `api->fs_read_stream(path, onChunk, user)` streams arbitrary-sized files from `/flash`, `/sd`, or `/net` in 4 KB chunks without buffering the entire file in RAM, and transparently inflates single-file `.zip` archives on the fly (e.g., `.mod.zip`, `.mid.zip`, `.ima.zip`).
+  - `os->fs_read_stream(path, on_chunk, user)` streams arbitrary-sized files from `/flash`, `/sd`, or `/net` in 2 KB chunks without buffering the entire file in RAM, and transparently inflates single-file `.zip` archives on the fly (e.g., `.mod.zip`, `.mid.zip`, `.ima.zip`).
 - **Streaming HTTP & WebSocket Client**:
-  - `api->http_stream_open(url, isWebsocket)`, `api->http_stream_read(handle, buf, maxLen)`, `api->http_stream_write(handle, buf, len)`, and `api->http_stream_close(handle)` provide non-blocking TCP/TLS streams for internet radio (`radio`) and WebSocket transcripts.
-- **32 KB Static `app_ram` Arena (`0x3FFB8000 .. 0x3FFBFFFF`)**:
-  - All native heads in `native.bin` overlay their static `.bss` / `COMMON` globals in the 32 KB `app_ram` window (`ld/lakatos_app.ld`), so adding new heads to `native.bin` does not reduce available RAM.
-  - Dynamic allocations during execution use `api->heap_alloc(size)` (`calloc`) and `api->heap_free(ptr)`.
+  - `os->http_stream_open(url)`, `os->http_stream_read(buf, max_len)`, `os->http_stream_write(buf, len)`, and `os->http_stream_close()` provide non-blocking HTTP and WebSocket (`ws://`) streams for internet radio (`radio`) and KiwiSDR (`ham`).
+- **32 KB Static `gLakatosAppRamArena` (`0x3FFC8000 .. 0x3FFCFFFF`)**:
+  - `0x3FFC8000` holds `const LakatosApi*` (`lakatos_os()`) and `0x3FFC8004` holds `const char*` (`lakatos_app_arg()`, e.g. `"piano"`, `"modtrack"`, `"midiplay"`, `"radio"`, `"ham"`, `"smallertalk"`).
+  - All native heads in `native.bin` overlay their static `.bss` / `COMMON` globals in `0x3FFC8008 .. 0x3FFCFFFF` ([`ld/lakatos_app.ld`](../ld/lakatos_app.ld)), so adding new heads to `native.bin` does not reduce available RAM.
+  - Dynamic allocations during execution use `os->malloc(size)` / `os->calloc(nmemb, size)` / `os->realloc(ptr, size)` / `os->free(ptr)` (automatically reclaimed when the app exits).
 
 ### 6.2 Adding or Rebuilding a Native Head
 

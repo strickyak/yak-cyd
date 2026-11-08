@@ -208,7 +208,7 @@ typedef struct LakatosApi {
   uint32_t (*city_hash32)(const void* buf, size_t len);
   int      (*fetch_with_cache)(const char* url, void* buf, size_t max_len, uint32_t max_age_sec);
 
-  // --- 4-Channel Core 0 Audio Synthesizer & Sample Mixer (15,625 Hz) ---
+  // --- 16-Voice Core 0 Audio Synthesizer & Sample Mixer (15,625 Hz) ---
   void     (*audio_start)(void);
   void     (*audio_stop)(void);
   void     (*audio_set_voice)(int ch, const int8_t* pcm, uint32_t len,
