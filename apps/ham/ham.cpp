@@ -1355,10 +1355,13 @@ void app_main(const LakatosApi* os) {
   drawStatusBadge();
   drawSmeterPanel();
 
-  bool        prevTouch      = false;
-  uint32_t    lastUiMs       = os->millis();
-  uint32_t    lastInfoMs     = os->millis();
-  StreamState prevDrawnState = gState;
+  bool        prevTouch       = false;
+  bool        draggingSlider  = false;
+  uint32_t    lastTouchDownMs = 0;
+  uint32_t    lastBtnClickMs  = 0;
+  uint32_t    lastUiMs        = os->millis();
+  uint32_t    lastInfoMs      = os->millis();
+  StreamState prevDrawnState  = gState;
 
   while (true) {
     pumpKiwiNetwork();
@@ -1383,11 +1386,18 @@ void app_main(const LakatosApi* os) {
 
     LakatosTouchSample ts = os->read_touch();
     if (ts.touched) {
-      if (handleFreqSliderTouch(ts.x, ts.y)) {
-        prevTouch = true;
-      } else if (handleVolumeTouch(ts.x, ts.y)) {
-        prevTouch = true;
-      } else if (!prevTouch) {
+      lastTouchDownMs = now;
+      if ((!prevTouch || draggingSlider) && handleFreqSliderTouch(ts.x, ts.y)) {
+        prevTouch      = true;
+        draggingSlider = true;
+      } else if ((!prevTouch || draggingSlider) && handleVolumeTouch(ts.x, ts.y)) {
+        prevTouch      = true;
+        draggingSlider = true;
+      } else if (!prevTouch &&
+                 (lastBtnClickMs == 0 || (uint32_t)(now - lastBtnClickMs) >= 220u)) {
+        prevTouch      = true;
+        draggingSlider = false;
+        lastBtnClickMs = now;
         // 1. Top Header Bar (y <= 24)
         if (ts.y <= 24) {
           if (ts.x <= 54) {
@@ -1404,6 +1414,8 @@ void app_main(const LakatosApi* os) {
               connectToKiwi();
             }
             drawStatusBadge();
+            lastTouchDownMs = os->millis();
+            lastBtnClickMs  = lastTouchDownMs;
           }
         }
         // 2. VFO Frequency Box tap -> direct frequency entry in kHz
@@ -1429,6 +1441,8 @@ void app_main(const LakatosApi* os) {
             }
           }
           drawFullUi();
+          lastTouchDownMs = os->millis();
+          lastBtnClickMs  = lastTouchDownMs;
         }
         // 3. Band & Step Row (y = 172..201)
         else if (ts.y >= kRow1Y && ts.y <= kRow1Y + kRow1H) {
@@ -1468,11 +1482,14 @@ void app_main(const LakatosApi* os) {
           }
         }
       }
-    } else if (prevTouch && gTunePending) {
-      // Flush any pending frequency update immediately on touch release
-      sendKiwiTuning();
+    } else if (prevTouch && (uint32_t)(now - lastTouchDownMs) >= 90u) {
+      if (gTunePending) {
+        // Flush any pending frequency update immediately on debounced touch release
+        sendKiwiTuning();
+      }
+      prevTouch      = false;
+      draggingSlider = false;
     }
-    prevTouch = ts.touched;
 
     // Refresh visualizers at ~28 FPS and S-meter / buffer bar at ~5 FPS
     if ((uint32_t)(now - lastUiMs) >= 35u) {

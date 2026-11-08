@@ -897,10 +897,13 @@ void app_main(const LakatosApi* os) {
   drawStatusBadge();
   drawInfoPanel();
 
-  bool     prevTouch  = false;
-  uint32_t lastUiMs   = os->millis();
-  uint32_t lastInfoMs = os->millis();
-  StreamState prevDrawnState = gState;
+  bool        prevTouch       = false;
+  bool        draggingSlider  = false;
+  uint32_t    lastTouchDownMs = 0;
+  uint32_t    lastBtnClickMs  = 0;
+  uint32_t    lastUiMs        = os->millis();
+  uint32_t    lastInfoMs      = os->millis();
+  StreamState prevDrawnState  = gState;
 
   while (true) {
     // 1. Pump incoming HTTP stream bytes & decode MP3 frames
@@ -931,9 +934,15 @@ void app_main(const LakatosApi* os) {
     // 2. Poll touchscreen
     LakatosTouchSample ts = os->read_touch();
     if (ts.touched) {
-      if (handleVolumeTouch(ts.x, ts.y)) {
-        prevTouch = true;
-      } else if (!prevTouch) {
+      lastTouchDownMs = now;
+      if ((!prevTouch || draggingSlider) && handleVolumeTouch(ts.x, ts.y)) {
+        prevTouch      = true;
+        draggingSlider = true;
+      } else if (!prevTouch &&
+                 (lastBtnClickMs == 0 || (uint32_t)(now - lastBtnClickMs) >= 220u)) {
+        prevTouch      = true;
+        draggingSlider = false;
+        lastBtnClickMs = now;
         // EXIT button (top left)
         if (ts.y <= 24 && ts.x <= 54) {
           break;
@@ -973,10 +982,14 @@ void app_main(const LakatosApi* os) {
             drawStatusBadge();
             drawInfoPanel();
           }
+          lastTouchDownMs = os->millis();
+          lastBtnClickMs  = lastTouchDownMs;
         }
       }
+    } else if (prevTouch && (uint32_t)(now - lastTouchDownMs) >= 90u) {
+      prevTouch      = false;
+      draggingSlider = false;
     }
-    prevTouch = ts.touched;
 
     // 3. Refresh visualizers at ~28 FPS and info panel at ~4 FPS
     if ((uint32_t)(now - lastUiMs) >= 35u) {

@@ -247,18 +247,24 @@ static inline bool isTopLeftExitCorner(int x, int y) {
 
 static LakatosTouchSample gCore0LiveTouch = {false, 0, 0, 0, 0, 0};
 static volatile uint32_t  gCore0LiveTouchMs = 0;
+static constexpr uint32_t kTouchHoldBridgeMs      = 35u;
+static constexpr uint32_t kTouchReleaseDebounceMs = 90u;
+static constexpr uint32_t kClickCooldownMs        = 220u;
+static volatile uint32_t  gLastClickDeliveredMs   = 0;
 
 LakatosTouchSample lakatosReadTouch() {
-  if (digitalRead(XPT2046_IRQ) == HIGH) {
-    return {false, 0, 0, 0, 0, 0};
-  }
-  // When an app is running, if Core 0's 5ms scanner just sampled the touch
-  // within the last 18ms, return that sample without Core 1 stalling on SPI.
+  // When an app is running, if Core 0's 5ms scanner sampled a valid touch
+  // within kTouchHoldBridgeMs (35ms), return that sample without Core 1
+  // stalling on SPI and without dropping contact while XPT2046 PENIRQ is
+  // momentarily HIGH during Core 0 ADC conversions or brief contact bounce.
   if (gLCodeAppRunning || lakatosIsNativeAppRunning()) {
     uint32_t now = millis();
-    if (gCore0LiveTouch.touched && (uint32_t)(now - gCore0LiveTouchMs) <= 18u) {
+    if (gCore0LiveTouch.touched && (uint32_t)(now - gCore0LiveTouchMs) <= kTouchHoldBridgeMs) {
       return gCore0LiveTouch;
     }
+  }
+  if (digitalRead(XPT2046_IRQ) == HIGH) {
+    return {false, 0, 0, 0, 0, 0};
   }
   bool triggeredCornerExit = false;
   if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
@@ -326,16 +332,18 @@ void lakatosPollTouchLatch() {
 
   // 2. Fast non-blocking check of active-low PENIRQ GPIO 36 (~150 ns when untouched)
   if (digitalRead(XPT2046_IRQ) == HIGH) {
-    if ((uint32_t)(now - gLastTouchDownMs) >= 35) {
+    if ((uint32_t)(now - gLastTouchDownMs) >= kTouchReleaseDebounceMs) {
       if (gSpotState == SPOT_BLANKED) {
         gSpotState = SPOT_NONE;
       }
-      if ((gTouchPenDown || gTouchClickConsumed) &&
+      if ((gTouchPenDown || gTouchClickConsumed || gCore0LiveTouch.touched) &&
           gTouchMutex && xSemaphoreTake(gTouchMutex, 0) == pdTRUE) {
-        if (digitalRead(XPT2046_IRQ) == HIGH && (uint32_t)(millis() - gLastTouchDownMs) >= 35) {
+        if (digitalRead(XPT2046_IRQ) == HIGH &&
+            (uint32_t)(millis() - gLastTouchDownMs) >= kTouchReleaseDebounceMs) {
           gTouchPenDown = false;
           gTouchPressConsumed = false;
           gTouchClickConsumed = false;
+          gCore0LiveTouch.touched = false;
         }
         xSemaphoreGive(gTouchMutex);
       }
@@ -429,15 +437,16 @@ void lakatosClearTouchLatch() {
   gHasLatchedTouch = false;
   gTouchPressConsumed = true;
   gTouchClickConsumed = true;
+  gCore0LiveTouch.touched = false;
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 }
 
 void lakatosWaitTouchRelease() {
   uint32_t quietSince = millis();
   while (true) {
-    if (digitalRead(XPT2046_IRQ) == LOW || lakatosReadTouch().touched) {
+    if (digitalRead(XPT2046_IRQ) == LOW) {
       quietSince = millis();
-    } else if ((uint32_t)(millis() - quietSince) >= 35) {
+    } else if ((uint32_t)(millis() - quietSince) >= kTouchReleaseDebounceMs) {
       break;
     }
     delay(10);
@@ -447,6 +456,7 @@ void lakatosWaitTouchRelease() {
   gTouchPenDown = false;
   gTouchPressConsumed = false;
   gTouchClickConsumed = false;
+  gCore0LiveTouch.touched = false;
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 }
 
@@ -467,6 +477,7 @@ void lakatosEndAppSession() {
   gHasLatchedTouch = false;
   gTouchPressConsumed = true;
   gTouchClickConsumed = true;
+  gCore0LiveTouch.touched = false;
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 
   // Acknowledge app exit by painting the entire screen dark brown for 100ms
@@ -481,6 +492,11 @@ void lakatosEndAppSession() {
 LakatosTouchSample lakatosReadTouchLatched() {
   LakatosTouchSample live = lakatosReadTouch();
   if (live.touched) {
+    if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
+    gHasLatchedTouch = false;
+    gTouchPressConsumed = true;
+    gTouchClickConsumed = true;
+    if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     return live;
   }
   if (gHasLatchedTouch) {
@@ -490,9 +506,9 @@ LakatosTouchSample lakatosReadTouchLatched() {
     LakatosTouchSample latched = gLatchedTouch;
     gHasLatchedTouch = false;
     gTouchPressConsumed = true;
+    gTouchClickConsumed = true;
     if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
       gPleaseExitApp = true;
-      gTouchClickConsumed = true;
       valid = false;
     }
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
@@ -508,13 +524,15 @@ LakatosTouchSample lakatosReadTouchLatched() {
 LakatosTouchSample lakatosReadClick() {
   uint32_t now = millis();
   if (digitalRead(XPT2046_IRQ) == HIGH) {
-    if ((uint32_t)(now - gLastTouchDownMs) >= 35) {
+    if ((uint32_t)(now - gLastTouchDownMs) >= kTouchReleaseDebounceMs) {
       if ((gTouchPenDown || gTouchClickConsumed) && gTouchMutex) {
         xSemaphoreTake(gTouchMutex, portMAX_DELAY);
-        if (digitalRead(XPT2046_IRQ) == HIGH && (uint32_t)(millis() - gLastTouchDownMs) >= 35) {
+        if (digitalRead(XPT2046_IRQ) == HIGH &&
+            (uint32_t)(millis() - gLastTouchDownMs) >= kTouchReleaseDebounceMs) {
           gTouchPenDown = false;
           gTouchPressConsumed = false;
           gTouchClickConsumed = false;
+          gCore0LiveTouch.touched = false;
         }
         xSemaphoreGive(gTouchMutex);
       }
@@ -531,9 +549,18 @@ LakatosTouchSample lakatosReadClick() {
 
   LakatosTouchSample live = lakatosReadTouch();
   if (live.touched) {
+    uint32_t clickNow = millis();
     if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
-    bool firstClick = !gTouchClickConsumed;
+    gTouchPenDown = true;
+    gTouchPressConsumed = true;
+    gHasLatchedTouch = false;
+    bool firstClick = !gTouchClickConsumed &&
+                      (gLastClickDeliveredMs == 0 ||
+                       (uint32_t)(clickNow - gLastClickDeliveredMs) >= kClickCooldownMs);
     gTouchClickConsumed = true;
+    if (firstClick) {
+      gLastClickDeliveredMs = clickNow;
+    }
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (firstClick) {
       lakatosDevLogf("Click: (%d,%d)", live.x, live.y);
@@ -543,18 +570,21 @@ LakatosTouchSample lakatosReadClick() {
   }
 
   if (gHasLatchedTouch) {
+    uint32_t clickNow = millis();
     if (gTouchMutex) xSemaphoreTake(gTouchMutex, portMAX_DELAY);
     bool valid = gHasLatchedTouch && !gTouchPressConsumed && !gTouchClickConsumed &&
-                 ((uint32_t)(millis() - gLatchedTouchMs) <= 250u);
+                 ((uint32_t)(clickNow - gLatchedTouchMs) <= 250u) &&
+                 (gLastClickDeliveredMs == 0 ||
+                  (uint32_t)(clickNow - gLastClickDeliveredMs) >= kClickCooldownMs);
     LakatosTouchSample latched = gLatchedTouch;
     gHasLatchedTouch = false;
     gTouchPressConsumed = true;
+    gTouchClickConsumed = true;
     if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
       gPleaseExitApp = true;
-      gTouchClickConsumed = true;
       valid = false;
     } else if (valid) {
-      gTouchClickConsumed = true;
+      gLastClickDeliveredMs = clickNow;
     }
     if (gTouchMutex) xSemaphoreGive(gTouchMutex);
     if (valid) {

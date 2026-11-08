@@ -63,10 +63,12 @@ func exitCleanly() {
 	os_exit(0)
 }
 
+var lastSlideClickMs int = 0
+
 // pollUserAction returns:
-//   99 = exit (serial 'q'/'Q'/^C; top-left 10x10 wedge is handled by Core 0)
+//   99 = exit (serial 'q'/'Q'/^C; top-left 12x12 X mark is handled by Core 0)
 //    1 = next picture (click on right half: x >= 160)
-//   -1 = previous picture (click on left half: x < 160, outside 10x10 home wedge)
+//   -1 = previous picture (click on left half: x < 160, outside 12x12 corner)
 //    0 = no action
 func pollUserAction() int {
 	if os_serial_available() > 0 {
@@ -78,6 +80,11 @@ func pollUserAction() int {
 	}
 	clicked, cx, _ := os_read_click()
 	if clicked {
+		now := os_millis()
+		if lastSlideClickMs != 0 && (now-lastSlideClickMs) < 250 {
+			return 0
+		}
+		lastSlideClickMs = now
 		if cx >= 160 {
 			return 1
 		}
