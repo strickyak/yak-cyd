@@ -8,7 +8,7 @@ This guide explains how to write, compile, emulate, debug, and deploy games and 
 
 - **Target Hardware**: ESP32-2432S028R ("Cheap Yellow Display")
   - **Display**: `320×240` 16-bit `RGB565` ILI9341 TFT (landscape orientation: `x = 0..319`, `y = 0..239`).
-  - **Touchscreen**: XPT2046 resistive touch controller (`os_read_touch()` / `os_read_click()` return calibrated screen coordinates; Core 0 continuously scans touch and intercepts top-left `10×10` corner exit taps).
+  - **Touchscreen**: XPT2046 resistive touch controller (`os_read_touch()` / `os_read_click()` return calibrated screen coordinates; Core 0 continuously scans touch and intercepts top-left `12×12` corner exit taps).
   - **Audio**: Core 0 16-voice `15,625 Hz` DMA/timer wavetable & PCM synthesizer on GPIO 26 feeding the on-board SC8002B speaker amplifier.
   - **Peripherals**: Active-low RGB LED (`os_set_rgb_led`), Light Dependent Resistor (`os_read_ldr`), internal temperature sensor (`os_read_cpu_temp`), and 3 unified VFS trees (`/flash` LittleFS, `/sd` MicroSD card, `/net` Wi-Fi HTTP Superhighway).
 - **Two App Execution Models**:
@@ -111,8 +111,8 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
     x += tft_draw_string(" Hz)", x, 4, 2)
     ```
 - **Built-in `"wedge"` Package & Corner Exit Convention**:
-  - Core 0's background touch scanner automatically intercepts taps in the top-left `10×10` corner (`x < 10 && y < 10`) to exit the running app and return to Lakatos OS (unless disabled via `os_set_corner_exit(0)`).
-  - Import `"wedge"` and call `DrawExitWedge()` to render the standard white `10×10` top-left exit triangle, and place your `[EXIT]` or `[HOME]` button in the top-left header bar (`x < 48, y < 22`):
+  - Core 0's background touch scanner automatically intercepts taps in the top-left `12×12` corner (`x < 12 && y < 12`) to exit the running app and return to Lakatos OS (unless disabled via `os_set_corner_exit(0)`).
+  - Import `"wedge"` and call `DrawExitWedge()` to render the standard white `12×12` top-left exit `X` mark, and place your `[EXIT]` or `[HOME]` button in the top-left header bar (`x < 54, y < 22`):
     ```go
     import "wedge"
     // ...
@@ -164,7 +164,7 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | Category | Function Signature | Description |
 | :--- | :--- | :--- |
 | **Lifecycle** | `os_exit(code int)` | Exits the app and returns to Lakatos OS shell |
-| | `os_set_corner_exit(enable int)` | Enables (`1`, default) or disables (`0`) Core 0's automatic top-left `10×10` corner tap app exit |
+| | `os_set_corner_exit(enable int)` | Enables (`1`, default) or disables (`0`) Core 0's automatic top-left `12×12` corner tap app exit |
 | | `os_yield()` | Feeds watchdog, polls `@FUSE` serial commands, & updates background tasks |
 | | `os_millis() int` | Milliseconds since boot |
 | | `os_micros() int` | Microseconds since boot |
@@ -256,12 +256,12 @@ import "wedge"
 func drawHud(score int) {
     tft_fill_rect(0, 0, SCREEN_W, 22, 0x10A2)
 
-    // Standardized top-left [EXIT] button + 10x10 corner wedge
-    tft_fill_round_rect(2, 2, 42, 18, 3, MAROON)
-    tft_draw_round_rect(2, 2, 42, 18, 3, RED)
+    // Standardized top-left [EXIT] button + 12x12 corner X mark
+    tft_fill_round_rect(14, 2, 40, 18, 3, MAROON)
+    tft_draw_round_rect(14, 2, 40, 18, 3, RED)
     tft_set_text_datum(MC_DATUM)
     tft_set_text_color(WHITE, MAROON)
-    tft_draw_string("EXIT", 23, 11, 1)
+    tft_draw_string("EXIT", 34, 11, 1)
     DrawExitWedge()
 
     tft_set_text_datum(TL_DATUM)

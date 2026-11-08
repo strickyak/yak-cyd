@@ -92,7 +92,7 @@ Every native binary receives `const LakatosApi* os` as the first argument to `ap
 | :--- | :--- | :--- |
 | **Header** | `uint32_t api_version`, `uint32_t struct_size` | `LAKATOS_API_VERSION` (`1`), `sizeof(LakatosApi)` |
 | **Lifecycle & Timing** | `void (*exit)(int code)` | Unwinds via `longjmp` to Lakatos loader, stops audio & HTTP streams, frees tracked heap allocations, and restores the Lakatos OS shell |
-| | `void (*yield)(void)` | Checks `lakatosShouldExitApp()` (top-left `10×10` corner tap), updates background tasks, and yields |
+| | `void (*yield)(void)` | Checks `lakatosShouldExitApp()` (top-left `12×12` corner tap), updates background tasks, and yields |
 | | `uint32_t (*millis)(void)` / `uint32_t (*micros)(void)` | Milliseconds / microseconds since boot |
 | | `void (*delay_ms)(uint32_t ms)` | Sleeps `ms` milliseconds in 10 ms slices while polling exit & background tasks |
 | **Tracked Heap** | `void* (*malloc)(size_t)` / `calloc` / `realloc` / `free` | Allocates/frees from ESP32 heap; all live pointers are automatically freed on app exit |

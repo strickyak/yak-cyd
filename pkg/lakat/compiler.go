@@ -410,10 +410,9 @@ var BuiltinLibraries = map[string]string{
 	"wedge": `package wedge
 
 func DrawExitWedge() {
-	tft_fill_rect(0, 0, 10, 10, BLACK)
-	for y := 0; y < 10; y++ {
-		tft_draw_fast_hline(0, y, 10-y, WHITE)
-	}
+	tft_fill_rect(0, 0, 12, 12, BLACK)
+	tft_draw_line(0, 0, 11, 11, WHITE)
+	tft_draw_line(11, 0, 0, 11, WHITE)
 }
 `,
 }

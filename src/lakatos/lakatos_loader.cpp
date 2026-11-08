@@ -240,7 +240,7 @@ static LakatosTouchSample api_read_touch(void) {
 }
 
 static int api_prompt_keyboard(const char* title, char* buf, size_t max_len, bool allow_ctrl_c) {
-  return lakatosPromptKeyboard(title, buf, max_len, allow_ctrl_c, false);
+  return lakatosPromptKeyboard(title, buf, max_len, allow_ctrl_c);
 }
 
 static void api_set_rgb_led(bool r, bool g, bool b, uint32_t duration_ms) {

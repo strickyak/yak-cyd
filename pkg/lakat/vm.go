@@ -2013,7 +2013,7 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.CurrentTouch = ev
 		}
 		if vm.CurrentTouch.Touched {
-			if !vm.CornerExitDisabled && vm.CurrentTouch.X >= 0 && vm.CurrentTouch.X < 10 && vm.CurrentTouch.Y >= 0 && vm.CurrentTouch.Y < 10 {
+			if !vm.CornerExitDisabled && vm.CurrentTouch.X >= 0 && vm.CurrentTouch.X < 12 && vm.CurrentTouch.Y >= 0 && vm.CurrentTouch.Y < 12 {
 				vm.CurrentTouch.Touched = false
 				vm.ExitCode = 0
 				vm.Running = false

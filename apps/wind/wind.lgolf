@@ -935,12 +935,12 @@ func drawStaticScene() {
 	tft_fill_rect(0, 0, 320, 24, COL_HEADER)
 	tft_draw_fast_hline(0, 24, 320, COL_BTN_BORDER)
 
-	// Top-left [EXIT] button (next to 10x10 corner exit wedge)
-	tft_fill_round_rect(12, 3, 40, 18, 3, MAROON)
-	tft_draw_round_rect(12, 3, 40, 18, 3, PINK)
+	// Top-left [EXIT] button (next to 12x12 corner exit X mark)
+	tft_fill_round_rect(14, 3, 40, 18, 3, MAROON)
+	tft_draw_round_rect(14, 3, 40, 18, 3, PINK)
 	tft_set_text_datum(MC_DATUM)
 	tft_set_text_color(WHITE, MAROON)
-	tft_draw_string("EXIT", 32, 12, 1)
+	tft_draw_string("EXIT", 34, 12, 1)
 	DrawExitWedge()
 
 	tft_set_text_datum(ML_DATUM)

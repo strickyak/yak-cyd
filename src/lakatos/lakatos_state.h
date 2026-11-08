@@ -100,7 +100,7 @@ bool        lakatosWifiIsConnected();
 
 // Opens a modal stylus keyboard; returns 1 on Enter, 0 on Cancel/Hide, -1 on ^C
 int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
-                          bool allowCtrlC, bool maskPassword = false);
+                          bool allowCtrlC);
 
 // Enters the interactive Settings / Calibration UI (returns when user taps HOME)
 void runLakatosConfigScreen(bool startInCalibration = false);

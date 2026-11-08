@@ -1,11 +1,10 @@
-// Top-left 10x10 exit wedge library for Lakatos OS apps.
-// Core 0 intercepts any touch in the top-left 10x10 corner (0 <= x < 10, 0 <= y < 10)
+// Top-left 12x12 exit X mark library for Lakatos OS apps.
+// Core 0 intercepts any touch in the top-left 12x12 corner (0 <= x < 12, 0 <= y < 12)
 // to exit the running app and return to the Home menu.
 package wedge
 
 func DrawExitWedge() {
-	tft_fill_rect(0, 0, 10, 10, BLACK)
-	for y := 0; y < 10; y++ {
-		tft_draw_fast_hline(0, y, 10-y, WHITE)
-	}
+	tft_fill_rect(0, 0, 12, 12, BLACK)
+	tft_draw_line(0, 0, 11, 11, WHITE)
+	tft_draw_line(11, 0, 0, 11, WHITE)
 }

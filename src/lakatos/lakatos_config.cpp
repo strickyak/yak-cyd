@@ -392,19 +392,12 @@ static const char* const KB_ROWS[3][4] = {
   { "!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>/?", "`~$%&*+=-_" }
 };
 
-static void drawKbInputBox(const String& text, bool maskPassword) {
+static void drawKbInputBox(const String& text) {
   LakatosTftGuard tftLock;
   tft.fillRoundRect(4, 28, 246, 30, 4, TFT_BLACK);
   tft.drawRoundRect(4, 28, 246, 30, 4, TFT_CYAN);
 
-  String shown;
-  if (maskPassword && text.length() > 0) {
-    for (size_t i = 0; i + 1 < text.length(); i++) shown += '*';
-    shown += text[text.length() - 1];
-  } else {
-    shown = text;
-  }
-  shown += "_";
+  String shown = text + "_";
   if (shown.length() > 26) {
     shown = ".." + shown.substring(shown.length() - 25);
   }
@@ -457,7 +450,7 @@ static void drawKbGrid(int page) {
 }
 
 int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
-                          bool allowCtrlC, bool maskPassword) {
+                          bool allowCtrlC) {
   if (!buf || maxLen == 0) return 0;
   String text = String(buf);
   int page = 0;
@@ -493,7 +486,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
     tft.setTextColor(TFT_WHITE, 0x4800);
     tft.drawString("DEL", 285, 43, 2);
 
-    drawKbInputBox(text, maskPassword);
+    drawKbInputBox(text);
     drawKbGrid(page);
   }
 
@@ -528,7 +521,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
         } else if (t.y >= 26 && t.y <= 60) {
           if (t.x >= 250 && text.length() > 0) {
             text.remove(text.length() - 1);
-            drawKbInputBox(text, maskPassword);
+            drawKbInputBox(text);
           }
         } else if (t.y >= 64 && t.y < 204) {
           int r = (t.y - 64) / 35;
@@ -537,7 +530,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
             if (text.length() + 1 < maxLen) {
               char ch = KB_ROWS[page][r][c];
               text += ch;
-              drawKbInputBox(text, maskPassword);
+              drawKbInputBox(text);
             }
           }
         } else if (t.y >= 205) {
@@ -550,7 +543,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
           } else if (t.x < 230) {
             if (text.length() + 1 < maxLen) {
               text += ' ';
-              drawKbInputBox(text, maskPassword);
+              drawKbInputBox(text);
             }
           } else {
             strncpy(buf, text.c_str(), maxLen - 1);
@@ -803,7 +796,7 @@ static bool runWifiConfigModal() {
           if (row >= 0 && row < 5 && idx >= 0 && idx < count) {
             char passBuf[64] = "";
             String title = "PW: " + ssids[idx].substring(0, 14);
-            if (lakatosPromptKeyboard(title.c_str(), passBuf, sizeof(passBuf), false, false) == 1) {
+            if (lakatosPromptKeyboard(title.c_str(), passBuf, sizeof(passBuf), false) == 1) {
               prefs.begin("cyd_wifi", false);
               prefs.putString("ssid", ssids[idx]);
               prefs.putString("pass", passBuf);
@@ -902,7 +895,7 @@ static bool runAirportSelectorModal() {
           if (t.x >= 230) {
             char codeBuf[8] = "";
             strncpy(codeBuf, gAirportCode, sizeof(codeBuf) - 1);
-            if (lakatosPromptKeyboard("3-LETTER IATA", codeBuf, 4, false, false) == 1 &&
+            if (lakatosPromptKeyboard("3-LETTER IATA", codeBuf, 4, false) == 1 &&
                 strlen(codeBuf) == 3) {
               applyAirportCode(codeBuf);
               saveConfigToNvs();
@@ -1415,13 +1408,13 @@ void runLakatosConfigScreen(bool startInCalibration) {
         } else if (t.y >= 70 && t.y <= 116) {
           if (t.x < 160) {
             lakatosDevLogf("Button: CONFIG -> DEVICE NAME (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("DEVICE NAME", gDeviceName, sizeof(gDeviceName), false, false) == 1) {
+            if (lakatosPromptKeyboard("DEVICE NAME", gDeviceName, sizeof(gDeviceName), false) == 1) {
               saveConfigToNvs();
             }
             drawConfigScreen();
           } else if (lakatosGetDeveloperMode()) {
             lakatosDevLogf("Button: CONFIG -> SERIAL NUMBER (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("SERIAL NUMBER", gSerialNo, sizeof(gSerialNo), false, false) == 1) {
+            if (lakatosPromptKeyboard("SERIAL NUMBER", gSerialNo, sizeof(gSerialNo), false) == 1) {
               saveConfigToNvs();
             }
             drawConfigScreen();
@@ -1429,13 +1422,13 @@ void runLakatosConfigScreen(bool startInCalibration) {
         } else if (t.y >= 120 && t.y <= 166) {
           if (t.x < 200) {
             lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
-            if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false, false) == 1) {
+            if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false) == 1) {
               saveConfigToNvs();
             }
           } else {
             lakatosDevLogf("Button: CONFIG -> /net PASSWORD (%d,%d)", t.x, t.y);
             char passBuf[sizeof(gShPass)] = "";
-            if (lakatosPromptKeyboard("/net PASSWORD", passBuf, sizeof(passBuf), false, false) == 1) {
+            if (lakatosPromptKeyboard("/net PASSWORD", passBuf, sizeof(passBuf), false) == 1) {
               strncpy(gShPass, passBuf, sizeof(gShPass) - 1);
               gShPass[sizeof(gShPass) - 1] = '\0';
               saveConfigToNvs();

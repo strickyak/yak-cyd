@@ -612,10 +612,10 @@ func TestAllEightNewAppsCompileAndRun(t *testing.T) {
 			if vm.ExitCode != 0 {
 				t.Fatalf("%s exited with non-zero code %d", tc.name, vm.ExitCode)
 			}
-			// Verify the 10x10 top-left exit wedge was drawn via DrawExitWedge() from imported "wedge" library
-			if vm.Screen[0][0] != 0xFFFF || vm.Screen[0][9] != 0xFFFF || vm.Screen[9][0] != 0xFFFF || vm.Screen[9][9] != 0x0000 {
-				t.Fatalf("%s did not draw expected 10x10 exit wedge: (0,0)=0x%04X (9,0)=0x%04X (0,9)=0x%04X (9,9)=0x%04X",
-					tc.name, vm.Screen[0][0], vm.Screen[0][9], vm.Screen[9][0], vm.Screen[9][9])
+			// Verify the 12x12 top-left exit X mark was drawn via DrawExitWedge() from imported "wedge" library
+			if vm.Screen[0][0] != 0xFFFF || vm.Screen[0][11] != 0xFFFF || vm.Screen[11][0] != 0xFFFF || vm.Screen[11][11] != 0xFFFF || vm.Screen[0][5] != 0x0000 {
+				t.Fatalf("%s did not draw expected 12x12 exit X mark: (0,0)=0x%04X (11,0)=0x%04X (0,11)=0x%04X (11,11)=0x%04X (5,0)=0x%04X",
+					tc.name, vm.Screen[0][0], vm.Screen[0][11], vm.Screen[11][0], vm.Screen[11][11], vm.Screen[0][5])
 			}
 			litPixels := 0
 			for y := 25; y < 240; y++ {

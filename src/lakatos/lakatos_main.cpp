@@ -69,7 +69,7 @@ static volatile bool gTouchClickConsumed = false;
 static uint32_t gLatchedTouchMs = 0;
 static LakatosTouchSample gLatchedTouch = {false, 0, 0, 0, 0, 0};
 
-// App lifecycle & Core 0 top-left 10x10 corner exit / timeout state
+// App lifecycle & Core 0 top-left 12x12 corner exit / timeout state
 static constexpr uint16_t kDarkBrownExitColor = 0x5962;  // Dark brown RGB565 (R=88, G=44, B=16)
 static volatile bool     gLCodeAppRunning   = false;
 static volatile bool     gInConfigScreen    = false;
@@ -242,7 +242,7 @@ static LakatosTouchSample readTouchHardwareUnlocked() {
 }
 
 static inline bool isTopLeftExitCorner(int x, int y) {
-  return x >= 0 && x < 10 && y >= 0 && y < 10;
+  return x >= 0 && x < 12 && y >= 0 && y < 12;
 }
 
 static LakatosTouchSample gCore0LiveTouch = {false, 0, 0, 0, 0, 0};

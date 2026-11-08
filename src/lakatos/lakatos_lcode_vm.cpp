@@ -987,7 +987,7 @@ struct LCodeVM {
         if (!popSliceAsCStr(titleBuf, sizeof(titleBuf))) return false;
         if (maxLen == 0 || !checkAddr(bufAddr, maxLen)) return false;
         int res = lakatosPromptKeyboard(titleBuf, (char*)(mem + bufAddr),
-                                        maxLen, allowCtrlC != 0, false);
+                                        maxLen, allowCtrlC != 0);
         tft.setTextDatum(TL_DATUM);
         if (lakatosShouldExitApp()) {
           exitCode = 0;
