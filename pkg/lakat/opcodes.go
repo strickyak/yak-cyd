@@ -258,6 +258,16 @@ const (
 	SysAudioStart    = byte(0x4A) // ( -- )
 	SysAudioStop     = byte(0x4B) // ( -- )
 	SysAudioSetVoice = byte(0x4C) // (ch pcmAddr len loopStart loopLen stepFp16 vol resetPos -- )
+
+	// WebSocket Client & Off-Screen 4-Bit (pal4) 3D Rasterizer (0x4D .. 0x54)
+	SysWsOpen       = byte(0x4D) // (urlOrPathSlice -- ok)
+	SysWsSend       = byte(0x4E) // (msgSlice -- ok)
+	SysWsRecv       = byte(0x4F) // (bufAddr maxLen -- bytesRead)
+	SysWsClose      = byte(0x50) // ( -- )
+	SysPal4Clear    = byte(0x51) // (bufAddr w h topRows topCol botCol -- )
+	SysPal4FillTri  = byte(0x52) // (bufAddr w h x0 y0 x1 y1 x2 y2 col -- )
+	SysPal4FillCirc = byte(0x53) // (bufAddr w h cx cy r col -- )
+	SysPal4DrawLine = byte(0x54) // (bufAddr w h x0 y0 x1 y1 col -- )
 )
 
 type ArgType string
@@ -467,6 +477,14 @@ var SyscallByName = map[string]byte{
 	"SYS_AUDIO_START":         SysAudioStart,
 	"SYS_AUDIO_STOP":          SysAudioStop,
 	"SYS_AUDIO_SET_VOICE":     SysAudioSetVoice,
+	"SYS_WS_OPEN":             SysWsOpen,
+	"SYS_WS_SEND":             SysWsSend,
+	"SYS_WS_RECV":             SysWsRecv,
+	"SYS_WS_CLOSE":            SysWsClose,
+	"SYS_PAL4_CLEAR":          SysPal4Clear,
+	"SYS_PAL4_FILL_TRI":       SysPal4FillTri,
+	"SYS_PAL4_FILL_CIRC":      SysPal4FillCirc,
+	"SYS_PAL4_DRAW_LINE":      SysPal4DrawLine,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,

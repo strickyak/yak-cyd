@@ -1367,14 +1367,30 @@ const uint8_t* lakatosPrefetchBuffer(uint32_t* outBytesGot) {
 }
 
 // ---------------------------------------------------------------------------
-// Live HTTP / Raw TCP Audio/Data Stream (Non-Blocking Reader/Writer for Radio & Ham SDR)
+// Live HTTP / Raw TCP / WebSocket Stream (Non-Blocking Reader/Writer)
 // ---------------------------------------------------------------------------
 static WiFiClient gLiveStreamClient;
 static HTTPClient gLiveStreamHttp;
 static bool       gLiveStreamOpen  = false;
 static bool       gLiveStreamIsRaw = false;
+static bool       gWsOpen          = false;
+
+void lakatosWsClose() {
+  if (gWsOpen) {
+    // Send a masked RFC 6455 Close frame (FIN=1, opcode=8, mask=1, len=0, key=0)
+    if (gLiveStreamClient.connected()) {
+      const uint8_t closeFrame[6] = {0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
+      gLiveStreamClient.write(closeFrame, sizeof(closeFrame));
+    }
+    gLiveStreamClient.stop();
+    gWsOpen          = false;
+    gLiveStreamOpen  = false;
+    gLiveStreamIsRaw = false;
+  }
+}
 
 void lakatosHttpStreamClose() {
+  lakatosWsClose();
   if (gLiveStreamOpen) {
     if (!gLiveStreamIsRaw) {
       gLiveStreamHttp.end();
@@ -1476,4 +1492,270 @@ int32_t lakatosHttpStreamWrite(const void* buf, size_t len) {
   }
   size_t w = stream->write((const uint8_t*)buf, len);
   return (w > 0) ? (int32_t)w : -1;
+}
+
+static bool wsReadExact(WiFiClient& cli, uint8_t* dst, size_t n, uint32_t timeoutMs = 600) {
+  size_t got = 0;
+  uint32_t startMs = millis();
+  while (got < n && (millis() - startMs < timeoutMs)) {
+    int avail = cli.available();
+    if (avail > 0) {
+      size_t take = ((size_t)avail < (n - got)) ? (size_t)avail : (n - got);
+      int r = cli.read(dst + got, take);
+      if (r > 0) {
+        got += (size_t)r;
+        startMs = millis();
+      }
+    } else if (!cli.connected()) {
+      break;
+    } else {
+      delayMicroseconds(200);
+    }
+  }
+  return got == n;
+}
+
+bool lakatosWsOpen(const char* urlOrPath) {
+  lakatosHttpStreamClose();
+  if (!urlOrPath || !urlOrPath[0] || WiFi.status() != WL_CONNECTED) return false;
+
+  String fullUrl = String(urlOrPath);
+  fullUrl.trim();
+  if (fullUrl.startsWith("/")) {
+    String base = String(lakatosGetSuperhighwayUrl());
+    base.trim();
+    while (base.endsWith("/")) base.remove(base.length() - 1);
+    if (base.length() == 0) return false;
+    fullUrl = base + fullUrl;
+  }
+
+  // Strip scheme (ws://, http://, wss://, https://)
+  if (fullUrl.startsWith("ws://")) {
+    fullUrl = fullUrl.substring(5);
+  } else if (fullUrl.startsWith("http://")) {
+    fullUrl = fullUrl.substring(7);
+  } else if (fullUrl.startsWith("wss://")) {
+    fullUrl = fullUrl.substring(6);
+  } else if (fullUrl.startsWith("https://")) {
+    fullUrl = fullUrl.substring(8);
+  }
+
+  int slashIdx = fullUrl.indexOf('/');
+  String hostPort = (slashIdx >= 0) ? fullUrl.substring(0, slashIdx) : fullUrl;
+  String reqPath  = (slashIdx >= 0) ? fullUrl.substring(slashIdx) : String("/");
+
+  // Append ?id=<deviceName> if not already present so the server knows our CYD name
+  const char* devName = lakatosGetDeviceName();
+  if (devName && devName[0] && reqPath.indexOf("id=") < 0) {
+    reqPath += (reqPath.indexOf('?') >= 0) ? "&id=" : "?id=";
+    reqPath += urlEncodePath(String(devName)).substring(1);
+  }
+
+  String host = hostPort;
+  uint16_t port = 80;
+  int colonIdx = hostPort.indexOf(':');
+  if (colonIdx >= 0) {
+    host = hostPort.substring(0, colonIdx);
+    int p = hostPort.substring(colonIdx + 1).toInt();
+    if (p > 0 && p <= 65535) port = (uint16_t)p;
+  }
+  if (host.length() == 0) return false;
+
+  if (!gLiveStreamClient.connect(host.c_str(), port, 4000)) {
+    gLiveStreamClient.stop();
+    return false;
+  }
+  gLiveStreamClient.setNoDelay(true);
+
+  String req = "GET " + reqPath + " HTTP/1.1\r\n";
+  req += "Host: " + hostPort + "\r\n";
+  req += "Upgrade: websocket\r\n";
+  req += "Connection: Upgrade\r\n";
+  req += "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+  req += "Sec-WebSocket-Version: 13\r\n";
+
+  String user = String(lakatosGetDeviceName()) + "/" + String(lakatosGetSerialNumber());
+  String pass = String(lakatosGetSuperhighwayPassword());
+  if (user.length() > 0 || pass.length() > 0) {
+    String b64 = base64::encode(user + ":" + pass);
+    req += "Authorization: Basic " + b64 + "\r\n";
+  }
+  req += "\r\n";
+
+  gLiveStreamClient.print(req);
+
+  // Read HTTP response headers until blank line
+  char lineBuf[160];
+  bool saw101 = false;
+  bool firstLine = true;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 4000) {
+    size_t pos = 0;
+    bool gotLine = false;
+    while (millis() - t0 < 4000) {
+      if (gLiveStreamClient.available() > 0) {
+        int ch = gLiveStreamClient.read();
+        if (ch == '\n') {
+          while (pos > 0 && lineBuf[pos - 1] == '\r') pos--;
+          lineBuf[pos] = '\0';
+          gotLine = true;
+          break;
+        }
+        if (pos + 1 < sizeof(lineBuf)) {
+          lineBuf[pos++] = (char)ch;
+        }
+      } else if (!gLiveStreamClient.connected()) {
+        break;
+      } else {
+        delayMicroseconds(200);
+      }
+    }
+    if (!gotLine) break;
+    if (firstLine) {
+      firstLine = false;
+      if (strstr(lineBuf, " 101") != nullptr) {
+        saw101 = true;
+      }
+    } else if (lineBuf[0] == '\0') {
+      break; // End of HTTP headers
+    }
+  }
+
+  if (!saw101) {
+    gLiveStreamClient.stop();
+    return false;
+  }
+
+  gWsOpen          = true;
+  gLiveStreamOpen  = true;
+  gLiveStreamIsRaw = true;
+  Serial.printf("[Lakatos WS] Connected: ws://%s%s\r\n", hostPort.c_str(), reqPath.c_str());
+  return true;
+}
+
+int32_t lakatosWsSend(const void* buf, size_t len) {
+  if (!gWsOpen || !buf || len > 4096) return -1;
+  if (lakatosShouldExitApp() || !gLiveStreamClient.connected()) {
+    lakatosWsClose();
+    return -1;
+  }
+
+  // RFC 6455 client-to-server masked text frame (opcode 0x1, FIN 0x80, MASK 0x80).
+  // Using mask key {0, 0, 0, 0} keeps payload bytes identical while satisfying RFC 6455.
+  uint8_t hdr[8];
+  size_t hdrLen = 0;
+  hdr[0] = 0x81; // FIN | Text
+  if (len < 126) {
+    hdr[1] = (uint8_t)(0x80u | len);
+    hdr[2] = 0; hdr[3] = 0; hdr[4] = 0; hdr[5] = 0;
+    hdrLen = 6;
+  } else {
+    hdr[1] = (uint8_t)(0x80u | 126u);
+    hdr[2] = (uint8_t)((len >> 8) & 0xFFu);
+    hdr[3] = (uint8_t)(len & 0xFFu);
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;
+    hdrLen = 8;
+  }
+
+  if (gLiveStreamClient.write(hdr, hdrLen) != hdrLen) {
+    lakatosWsClose();
+    return -1;
+  }
+  if (len > 0 && gLiveStreamClient.write((const uint8_t*)buf, len) != len) {
+    lakatosWsClose();
+    return -1;
+  }
+  return (int32_t)len;
+}
+
+int32_t lakatosWsRecv(void* buf, size_t maxLen) {
+  if (!gWsOpen || !buf || maxLen == 0) return -1;
+  if (lakatosShouldExitApp()) {
+    lakatosWsClose();
+    return -1;
+  }
+  int avail = gLiveStreamClient.available();
+  if (avail < 2) {
+    if (!gLiveStreamClient.connected()) {
+      lakatosWsClose();
+      return -1;
+    }
+    return 0;
+  }
+
+  uint8_t hdr[2];
+  if (!wsReadExact(gLiveStreamClient, hdr, 2)) {
+    lakatosWsClose();
+    return -1;
+  }
+  uint8_t opcode     = hdr[0] & 0x0Fu;
+  bool    masked     = (hdr[1] & 0x80u) != 0;
+  size_t  payloadLen = (size_t)(hdr[1] & 0x7Fu);
+
+  if (payloadLen == 126) {
+    uint8_t ext[2];
+    if (!wsReadExact(gLiveStreamClient, ext, 2)) {
+      lakatosWsClose();
+      return -1;
+    }
+    payloadLen = ((size_t)ext[0] << 8) | (size_t)ext[1];
+  } else if (payloadLen == 127) {
+    uint8_t ext[8];
+    if (!wsReadExact(gLiveStreamClient, ext, 8)) {
+      lakatosWsClose();
+      return -1;
+    }
+    payloadLen = ((size_t)ext[4] << 24) | ((size_t)ext[5] << 16) |
+                 ((size_t)ext[6] << 8) | (size_t)ext[7];
+  }
+
+  uint8_t maskKey[4] = {0, 0, 0, 0};
+  if (masked) {
+    if (!wsReadExact(gLiveStreamClient, maskKey, 4)) {
+      lakatosWsClose();
+      return -1;
+    }
+  }
+
+  uint8_t* dst = (uint8_t*)buf;
+  size_t copyCap = (maxLen > 1) ? (maxLen - 1) : 0;
+  size_t copied  = (payloadLen < copyCap) ? payloadLen : copyCap;
+  if (copied > 0) {
+    if (!wsReadExact(gLiveStreamClient, dst, copied)) {
+      lakatosWsClose();
+      return -1;
+    }
+    if (masked) {
+      for (size_t i = 0; i < copied; i++) {
+        dst[i] ^= maskKey[i & 3];
+      }
+    }
+  }
+  dst[copied] = '\0';
+
+  // Discard any bytes exceeding maxLen - 1
+  size_t rem = payloadLen - copied;
+  uint8_t discard[64];
+  while (rem > 0) {
+    size_t chunk = (rem > sizeof(discard)) ? sizeof(discard) : rem;
+    if (!wsReadExact(gLiveStreamClient, discard, chunk)) {
+      lakatosWsClose();
+      return -1;
+    }
+    rem -= chunk;
+  }
+
+  if (opcode == 0x8) { // Close
+    lakatosWsClose();
+    return -1;
+  }
+  if (opcode == 0x9) { // Ping -> reply Pong
+    const uint8_t pongFrame[6] = {0x8A, 0x80, 0x00, 0x00, 0x00, 0x00};
+    gLiveStreamClient.write(pongFrame, sizeof(pongFrame));
+    return 0;
+  }
+  if (opcode == 0x1 || opcode == 0x2) {
+    return (int32_t)copied;
+  }
+  return 0;
 }

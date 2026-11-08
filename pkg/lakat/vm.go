@@ -1,7 +1,9 @@
 package lakat
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"image/jpeg"
@@ -9,10 +11,13 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -97,6 +102,10 @@ type VM struct {
 	CornerExitDisabled bool
 	AppArg             string
 	JoinNativeBin      string
+	WsConn             net.Conn
+	WsReader           *bufio.Reader
+	WsRecvQueue        []string
+	StepHook           func(vm *VM, pc int, op byte)
 }
 
 func NewVM(lappOrLcod []byte) (*VM, error) {
@@ -445,6 +454,9 @@ func (vm *VM) Run() (int, error) {
 			return -1, vm.errf("PC out of bounds")
 		}
 		op := vm.Code[vm.PC]
+		if vm.StepHook != nil {
+			vm.StepHook(vm, vm.PC, op)
+		}
 		vm.PC++
 		vm.InstructionCount++
 
@@ -2395,6 +2407,133 @@ func (vm *VM) execSyscall(sysId byte) error {
 			}
 		}
 
+	case SysWsOpen:
+		target, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if vm.wsOpen(target) {
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
+
+	case SysWsSend:
+		msg, err := vm.popSliceString()
+		if err != nil {
+			return err
+		}
+		if vm.wsSend(msg) {
+			vm.push(1)
+		} else {
+			vm.push(0xFFFFFFFF)
+		}
+
+	case SysWsRecv:
+		maxLen, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if maxLen == 0 {
+			vm.push(0)
+			return nil
+		}
+		if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
+			return err
+		}
+		got := vm.wsRecv(vm.Memory[bufAddr : bufAddr+maxLen])
+		vm.push(uint32(int32(got)))
+
+	case SysWsClose:
+		vm.wsClose()
+
+	case SysPal4Clear:
+		botCol, _ := vm.pop()
+		topCol, _ := vm.pop()
+		topRows, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 {
+			return nil
+		}
+		totalBytes := int((w * h) / 2)
+		if err := vm.checkAddr(bufAddr, totalBytes); err != nil {
+			return err
+		}
+		vm.pal4Clear(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], int(w), int(h), int(int32(topRows)), byte(topCol&0x0F), byte(botCol&0x0F))
+
+	case SysPal4FillTri:
+		col, _ := vm.pop()
+		y2, _ := vm.pop()
+		x2, _ := vm.pop()
+		y1, _ := vm.pop()
+		x1, _ := vm.pop()
+		y0, _ := vm.pop()
+		x0, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 {
+			return nil
+		}
+		totalBytes := int((w * h) / 2)
+		if err := vm.checkAddr(bufAddr, totalBytes); err != nil {
+			return err
+		}
+		vm.pal4FillTriangle(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], int(w), int(h),
+			int(int32(x0)), int(int32(y0)), int(int32(x1)), int(int32(y1)), int(int32(x2)), int(int32(y2)), byte(col&0x0F))
+
+	case SysPal4FillCirc:
+		col, _ := vm.pop()
+		r, _ := vm.pop()
+		cy, _ := vm.pop()
+		cx, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 {
+			return nil
+		}
+		totalBytes := int((w * h) / 2)
+		if err := vm.checkAddr(bufAddr, totalBytes); err != nil {
+			return err
+		}
+		vm.pal4FillCircle(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], int(w), int(h),
+			int(int32(cx)), int(int32(cy)), int(int32(r)), byte(col&0x0F))
+
+	case SysPal4DrawLine:
+		col, _ := vm.pop()
+		y1, _ := vm.pop()
+		x1, _ := vm.pop()
+		y0, _ := vm.pop()
+		x0, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if w == 0 || h == 0 || (w&1) != 0 {
+			return nil
+		}
+		totalBytes := int((w * h) / 2)
+		if err := vm.checkAddr(bufAddr, totalBytes); err != nil {
+			return err
+		}
+		vm.pal4DrawLine(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], int(w), int(h),
+			int(int32(x0)), int(int32(y0)), int(int32(x1)), int(int32(y1)), byte(col&0x0F))
+
 	default:
 		return vm.errf("unimplemented syscall 0x%02X", sysId)
 	}
@@ -3091,3 +3230,432 @@ func encodePngPal4(w, h int, pal565 [16]uint16, pix4bpp []byte) []byte {
 	writeChunk("IEND", nil)
 	return out.Bytes()
 }
+
+// ---------------------------------------------------------------------------
+// Emulated WebSocket Client & Off-Screen 4-Bit (pal4) 3D Rasterizer
+// ---------------------------------------------------------------------------
+
+func (vm *VM) wsClose() {
+	if vm.WsConn != nil {
+		_ = vm.WsConn.Close()
+		vm.WsConn = nil
+		vm.WsReader = nil
+	}
+}
+
+func (vm *VM) wsOpen(target string) bool {
+	vm.wsClose()
+	if len(vm.WsRecvQueue) > 0 {
+		return true
+	}
+
+	rawURL := target
+	if strings.HasPrefix(target, "/") {
+		base := os.Getenv("CYD_SH_URL")
+		if base == "" {
+			base = vm.ShUrl
+		}
+		rawURL = strings.TrimRight(base, "/") + target
+	}
+	if os.Getenv("LAKAT_WS_URL") != "" {
+		rawURL = os.Getenv("LAKAT_WS_URL")
+	}
+	// Avoid network dial to the default 10.123.123.1 address during offline headless emulation
+	// unless explicitly requested via env, custom vm.ShUrl, or full ws:// URL.
+	if os.Getenv("CYD_SH_PASS") == "" && os.Getenv("LAKAT_WS_URL") == "" &&
+		strings.HasPrefix(target, "/") && (vm.ShUrl == "" || vm.ShUrl == "http://10.123.123.1:8866") {
+		return false
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	hostPort := u.Host
+	if !strings.Contains(hostPort, ":") {
+		if u.Scheme == "https" || u.Scheme == "wss" {
+			hostPort += ":443"
+		} else {
+			hostPort += ":80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", hostPort, 1500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	user := os.Getenv("CYD_SH_USER")
+	if user == "" {
+		user = vm.DeviceName
+	}
+	pass := os.Getenv("CYD_SH_PASS")
+	reqPath := u.RequestURI()
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	var hdr strings.Builder
+	fmt.Fprintf(&hdr, "GET %s HTTP/1.1\r\nHost: %s\r\n", reqPath, u.Host)
+	if user != "" && pass != "" {
+		auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		fmt.Fprintf(&hdr, "Authorization: Basic %s\r\n", auth)
+	}
+	hdr.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte(hdr.String())); err != nil {
+		conn.Close()
+		return false
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(status, "101") {
+		conn.Close()
+		return false
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return false
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	_ = conn.SetDeadline(time.Time{})
+	vm.WsConn = conn
+	vm.WsReader = br
+	return true
+}
+
+func (vm *VM) wsSend(msg string) bool {
+	if vm.WsConn == nil {
+		return len(vm.WsRecvQueue) > 0
+	}
+	payload := []byte(msg)
+	mask := [4]byte{0x37, 0xFA, 0x21, 0x3D}
+	var frame []byte
+	frame = append(frame, 0x81)
+	n := len(payload)
+	if n < 126 {
+		frame = append(frame, byte(0x80|n))
+	} else {
+		frame = append(frame, byte(0x80|126), byte(n>>8), byte(n))
+	}
+	frame = append(frame, mask[0], mask[1], mask[2], mask[3])
+	for i := 0; i < n; i++ {
+		frame = append(frame, payload[i]^mask[i&3])
+	}
+	_ = vm.WsConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	if _, err := vm.WsConn.Write(frame); err != nil {
+		vm.wsClose()
+		return false
+	}
+	return true
+}
+
+func (vm *VM) wsRecv(dst []byte) int {
+	if len(vm.WsRecvQueue) > 0 {
+		msg := vm.WsRecvQueue[0]
+		vm.WsRecvQueue = vm.WsRecvQueue[1:]
+		n := copy(dst, []byte(msg))
+		if n < len(dst) {
+			dst[n] = 0
+		}
+		return n
+	}
+	if vm.WsConn == nil || vm.WsReader == nil {
+		return -1
+	}
+	_ = vm.WsConn.SetReadDeadline(time.Now().Add(2 * time.Millisecond))
+	var b2 [2]byte
+	if _, err := io.ReadFull(vm.WsReader, b2[:]); err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return 0
+		}
+		vm.wsClose()
+		return -1
+	}
+	opcode := b2[0] & 0x0F
+	masked := (b2[1] & 0x80) != 0
+	length := int(b2[1] & 0x7F)
+	_ = vm.WsConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if length == 126 {
+		var ext [2]byte
+		if _, err := io.ReadFull(vm.WsReader, ext[:]); err != nil {
+			vm.wsClose()
+			return -1
+		}
+		length = int(binary.BigEndian.Uint16(ext[:]))
+	} else if length == 127 {
+		vm.wsClose()
+		return -1
+	}
+	var maskKey [4]byte
+	if masked {
+		if _, err := io.ReadFull(vm.WsReader, maskKey[:]); err != nil {
+			vm.wsClose()
+			return -1
+		}
+	}
+	payload := make([]byte, length)
+	if length > 0 {
+		if _, err := io.ReadFull(vm.WsReader, payload); err != nil {
+			vm.wsClose()
+			return -1
+		}
+		if masked {
+			for i := range payload {
+				payload[i] ^= maskKey[i&3]
+			}
+		}
+	}
+	if opcode == 0x08 {
+		vm.wsClose()
+		return -1
+	}
+	if opcode == 0x09 {
+		return 0
+	}
+	n := copy(dst, payload)
+	if n < len(dst) {
+		dst[n] = 0
+	}
+	return n
+}
+
+func (vm *VM) pal4Plot(buf []byte, w, h, x, y int, col byte) {
+	if x < 0 || x >= w || y < 0 || y >= h {
+		return
+	}
+	idx := y*(w>>1) + (x >> 1)
+	if (x & 1) == 0 {
+		buf[idx] = (buf[idx] & 0x0F) | (col << 4)
+	} else {
+		buf[idx] = (buf[idx] & 0xF0) | (col & 0x0F)
+	}
+}
+
+func (vm *VM) pal4HLine(buf []byte, w, h, x0, x1, y int, col byte) {
+	if y < 0 || y >= h {
+		return
+	}
+	if x0 > x1 {
+		x0, x1 = x1, x0
+	}
+	if x1 < 0 || x0 >= w {
+		return
+	}
+	if x0 < 0 {
+		x0 = 0
+	}
+	if x1 >= w {
+		x1 = w - 1
+	}
+	rowOff := y * (w >> 1)
+	pairByte := (col << 4) | col
+	x := x0
+	if (x & 1) != 0 {
+		idx := rowOff + (x >> 1)
+		buf[idx] = (buf[idx] & 0xF0) | col
+		x++
+	}
+	for x+1 <= x1 {
+		buf[rowOff+(x>>1)] = pairByte
+		x += 2
+	}
+	if x <= x1 {
+		idx := rowOff + (x >> 1)
+		buf[idx] = (buf[idx] & 0x0F) | (col << 4)
+	}
+}
+
+func (vm *VM) pal4Clear(buf []byte, w, h, topRows int, topCol, botCol byte) {
+	if topRows < 0 {
+		topRows = 0
+	}
+	if topRows > h {
+		topRows = h
+	}
+	rowBytes := w >> 1
+	topByte := (topCol << 4) | topCol
+	botByte := (botCol << 4) | botCol
+	splitOff := topRows * rowBytes
+	for i := 0; i < splitOff; i++ {
+		buf[i] = topByte
+	}
+	for i := splitOff; i < h*rowBytes; i++ {
+		buf[i] = botByte
+	}
+}
+
+func (vm *VM) pal4FillTriangle(buf []byte, w, h, x0, y0, x1, y1, x2, y2 int, col byte) {
+	if y0 > y1 {
+		x0, y0, x1, y1 = x1, y1, x0, y0
+	}
+	if y1 > y2 {
+		x1, y1, x2, y2 = x2, y2, x1, y1
+	}
+	if y0 > y1 {
+		x0, y0, x1, y1 = x1, y1, x0, y0
+	}
+	if y2 < 0 || y0 >= h {
+		return
+	}
+	minX, maxX := x0, x0
+	if x1 < minX {
+		minX = x1
+	}
+	if x2 < minX {
+		minX = x2
+	}
+	if x1 > maxX {
+		maxX = x1
+	}
+	if x2 > maxX {
+		maxX = x2
+	}
+	if maxX < 0 || minX >= w {
+		return
+	}
+	if y0 == y2 {
+		vm.pal4HLine(buf, w, h, minX, maxX, y0, col)
+		return
+	}
+	totalH := y2 - y0
+	yStart := y0
+	if yStart < 0 {
+		yStart = 0
+	}
+	yEnd := y2
+	if yEnd >= h {
+		yEnd = h - 1
+	}
+	for y := yStart; y <= yEnd; y++ {
+		secondHalf := y > y1 || y1 == y0
+		segH := y1 - y0
+		if secondHalf {
+			segH = y2 - y1
+		}
+		if segH == 0 {
+			continue
+		}
+		ax := x0 + (x2-x0)*(y-y0)/totalH
+		var bx int
+		if secondHalf {
+			bx = x1 + (x2-x1)*(y-y1)/segH
+		} else {
+			bx = x0 + (x1-x0)*(y-y0)/segH
+		}
+		vm.pal4HLine(buf, w, h, ax, bx, y, col)
+	}
+}
+
+func (vm *VM) pal4FillCircle(buf []byte, w, h, cx, cy, r int, col byte) {
+	if r <= 0 {
+		vm.pal4Plot(buf, w, h, cx, cy, col)
+		return
+	}
+	if cx+r < 0 || cx-r >= w || cy+r < 0 || cy-r >= h {
+		return
+	}
+	r2 := r * r
+	dyStart := -r
+	if cy+dyStart < 0 {
+		dyStart = -cy
+	}
+	dyEnd := r
+	if cy+dyEnd >= h {
+		dyEnd = h - 1 - cy
+	}
+	for dy := dyStart; dy <= dyEnd; dy++ {
+		y := cy + dy
+		dx := int(math.Sqrt(float64(r2 - dy*dy)))
+		vm.pal4HLine(buf, w, h, cx-dx, cx+dx, y, col)
+	}
+}
+
+func pal4Outcode(x, y, w, h int) int {
+	code := 0
+	if x < 0 {
+		code |= 1
+	} else if x >= w {
+		code |= 2
+	}
+	if y < 0 {
+		code |= 4
+	} else if y >= h {
+		code |= 8
+	}
+	return code
+}
+
+func (vm *VM) pal4DrawLine(buf []byte, w, h, x0, y0, x1, y1 int, col byte) {
+	if y0 == y1 {
+		vm.pal4HLine(buf, w, h, x0, x1, y0, col)
+		return
+	}
+	c0 := pal4Outcode(x0, y0, w, h)
+	c1 := pal4Outcode(x1, y1, w, h)
+	for (c0 | c1) != 0 {
+		if (c0 & c1) != 0 {
+			return
+		}
+		co := c0
+		if co == 0 {
+			co = c1
+		}
+		var x, y int
+		if (co & 8) != 0 {
+			x = x0 + (x1-x0)*(h-1-y0)/(y1-y0)
+			y = h - 1
+		} else if (co & 4) != 0 {
+			x = x0 + (x1-x0)*(0-y0)/(y1-y0)
+			y = 0
+		} else if (co & 2) != 0 {
+			y = y0 + (y1-y0)*(w-1-x0)/(x1-x0)
+			x = w - 1
+		} else {
+			y = y0 + (y1-y0)*(0-x0)/(x1-x0)
+			x = 0
+		}
+		if co == c0 {
+			x0, y0 = x, y
+			c0 = pal4Outcode(x0, y0, w, h)
+		} else {
+			x1, y1 = x, y
+			c1 = pal4Outcode(x1, y1, w, h)
+		}
+	}
+	dx := x1 - x0
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := y1 - y0
+	if dy < 0 {
+		dy = -dy
+	}
+	sx := -1
+	if x0 < x1 {
+		sx = 1
+	}
+	sy := -1
+	if y0 < y1 {
+		sy = 1
+	}
+	err := dx - dy
+	for {
+		vm.pal4Plot(buf, w, h, x0, y0, col)
+		if x0 == x1 && y0 == y1 {
+			break
+		}
+		e2 := 2 * err
+		if e2 > -dy {
+			err -= dy
+			x0 += sx
+		}
+		if e2 < dx {
+			err += dx
+			y0 += sy
+		}
+	}
+}
+

@@ -149,6 +149,10 @@ bool    lakatosHttpStreamOpen(const char* url);
 int32_t lakatosHttpStreamRead(void* buf, size_t maxLen);
 int32_t lakatosHttpStreamWrite(const void* buf, size_t len);
 void    lakatosHttpStreamClose();
+bool    lakatosWsOpen(const char* urlOrPath);
+int32_t lakatosWsSend(const void* buf, size_t len);
+int32_t lakatosWsRecv(void* buf, size_t maxLen);
+void    lakatosWsClose();
 
 struct LakatosVfsStream;
 LakatosVfsStream* lakatosFsOpenRead(const char* path);
@@ -205,6 +209,10 @@ bool lakatosDrawPngFileCentered(const char* vfsPath, int boxX, int boxY, int box
 bool lakatosDrawPngMem(const uint8_t* data, size_t len, int x, int y);
 void lakatosTftDrawPal4(int x, int y, int w, int h, const uint32_t* pal565, const uint8_t* pix4bpp);
 bool lakatosSavePngPal4(const char* vfsPath, int w, int h, const uint32_t* pal565, const uint8_t* pix4bpp);
+void lakatosPal4Clear(uint8_t* pix4bpp, int w, int h, int topRows, uint8_t topCol, uint8_t botCol);
+void lakatosPal4FillTriangle(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1, int y1, int x2, int y2, uint8_t col);
+void lakatosPal4FillCircle(uint8_t* pix4bpp, int w, int h, int cx, int cy, int r, uint8_t col);
+void lakatosPal4DrawLine(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1, int y1, uint8_t col);
 
 // ---------------------------------------------------------------------------
 // JPEG Image Decoder & Renderer via ROM tjpgd (implemented in lakatos_jpg.cpp)

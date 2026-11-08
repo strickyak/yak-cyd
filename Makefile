@@ -58,6 +58,7 @@ apps: lakat
 	$(LAKAT) compile -title "SmallerTalk-80" -o build/apps/smallertalk.lapp apps/smallertalk/smallertalk.lgolf
 	$(LAKAT) compile -title "Wind Chimes" -o build/apps/wind.lapp apps/wind/wind.lgolf
 	$(LAKAT) compile -title "3D Dice Roller" -o build/apps/dice-3d.lapp apps/dice-3d/dice-3d.lgolf
+	$(LAKAT) compile -title "Croquet 3D World" -o build/apps/croquet.lapp apps/croquet/croquet.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps
@@ -93,6 +94,9 @@ build-demo2:
 
 monitor:
 	$(PIO) device monitor -b 115200
+
+build/superhighway-server:
+	go build -o build/superhighway-server  ../superhighway/cmd/superhighway-server/
 
 clean:
 	$(PIO) run -t clean

@@ -1,0 +1,1372 @@
+package main
+
+import "wedge"
+
+// ============================================================================
+// Croquet 3D — Multi-User Shared 3D World for CYD (Inspired by Alan Kay et al.)
+// ============================================================================
+// - Top bar includes:
+//     * Unlabeled 1..4 Detail Slider:
+//         1 = Floor and horizons
+//         2 = Adds the 3D house and original simple courtyard wickets
+//         3 = Adds 1 tree (West), 1 brown mountain (North), 1 railroad bedrock (South)
+//         4 = Adds the rest (remaining mountains, trees, East lake, railroad ties & rails)
+//     * Live FPS counter next to the slider (updates once per second)
+//     * Green/Red WebSocket status circle + [ALAN] bot toggle + [EXIT]
+// ============================================================================
+
+const (
+	VIEW_X = 0
+	VIEW_Y = 24
+	VIEW_W = 320
+	VIEW_H = 216
+
+	HORIZON_Y = 78
+	FOCAL_LEN = 165.0
+
+	// 16-Color pal4 Palette Indices
+	PAL_SKY_TOP    = 0
+	PAL_SKY_HORIZ  = 1
+	PAL_GRASS      = 2
+	PAL_PATH       = 3
+	PAL_FLOOR      = 4
+	PAL_WALL_LIT   = 5
+	PAL_WALL_SHADE = 6
+	PAL_LAKE       = 7
+	PAL_ROOF_LIT   = 8
+	PAL_MTN_BROWN  = 9
+	PAL_TIMBER     = 10
+	PAL_WHITE      = 11
+	PAL_DARK       = 12
+	PAL_AV_CYAN    = 13
+	PAL_AV_GOLD    = 14
+	PAL_TREE_GREEN = 15
+
+	// RGB565 UI Colors
+	UI_BG        = 0x10A3
+	UI_BTN_BG    = 0x2188
+	UI_BTN_ACT   = 0x0451
+	UI_BORDER    = 0x5B91
+	UI_GOLD      = 0xFEA0
+	UI_CYAN      = 0x07FF
+	UI_GREEN     = 0x07E0
+	UI_LIGHTGREY = 0xD69A
+
+	MAX_QUADS = 128
+	MAX_PEERS = 8
+	MAX_ITEMS = 144
+	TWO_PI    = 6.2831853
+	HALF_PI   = 1.5707963
+)
+
+// Off-screen 4-bit framebuffer (320 * 216 / 2 = 34,560 bytes)
+var canvas [34560]byte
+var palette [16]int
+
+// 3D World Quad Table + Minimum Detail Level (1..4) per Quad
+var quadCount int
+var qX0 [128]float32
+var qY0 [128]float32
+var qZ0 [128]float32
+var qX1 [128]float32
+var qY1 [128]float32
+var qZ1 [128]float32
+var qX2 [128]float32
+var qY2 [128]float32
+var qZ2 [128]float32
+var qX3 [128]float32
+var qY3 [128]float32
+var qZ3 [128]float32
+var qCol [128]int
+var qMinDetail [128]int
+
+// Precomputed Static Quad Centroids, Bounding Half-Extents, Culling & Sort Biases
+var qCX [128]float32
+var qCY [128]float32
+var qCZ [128]float32
+var qHalfX [128]float32
+var qHalfY [128]float32
+var qMinRY [128]float32
+var qBias [128]float32
+var qIsTri [128]int
+
+// Current Detail Level (1..4) and FPS Measurement State
+var detailLevel int
+var fpsFrames int
+var fpsLastMs int
+var fpsValue int
+
+// Painter's Algorithm Draw Order List (Quads + Avatars)
+// itemKind: 0..127 = quad index, 200 = local avatar, 201..208 = remote peers, 209 = bot avatar
+var itemCount int
+var itemKind [144]int
+var itemDepth [144]float32
+
+// Local Avatar State
+var myX float32
+var myY float32
+var myZ float32
+var myTheta float32
+var myColor int
+var myWalkPhase float32
+
+// Camera State (Computed from myX, myY, myZ, myTheta)
+var camX float32
+var camY float32
+var camZ float32
+var camSin float32
+var camCos float32
+var camAbsSin float32
+var camAbsCos float32
+var camPitch float32
+var camSinP float32
+var camCosP float32
+
+// 3D -> 2D Projection Outputs (Single-return convention for LGolf)
+var projSX int
+var projSY int
+var projDepth float32
+
+// Remote Peer Avatars (Synchronized via /croquet WebSocket)
+var peerActive [8]int
+var peerId [128]byte // 8 * 16-byte null-terminated IDs
+var peerX [8]float32
+var peerY [8]float32
+var peerZ [8]float32
+var peerTheta [8]float32
+var peerColor [8]int
+var peerScreenX [8]int
+var peerScreenY [8]int
+var peerScreenVis [8]int
+var activePeerCount int
+
+// Autonomous "Alan" Bot Avatar (strolls through both open doors of the house)
+var botEnabled int
+var botPhase float32
+var botX float32
+var botY float32
+var botZ float32
+var botTheta float32
+var botScreenX int
+var botScreenY int
+var botScreenVis int
+
+// WebSocket State & Scratch Buffers
+var wsConnected int
+var wsLastSendMs int
+var wsLastRetryMs int
+var myIdBuf [24]byte
+var rxBuf [256]byte
+var txBuf [96]byte
+var numBuf [20]byte
+
+// Parse state for incoming WebSocket lines
+var parsePos int
+var parseLen int
+
+func initPalette() {
+	palette[PAL_SKY_TOP] = 0x2335    // Deep cerulean sky
+	palette[PAL_SKY_HORIZ] = 0x6D9E  // Soft horizon sky blue / water shimmer
+	palette[PAL_GRASS] = 0x24E6      // Lush courtyard grass green
+	palette[PAL_PATH] = 0xC5B2       // Warm sandstone path / shore / track ballast
+	palette[PAL_FLOOR] = 0x8C71      // Stone floor / steel train rails
+	palette[PAL_WALL_LIT] = 0xF759   // Sunlit cream stucco wall
+	palette[PAL_WALL_SHADE] = 0xC591 // Shaded warm stucco wall
+	palette[PAL_LAKE] = 0x039B       // Deep azure blue East Lake water
+	palette[PAL_ROOF_LIT] = 0xC263   // Terracotta roof / coral-red avatar
+	palette[PAL_MTN_BROWN] = 0x8304  // Sunlit brown mountain slope
+	palette[PAL_TIMBER] = 0x51E3     // Shaded brown mountain / tree trunk / railroad ties
+	palette[PAL_WHITE] = 0xFFFF      // Pure white highlight / sclera
+	palette[PAL_DARK] = 0x1082       // Deep charcoal pupil / shadow
+	palette[PAL_AV_CYAN] = 0x06FF    // Avatar Cyan
+	palette[PAL_AV_GOLD] = 0xFD60    // Avatar Gold
+	palette[PAL_TREE_GREEN] = 0x1362 // Deep forest pine green for West trees
+}
+
+func maxAbsDiff(c float32, v float32, curMax float32) float32 {
+	d := abs(v - c)
+	if d > curMax {
+		return d
+	}
+	return curMax
+}
+
+func addQuad(x0 float32, y0 float32, z0 float32,
+	x1 float32, y1 float32, z1 float32,
+	x2 float32, y2 float32, z2 float32,
+	x3 float32, y3 float32, z3 float32, col int, minDetail int) {
+	if quadCount >= MAX_QUADS {
+		return
+	}
+	i := quadCount
+	qX0[i] = x0
+	qY0[i] = y0
+	qZ0[i] = z0
+	qX1[i] = x1
+	qY1[i] = y1
+	qZ1[i] = z1
+	qX2[i] = x2
+	qY2[i] = y2
+	qZ2[i] = z2
+	qX3[i] = x3
+	qY3[i] = y3
+	qZ3[i] = z3
+	qCol[i] = col
+	qMinDetail[i] = minDetail
+
+	cx := (x0 + x1 + x2 + x3) * 0.25
+	cy := (y0 + y1 + y2 + y3) * 0.25
+	cz := (z0 + z1 + z2 + z3) * 0.25
+	qCX[i] = cx
+	qCY[i] = cy
+	qCZ[i] = cz
+
+	var hx float32
+	var hy float32
+	hx = 4.0
+	hy = 4.0
+	hx = maxAbsDiff(cx, x0, hx)
+	hx = maxAbsDiff(cx, x1, hx)
+	hx = maxAbsDiff(cx, x2, hx)
+	hx = maxAbsDiff(cx, x3, hx)
+	hy = maxAbsDiff(cy, y0, hy)
+	hy = maxAbsDiff(cy, y1, hy)
+	hy = maxAbsDiff(cy, y2, hy)
+	hy = maxAbsDiff(cy, y3, hy)
+	qHalfX[i] = hx
+	qHalfY[i] = hy
+
+	if z2 <= 1.0 {
+		qBias[i] = 40.0 - z2*12.0
+		// Ground quads with Z <= 1.0 project below the bottom of the 320x216 screen when ryMax < 62.0
+		qMinRY[i] = 62.0
+	} else {
+		qBias[i] = 0.0
+		qMinRY[i] = 8.0
+	}
+
+	if x2 == x3 && y2 == y3 && z2 == z3 {
+		qIsTri[i] = 1
+	} else {
+		qIsTri[i] = 0
+	}
+
+	quadCount = quadCount + 1
+}
+
+// Adds a 3D pine tree at (tx, ty) with a crossed 3D brown trunk and 3D pyramid canopy
+func addTree3D(tx float32, ty float32, scale float32, minDetail int) {
+	tw := 4.5 * scale
+	th := 22.0 * scale
+	r1 := 24.0 * scale
+	r2 := 18.0 * scale
+	z1 := 18.0 * scale
+	z2 := 54.0 * scale
+	z3 := 40.0 * scale
+	z4 := 82.0 * scale
+
+	// Crossed 3D trunk so it has full width from both N/S and E/W viewing angles
+	addQuad(tx-tw, ty, 0.0, tx+tw, ty, 0.0, tx+tw, ty, th, tx-tw, ty, th, PAL_TIMBER, minDetail)
+	addQuad(tx, ty-tw, 0.0, tx, ty+tw, 0.0, tx, ty+tw, th, tx, ty-tw, th, PAL_TIMBER, minDetail)
+
+	// Lower 3D pyramid canopy
+	addQuad(tx-r1, ty, z1, tx+r1, ty, z1, tx, ty, z2, tx, ty, z2, PAL_TREE_GREEN, minDetail)
+	addQuad(tx, ty-r1, z1, tx, ty+r1, z1, tx, ty, z2, tx, ty, z2, PAL_TREE_GREEN, minDetail)
+
+	// Upper 3D pyramid canopy
+	addQuad(tx-r2, ty, z3, tx+r2, ty, z3, tx, ty, z4, tx, ty, z4, PAL_TREE_GREEN, minDetail)
+	addQuad(tx, ty-r2, z3, tx, ty+r2, z3, tx, ty, z4, tx, ty, z4, PAL_TREE_GREEN, minDetail)
+}
+
+func initWorldGeometry() {
+	quadCount = 0
+
+	// Ordered roughly North/far -> South/near so the default view is nearly pre-sorted!
+	// ====================================================================
+	// 1. North Brown Mountain Peaks (Detail 3 & 4)
+	// ====================================================================
+	addQuad(-210.0, 300.0, 0.0, -65.0, 320.0, 295.0, 10.0, 300.0, 0.0, 10.0, 300.0, 0.0, PAL_MTN_BROWN, 3)
+	addQuad(-65.0, 320.0, 295.0, 85.0, 300.0, 0.0, 10.0, 300.0, 0.0, 10.0, 300.0, 0.0, PAL_TIMBER, 3)
+
+	addQuad(-420.0, 290.0, 0.0, -240.0, 310.0, 220.0, -140.0, 290.0, 0.0, -140.0, 290.0, 0.0, PAL_MTN_BROWN, 4)
+	addQuad(-240.0, 310.0, 220.0, -90.0, 290.0, 0.0, -140.0, 290.0, 0.0, -140.0, 290.0, 0.0, PAL_TIMBER, 4)
+	addQuad(-20.0, 295.0, 0.0, 95.0, 315.0, 270.0, 165.0, 295.0, 0.0, 165.0, 295.0, 0.0, PAL_MTN_BROWN, 4)
+	addQuad(95.0, 315.0, 270.0, 235.0, 295.0, 0.0, 165.0, 295.0, 0.0, 165.0, 295.0, 0.0, PAL_TIMBER, 4)
+	addQuad(130.0, 290.0, 0.0, 265.0, 310.0, 230.0, 330.0, 290.0, 0.0, 330.0, 290.0, 0.0, PAL_MTN_BROWN, 4)
+	addQuad(265.0, 310.0, 230.0, 420.0, 290.0, 0.0, 330.0, 290.0, 0.0, 330.0, 290.0, 0.0, PAL_TIMBER, 4)
+
+	// ====================================================================
+	// 2. DETAIL 1: Floor and Horizons (Walkway Path + House Interior Floor, North to South)
+	// ====================================================================
+	addQuad(-26.0, 160.0, 0.0, 26.0, 160.0, 0.0, 26.0, 230.0, 0.0, -26.0, 230.0, 0.0, PAL_PATH, 1)
+	addQuad(-26.0, 90.0, 0.0, 26.0, 90.0, 0.0, 26.0, 160.0, 0.0, -26.0, 160.0, 0.0, PAL_PATH, 1)
+	addQuad(-78.0, 0.0, 0.0, -26.0, 0.0, 0.0, -26.0, 88.0, 0.0, -78.0, 88.0, 0.0, PAL_FLOOR, 1)
+	addQuad(26.0, 0.0, 0.0, 78.0, 0.0, 0.0, 78.0, 88.0, 0.0, 26.0, 88.0, 0.0, PAL_FLOOR, 1)
+	addQuad(-26.0, 30.0, 0.0, 26.0, 30.0, 0.0, 26.0, 90.0, 0.0, -26.0, 90.0, 0.0, PAL_PATH, 1)
+	addQuad(-78.0, -88.0, 0.0, -26.0, -88.0, 0.0, -26.0, 0.0, 0.0, -78.0, 0.0, 0.0, PAL_FLOOR, 1)
+	addQuad(26.0, -88.0, 0.0, 78.0, -88.0, 0.0, 78.0, 0.0, 0.0, 26.0, 0.0, 0.0, PAL_FLOOR, 1)
+	addQuad(-26.0, -30.0, 0.0, 26.0, -30.0, 0.0, 26.0, 30.0, 0.0, -26.0, 30.0, 0.0, PAL_PATH, 1)
+	addQuad(-26.0, -90.0, 0.0, 26.0, -90.0, 0.0, 26.0, -30.0, 0.0, -26.0, -30.0, 0.0, PAL_PATH, 1)
+	addQuad(-26.0, -150.0, 0.0, 26.0, -150.0, 0.0, 26.0, -90.0, 0.0, -26.0, -90.0, 0.0, PAL_PATH, 1)
+	addQuad(-26.0, -204.0, 0.0, 26.0, -204.0, 0.0, 26.0, -150.0, 0.0, -26.0, -150.0, 0.0, PAL_PATH, 1)
+
+	// ====================================================================
+	// 3. East Lake (+X, Detail 4, North to South)
+	// ====================================================================
+	addQuad(108.0, 0.0, 0.0, 116.0, 0.0, 0.0, 116.0, 160.0, 0.0, 108.0, 145.0, 0.0, PAL_PATH, 4)
+	addQuad(116.0, 55.0, 0.0, 280.0, 55.0, 0.0, 255.0, 140.0, 0.0, 116.0, 160.0, 0.0, PAL_LAKE, 4)
+	addQuad(145.0, 82.0, 0.2, 225.0, 82.0, 0.2, 225.0, 95.0, 0.2, 145.0, 95.0, 0.2, PAL_SKY_HORIZ, 4)
+	addQuad(116.0, -55.0, 0.0, 280.0, -55.0, 0.0, 280.0, 55.0, 0.0, 116.0, 55.0, 0.0, PAL_LAKE, 4)
+	addQuad(155.0, -8.0, 0.2, 240.0, -8.0, 0.2, 240.0, 6.0, 0.2, 155.0, 6.0, 0.2, PAL_SKY_HORIZ, 4)
+	addQuad(108.0, -145.0, 0.0, 116.0, -160.0, 0.0, 116.0, 0.0, 0.0, 108.0, 0.0, 0.0, PAL_PATH, 4)
+	addQuad(116.0, -160.0, 0.0, 255.0, -140.0, 0.0, 280.0, -55.0, 0.0, 116.0, -55.0, 0.0, PAL_LAKE, 4)
+	addQuad(145.0, -95.0, 0.2, 225.0, -95.0, 0.2, 225.0, -82.0, 0.2, 145.0, -82.0, 0.2, PAL_SKY_HORIZ, 4)
+
+	// ====================================================================
+	// 4. West Forest Trees (Detail 3 & 4, North to South)
+	// ====================================================================
+	addTree3D(-190.0, 65.0, 1.2, 4)
+	addTree3D(-130.0, -5.0, 0.95, 4)
+	addTree3D(-185.0, -70.0, 1.15, 4)
+	addTree3D(-125.0, -75.0, 1.0, 3)
+	addTree3D(-145.0, -135.0, 1.05, 4)
+
+	// ====================================================================
+	// 5. DETAIL 2: 3D House (Open Back & Front Doors) + Courtyard Wickets
+	// ====================================================================
+	// Back Wall (Y = +90) with BIG OPEN DOOR (X in [-32, +32], Z in [0, 52])
+	addQuad(-80.0, 90.0, 0.0, -32.0, 90.0, 0.0, -32.0, 90.0, 68.0, -80.0, 90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(32.0, 90.0, 0.0, 80.0, 90.0, 0.0, 80.0, 90.0, 68.0, 32.0, 90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(-32.0, 90.0, 52.0, 32.0, 90.0, 52.0, 32.0, 90.0, 68.0, -32.0, 90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(-35.0, 90.5, 0.0, -31.0, 90.5, 0.0, -31.0, 90.5, 54.0, -35.0, 90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(31.0, 90.5, 0.0, 35.0, 90.5, 0.0, 35.0, 90.5, 54.0, 31.0, 90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(-35.0, 90.5, 50.0, 35.0, 90.5, 50.0, 35.0, 90.5, 54.0, -35.0, 90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(-80.0, 90.0, 68.0, 80.0, 90.0, 68.0, 0.0, 90.0, 106.0, 0.0, 90.0, 106.0, PAL_WALL_SHADE, 2)
+
+	// Side Walls & Pitched Roof (North -> Center -> South panels)
+	addQuad(-80.0, 30.0, 0.0, -80.0, 90.0, 0.0, -80.0, 90.0, 68.0, -80.0, 30.0, 68.0, PAL_WALL_SHADE, 2)
+	addQuad(80.0, 30.0, 0.0, 80.0, 90.0, 0.0, 80.0, 90.0, 68.0, 80.0, 30.0, 68.0, PAL_WALL_SHADE, 2)
+	addQuad(-84.0, 30.0, 66.0, 0.0, 30.0, 106.0, 0.0, 94.0, 106.0, -84.0, 94.0, 66.0, PAL_ROOF_LIT, 2)
+	addQuad(0.0, 30.0, 106.0, 84.0, 30.0, 66.0, 84.0, 94.0, 66.0, 0.0, 94.0, 106.0, PAL_ROOF_LIT, 2)
+
+	addQuad(-80.0, -30.0, 0.0, -80.0, 30.0, 0.0, -80.0, 30.0, 68.0, -80.0, -30.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(80.0, -30.0, 0.0, 80.0, 30.0, 0.0, 80.0, 30.0, 68.0, 80.0, -30.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(-84.0, -30.0, 66.0, 0.0, -30.0, 106.0, 0.0, 30.0, 106.0, -84.0, 30.0, 66.0, PAL_ROOF_LIT, 2)
+	addQuad(0.0, -30.0, 106.0, 84.0, -30.0, 66.0, 84.0, 30.0, 66.0, 0.0, 30.0, 106.0, PAL_ROOF_LIT, 2)
+
+	addQuad(-80.0, -90.0, 0.0, -80.0, -30.0, 0.0, -80.0, -30.0, 68.0, -80.0, -90.0, 68.0, PAL_WALL_SHADE, 2)
+	addQuad(80.0, -90.0, 0.0, 80.0, -30.0, 0.0, 80.0, -30.0, 68.0, 80.0, -90.0, 68.0, PAL_WALL_SHADE, 2)
+	addQuad(-84.0, -94.0, 66.0, 0.0, -94.0, 106.0, 0.0, -30.0, 106.0, -84.0, -30.0, 66.0, PAL_ROOF_LIT, 2)
+	addQuad(0.0, -94.0, 106.0, 84.0, -94.0, 66.0, 84.0, -30.0, 66.0, 0.0, -30.0, 106.0, PAL_ROOF_LIT, 2)
+
+	// Front Wall (Y = -90) with BIG OPEN DOOR (X in [-32, +32], Z in [0, 52])
+	addQuad(-80.0, -90.0, 0.0, -32.0, -90.0, 0.0, -32.0, -90.0, 68.0, -80.0, -90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(32.0, -90.0, 0.0, 80.0, -90.0, 0.0, 80.0, -90.0, 68.0, 32.0, -90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(-32.0, -90.0, 52.0, 32.0, -90.0, 52.0, 32.0, -90.0, 68.0, -32.0, -90.0, 68.0, PAL_WALL_LIT, 2)
+	addQuad(-35.0, -90.5, 0.0, -31.0, -90.5, 0.0, -31.0, -90.5, 54.0, -35.0, -90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(31.0, -90.5, 0.0, 35.0, -90.5, 0.0, 35.0, -90.5, 54.0, 31.0, -90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(-35.0, -90.5, 50.0, 35.0, -90.5, 50.0, 35.0, -90.5, 54.0, -35.0, -90.5, 54.0, PAL_TIMBER, 2)
+	addQuad(-80.0, -90.0, 68.0, 80.0, -90.0, 68.0, 0.0, -90.0, 106.0, 0.0, -90.0, 106.0, PAL_WALL_SHADE, 2)
+
+	// Original Simple Courtyard Wickets (Front-Left & Front-Right)
+	addQuad(-112.0, -150.0, 0.0, -108.0, -150.0, 0.0, -108.0, -150.0, 30.0, -112.0, -150.0, 30.0, PAL_WHITE, 2)
+	addQuad(-92.0, -150.0, 0.0, -88.0, -150.0, 0.0, -88.0, -150.0, 30.0, -92.0, -150.0, 30.0, PAL_WHITE, 2)
+	addQuad(-112.0, -150.0, 26.0, -88.0, -150.0, 26.0, -88.0, -150.0, 31.0, -112.0, -150.0, 31.0, PAL_WHITE, 2)
+
+	// ====================================================================
+	// 6. South Railroad Bedrock (Detail 3) + Wooden Ties & Steel Rails (Detail 4)
+	// ====================================================================
+	addQuad(-240.0, -226.0, 0.0, 240.0, -226.0, 0.0, 240.0, -204.0, 0.0, -240.0, -204.0, 0.0, PAL_PATH, 3)
+
+	var tx float32
+	tx = -240.0
+	for tx < 240.0 {
+		addQuad(tx+8.0, -225.0, 0.3, tx+16.0, -225.0, 0.3, tx+16.0, -205.0, 0.3, tx+8.0, -205.0, 0.3, PAL_TIMBER, 4)
+		addQuad(tx+34.0, -225.0, 0.3, tx+42.0, -225.0, 0.3, tx+42.0, -205.0, 0.3, tx+34.0, -205.0, 0.3, PAL_TIMBER, 4)
+		addQuad(tx+60.0, -225.0, 0.3, tx+68.0, -225.0, 0.3, tx+68.0, -205.0, 0.3, tx+60.0, -205.0, 0.3, PAL_TIMBER, 4)
+		addQuad(tx, -221.0, 0.6, tx+80.0, -221.0, 0.6, tx+80.0, -218.5, 0.6, tx, -218.5, 0.6, PAL_DARK, 4)
+		addQuad(tx, -211.5, 0.6, tx+80.0, -211.5, 0.6, tx+80.0, -209.0, 0.6, tx, -209.0, 0.6, PAL_DARK, 4)
+		tx = tx + 80.0
+	}
+}
+
+func updateCamera() {
+	camSin = sin(myTheta)
+	camCos = cos(myTheta)
+	camAbsSin = abs(camSin)
+	camAbsCos = abs(camCos)
+
+	// Position camera behind and slightly above the local avatar
+	camX = myX - camSin*82.0
+	camY = myY - camCos*82.0
+	camZ = myZ + 38.0
+
+	// Pitch down slightly so the full avatar (head, shoulder hemisphere, cylinder core)
+	// is visible in the lower foreground with the 3D house & mountains framed ahead
+	camPitch = -0.16
+	camSinP = sin(camPitch)
+	camCosP = cos(camPitch)
+}
+
+// Projects 3D world point (wx, wy, wz) into 2D viewport coordinates (projSX, projSY).
+// Returns 1 if in front of the near clipping plane, 0 otherwise.
+func projectPoint(wx float32, wy float32, wz float32) int {
+	dx := wx - camX
+	dy := wy - camY
+	dz := wz - camZ
+	ry := dx*camSin + dy*camCos
+	cy := ry*camCosP - dz*camSinP
+	if cy < 8.0 {
+		return 0
+	}
+	invY := FOCAL_LEN / cy
+	projDepth = cy
+	projSX = 160 + int((dx*camCos-dy*camSin)*invY)
+	projSY = HORIZON_Y - int((ry*camSinP+dz*camCosP)*invY)
+	return 1
+}
+
+// Computes camera-space depth (cy) for any 3D point without full projection
+func pointCamDepth(wx float32, wy float32, wz float32) float32 {
+	dx := wx - camX
+	dy := wy - camY
+	dz := wz - camZ
+	ry := dx*camSin + dy*camCos
+	return ry*camCosP - dz*camSinP
+}
+
+func renderQuad(qi int) {
+	if projectPoint(qX0[qi], qY0[qi], qZ0[qi]) == 0 {
+		return
+	}
+	sx0 := projSX
+	sy0 := projSY
+
+	if projectPoint(qX1[qi], qY1[qi], qZ1[qi]) == 0 {
+		return
+	}
+	sx1 := projSX
+	sy1 := projSY
+
+	if projectPoint(qX2[qi], qY2[qi], qZ2[qi]) == 0 {
+		return
+	}
+	sx2 := projSX
+	sy2 := projSY
+
+	col := qCol[qi]
+	if qIsTri[qi] != 0 {
+		if (sx0 < 0 && sx1 < 0 && sx2 < 0) || (sx0 >= VIEW_W && sx1 >= VIEW_W && sx2 >= VIEW_W) ||
+			(sy0 < 0 && sy1 < 0 && sy2 < 0) || (sy0 >= VIEW_H && sy1 >= VIEW_H && sy2 >= VIEW_H) {
+			return
+		}
+		pal4_fill_triangle(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx1, sy1, sx2, sy2, col)
+		if col == PAL_MTN_BROWN || col == PAL_TREE_GREEN {
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx1, sy1, PAL_DARK)
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx1, sy1, sx2, sy2, PAL_DARK)
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx2, sy2, sx0, sy0, PAL_DARK)
+		} else if col == PAL_WALL_LIT || col == PAL_WALL_SHADE || col == PAL_ROOF_LIT {
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx1, sy1, PAL_TIMBER)
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx1, sy1, sx2, sy2, PAL_TIMBER)
+			pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx2, sy2, sx0, sy0, PAL_TIMBER)
+		}
+		return
+	}
+
+	if projectPoint(qX3[qi], qY3[qi], qZ3[qi]) == 0 {
+		return
+	}
+	sx3 := projSX
+	sy3 := projSY
+
+	if (sx0 < 0 && sx1 < 0 && sx2 < 0 && sx3 < 0) || (sx0 >= VIEW_W && sx1 >= VIEW_W && sx2 >= VIEW_W && sx3 >= VIEW_W) ||
+		(sy0 < 0 && sy1 < 0 && sy2 < 0 && sy3 < 0) || (sy0 >= VIEW_H && sy1 >= VIEW_H && sy2 >= VIEW_H && sy3 >= VIEW_H) {
+		return
+	}
+
+	pal4_fill_triangle(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx1, sy1, sx2, sy2, col)
+	pal4_fill_triangle(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx2, sy2, sx3, sy3, col)
+
+	// Subtle architectural & natural edge outline on walls and roof
+	if col == PAL_WALL_LIT || col == PAL_WALL_SHADE || col == PAL_ROOF_LIT {
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx0, sy0, sx1, sy1, PAL_TIMBER)
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx1, sy1, sx2, sy2, PAL_TIMBER)
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx2, sy2, sx3, sy3, PAL_TIMBER)
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, sx3, sy3, sx0, sy0, PAL_TIMBER)
+	}
+}
+
+// ============================================================================
+// 3D Avatar Renderer:
+//   1. Cylinder for the core of the body (Z = 0..18, R = 8.5)
+//   2. Half-sphere (hemisphere dome) for the shoulders (centered at Z = 18, R = 8.5 -> Z = 26.5)
+//   3. Sphere for the head (centered at Z = 33.5, R = 6.5) with directional eyes
+// ============================================================================
+func renderAvatar3D(ax float32, ay float32, az float32, theta float32, bodyCol int, isSelf int) int {
+	if projectPoint(ax, ay, az+18.0) == 0 {
+		return 0
+	}
+	shSX := projSX
+	shSY := projSY
+	shDepth := projDepth
+	if shDepth < 14.0 || shDepth > 680.0 {
+		return 0
+	}
+
+	if projectPoint(ax, ay, az+1.5) == 0 {
+		return 0
+	}
+	botSX := projSX
+	botSY := projSY
+	botDepth := projDepth
+
+	rTop := int(8.5 * FOCAL_LEN / shDepth)
+	rBot := int(8.5 * FOCAL_LEN / botDepth)
+	if rTop < 2 {
+		rTop = 2
+	}
+	if rTop > 36 {
+		rTop = 36
+	}
+	if rBot < 2 {
+		rBot = 2
+	}
+	if rBot > 36 {
+		rBot = 36
+	}
+
+	// 1. Ground shadow beneath the cylinder base
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, botSX, botSY+2, rBot/2+2, PAL_DARK)
+
+	// 2. Half-Sphere (Hemisphere Dome) for the Shoulders (centered at Z = 18, radius R = 8.5)
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, shSX, shSY, rTop+1, PAL_DARK)
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, shSX, shSY, rTop, bodyCol)
+
+	shHiR := rTop / 4
+	if shHiR < 1 {
+		shHiR = 1
+	}
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, shSX-rTop/2, shSY-rTop/2, shHiR, PAL_WHITE)
+
+	// 3. Cylinder Core of the Body (Z = 1.5 .. 18.0)
+	baseCapR := rBot / 3
+	if baseCapR < 1 {
+		baseCapR = 1
+	}
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, botSX, botSY, baseCapR+1, PAL_DARK)
+
+	bxL := botSX - rBot
+	bxR := botSX + rBot
+	txL := shSX - rTop
+	txR := shSX + rTop
+
+	pal4_fill_triangle(&canvas[0], VIEW_W, VIEW_H, bxL, botSY, bxR, botSY, txR, shSY, bodyCol)
+	pal4_fill_triangle(&canvas[0], VIEW_W, VIEW_H, bxL, botSY, txR, shSY, txL, shSY, bodyCol)
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, botSX, botSY, baseCapR, bodyCol)
+
+	hx1 := txL + (txR-txL)/4
+	hx2 := bxL + (bxR-bxL)/4
+	pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, hx1, shSY+1, hx2, botSY-1, PAL_WHITE)
+	if rTop >= 6 {
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, hx1+1, shSY+1, hx2+1, botSY-1, PAL_WHITE)
+	}
+
+	pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, txL-1, shSY, bxL-1, botSY, PAL_DARK)
+	pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, txR+1, shSY, bxR+1, botSY, PAL_DARK)
+	pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, bxL, botSY+baseCapR, bxR, botSY+baseCapR, PAL_DARK)
+	pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, txL+2, shSY, txR-2, shSY, PAL_DARK)
+
+	// 4. Sphere for the Head (center at Z = 33.5, radius = 6.5, sitting atop Z = 26.5 shoulder dome)
+	if projectPoint(ax, ay, az+33.5) == 0 {
+		return 0
+	}
+	headSX := projSX
+	headSY := projSY
+	headDepth := projDepth
+	headR := int(6.5 * FOCAL_LEN / headDepth)
+	if headR < 3 {
+		headR = 3
+	}
+	if headR > 26 {
+		headR = 26
+	}
+
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, headSX, headSY, headR+1, PAL_DARK)
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, headSX, headSY, headR, bodyCol)
+	hiR := headR / 3
+	if hiR < 1 {
+		hiR = 1
+	}
+	pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, headSX-headR/3, headSY-headR/3, hiR, PAL_WHITE)
+
+	// 5. Directional Eyes on Front of Head Sphere (or back-of-head visor band)
+	eyeL_X := ax + sin(theta-0.38)*5.8
+	eyeL_Y := ay + cos(theta-0.38)*5.8
+	eyeR_X := ax + sin(theta+0.38)*5.8
+	eyeR_Y := ay + cos(theta+0.38)*5.8
+	eyeZ := az + 34.2
+
+	eyeR := headR / 4
+	if eyeR < 1 {
+		eyeR = 1
+	}
+
+	if projectPoint(eyeL_X, eyeL_Y, eyeZ) != 0 {
+		if projDepth < headDepth+1.0 {
+			pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, projSX, projSY, eyeR+1, PAL_WHITE)
+			pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, projSX, projSY, eyeR, PAL_DARK)
+		}
+	}
+	if projectPoint(eyeR_X, eyeR_Y, eyeZ) != 0 {
+		if projDepth < headDepth+1.0 {
+			pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, projSX, projSY, eyeR+1, PAL_WHITE)
+			pal4_fill_circle(&canvas[0], VIEW_W, VIEW_H, projSX, projSY, eyeR, PAL_DARK)
+		}
+	}
+
+	if isSelf != 0 {
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, headSX-headR/2, headSY+1, headSX+headR/2, headSY+1, PAL_DARK)
+	}
+
+	projSX = headSX
+	projSY = headSY - headR - 10
+	return 1
+}
+
+// Builds and depth-sorts all visible 3D quads (filtered by detailLevel 1..4) and avatars
+func renderScene3D() {
+	updateCamera()
+
+	// 1. Clear off-screen 4-bit canvas: Sky above HORIZON_Y, Grass below HORIZON_Y
+	pal4_clear(&canvas[0], VIEW_W, VIEW_H, HORIZON_Y, PAL_SKY_TOP, PAL_GRASS)
+
+	// Horizon sky glow band
+	var hy int
+	for hy = HORIZON_Y - 12; hy < HORIZON_Y; hy = hy + 1 {
+		pal4_draw_line(&canvas[0], VIEW_W, VIEW_H, 0, hy, VIEW_W-1, hy, PAL_SKY_HORIZ)
+	}
+
+	// 2. Collect all active visible quads (qMinDetail[i] <= detailLevel) using
+	//    precomputed centroids + camera-space OBB frustum & bottom-of-screen culling
+	itemCount = 0
+	var i int
+	for i = 0; i < quadCount; i = i + 1 {
+		if qMinDetail[i] <= detailLevel {
+			dx := qCX[i] - camX
+			dy := qCY[i] - camY
+			ry := dx*camSin + dy*camCos
+			halfX := qHalfX[i]
+			halfY := qHalfY[i]
+			ryMax := ry + halfX*camAbsSin + halfY*camAbsCos
+			if ryMax >= qMinRY[i] {
+				rx := dx*camCos - dy*camSin
+				rxSpan := ryMax + halfX*camAbsCos + halfY*camAbsSin
+				if rx <= rxSpan && rx >= -rxSpan {
+					dz := qCZ[i] - camZ
+					d := ry*camCosP - dz*camSinP + qBias[i]
+					if d > 5.0 && itemCount < MAX_ITEMS {
+						itemKind[itemCount] = i
+						itemDepth[itemCount] = d
+						itemCount = itemCount + 1
+					}
+				}
+			}
+		}
+	}
+
+	// Add local avatar (kind = 200)
+	dSelf := pointCamDepth(myX, myY, myZ+18.0)
+	if dSelf > 5.0 && itemCount < MAX_ITEMS {
+		itemKind[itemCount] = 200
+		itemDepth[itemCount] = dSelf
+		itemCount = itemCount + 1
+	}
+
+	// Add remote WebSocket peers (kind = 201 .. 208)
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		peerScreenVis[i] = 0
+		if peerActive[i] != 0 {
+			dp := pointCamDepth(peerX[i], peerY[i], peerZ[i]+18.0)
+			if dp > 5.0 && itemCount < MAX_ITEMS {
+				itemKind[itemCount] = 201 + i
+				itemDepth[itemCount] = dp
+				itemCount = itemCount + 1
+			}
+		}
+	}
+
+	// Add autonomous Croquet bot avatar (kind = 209)
+	botScreenVis = 0
+	if botEnabled != 0 {
+		db := pointCamDepth(botX, botY, botZ+18.0)
+		if db > 5.0 && itemCount < MAX_ITEMS {
+			itemKind[itemCount] = 209
+			itemDepth[itemCount] = db
+			itemCount = itemCount + 1
+		}
+	}
+
+	// 3. 3-pass Shell sort (gaps 13, 4, 1) by descending depth (farthest first -> nearest last)
+	gap := 13
+	for gap > 0 {
+		var a int
+		for a = gap; a < itemCount; a = a + 1 {
+			kKind := itemKind[a]
+			kDepth := itemDepth[a]
+			b := a - gap
+			for b >= 0 && itemDepth[b] < kDepth {
+				itemKind[b+gap] = itemKind[b]
+				itemDepth[b+gap] = itemDepth[b]
+				b = b - gap
+			}
+			itemKind[b+gap] = kKind
+			itemDepth[b+gap] = kDepth
+		}
+		if gap == 13 {
+			gap = 4
+		} else if gap == 4 {
+			gap = 1
+		} else {
+			gap = 0
+		}
+	}
+
+	// 4. Rasterize sorted items into the off-screen pal4 buffer
+	for i = 0; i < itemCount; i = i + 1 {
+		kind := itemKind[i]
+		if kind < 200 {
+			renderQuad(kind)
+		} else if kind == 200 {
+			bobZ := sin(myWalkPhase) * 1.2
+			renderAvatar3D(myX, myY, myZ+bobZ, myTheta, myColor, 1)
+		} else if kind >= 201 && kind < 201+MAX_PEERS {
+			pi := kind - 201
+			if renderAvatar3D(peerX[pi], peerY[pi], peerZ[pi], peerTheta[pi], peerColor[pi], 0) != 0 {
+				peerScreenX[pi] = projSX
+				peerScreenY[pi] = VIEW_Y + projSY
+				peerScreenVis[pi] = 1
+			}
+		} else if kind == 209 {
+			if renderAvatar3D(botX, botY, botZ, botTheta, PAL_AV_GOLD, 0) != 0 {
+				botScreenX = projSX
+				botScreenY = VIEW_Y + projSY
+				botScreenVis = 1
+			}
+		}
+	}
+
+	// 5. Blit the 320x216 4-bit viewport to the TFT in a single flicker-free call!
+	tft_draw_pal4(VIEW_X, VIEW_Y, VIEW_W, VIEW_H, &palette[0], &canvas[0])
+
+	// 6. Overlay floating name tags above visible remote peers & bot
+	tft_set_text_datum(1) // TC_DATUM
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] != 0 && peerScreenVis[i] != 0 {
+			sx := peerScreenX[i]
+			sy := peerScreenY[i]
+			if sx >= 20 && sx <= 300 && sy >= VIEW_Y+2 && sy <= VIEW_Y+VIEW_H-14 {
+				tft_set_text_color(UI_CYAN, BLACK)
+				tft_draw_cstr(&peerId[i*16], sx, sy, 1)
+			}
+		}
+	}
+	if botEnabled != 0 && botScreenVis != 0 {
+		if botScreenX >= 20 && botScreenX <= 300 && botScreenY >= VIEW_Y+2 && botScreenY <= VIEW_Y+VIEW_H-14 {
+			tft_set_text_color(UI_GOLD, BLACK)
+			tft_draw_string("alan", botScreenX, botScreenY, 1)
+		}
+	}
+	tft_set_text_datum(0) // TL_DATUM
+}
+
+// ============================================================================
+// Movement & Collision with House Walls & East Lake
+// ============================================================================
+func canStandAt(nx float32, ny float32) int {
+	if nx < -250.0 || nx > 250.0 || ny < -270.0 || ny > 280.0 {
+		return 0
+	}
+	if detailLevel >= 4 && nx > 112.0 && ny > -160.0 && ny < 160.0 {
+		return 0
+	}
+	if detailLevel >= 2 {
+		if ny > -98.0 && ny < -82.0 {
+			if (nx > -86.0 && nx < -25.0) || (nx > 25.0 && nx < 86.0) {
+				return 0
+			}
+		}
+		if ny > 82.0 && ny < 98.0 {
+			if (nx > -86.0 && nx < -25.0) || (nx > 25.0 && nx < 86.0) {
+				return 0
+			}
+		}
+		if ny > -94.0 && ny < 94.0 {
+			if (nx > -88.0 && nx < -72.0) || (nx > 72.0 && nx < 88.0) {
+				return 0
+			}
+		}
+	}
+	return 1
+}
+
+func moveAvatar(stepDist float32) {
+	dx := sin(myTheta) * stepDist
+	dy := cos(myTheta) * stepDist
+	nx := myX + dx
+	ny := myY + dy
+
+	if canStandAt(nx, ny) != 0 {
+		myX = nx
+		myY = ny
+	} else if canStandAt(nx, myY) != 0 {
+		myX = nx
+	} else if canStandAt(myX, ny) != 0 {
+		myY = ny
+	}
+	myWalkPhase = myWalkPhase + 0.45
+	if myWalkPhase > TWO_PI {
+		myWalkPhase = myWalkPhase - TWO_PI
+	}
+}
+
+func updateBot() {
+	if botEnabled == 0 {
+		return
+	}
+	botPhase = botPhase + 0.012
+	if botPhase >= 4.0 {
+		botPhase = botPhase - 4.0
+	}
+
+	if botPhase < 1.0 {
+		t := botPhase
+		botX = 14.0
+		botY = -140.0 + t*290.0
+		botTheta = 0.0
+	} else if botPhase < 2.0 {
+		t := botPhase - 1.0
+		botX = 14.0 + t*82.0
+		botY = 150.0
+		botTheta = HALF_PI
+	} else if botPhase < 3.0 {
+		t := botPhase - 2.0
+		botX = 96.0
+		botY = 150.0 - t*290.0
+		botTheta = 3.1415926
+	} else {
+		t := botPhase - 3.0
+		botX = 96.0 - t*82.0
+		botY = -140.0
+		botTheta = -HALF_PI
+	}
+	botZ = sin(botPhase*25.0) * 1.0
+	if botZ < 0.0 {
+		botZ = 0.0
+	}
+}
+
+// ============================================================================
+// WebSocket Protocol Parsing & State Broadcast (/croquet)
+// ============================================================================
+func appendCStr(dst *byte, pos int, src *byte, maxSrc int) int {
+	var i int
+	for i = 0; i < maxSrc; i = i + 1 {
+		ch := peek1(int(src) + i)
+		if ch == 0 {
+			break
+		}
+		poke1(int(dst)+pos, ch)
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendIntStr(dst *byte, pos int, val int) int {
+	if val == 0 {
+		poke1(int(dst)+pos, '0')
+		poke1(int(dst)+pos+1, 0)
+		return pos + 1
+	}
+	if val < 0 {
+		poke1(int(dst)+pos, '-')
+		pos = pos + 1
+		val = -val
+	}
+	n := 0
+	for val > 0 && n < 16 {
+		numBuf[n] = byte('0' + (val % 10))
+		val = val / 10
+		n = n + 1
+	}
+	for n > 0 {
+		n = n - 1
+		poke1(int(dst)+pos, int(numBuf[n]))
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func sendPoseOverWs() {
+	if wsConnected == 0 {
+		return
+	}
+	poke1(int(&txBuf[0])+0, 'P')
+	poke1(int(&txBuf[0])+1, 'O')
+	poke1(int(&txBuf[0])+2, 'S')
+	poke1(int(&txBuf[0])+3, 'E')
+	poke1(int(&txBuf[0])+4, ' ')
+	pos := 5
+	pos = appendIntStr(&txBuf[0], pos, int(myX))
+	poke1(int(&txBuf[0])+pos, ' ')
+	pos = pos + 1
+	pos = appendIntStr(&txBuf[0], pos, int(myY))
+	poke1(int(&txBuf[0])+pos, ' ')
+	pos = pos + 1
+	pos = appendIntStr(&txBuf[0], pos, int(myZ))
+	poke1(int(&txBuf[0])+pos, ' ')
+	pos = pos + 1
+	pos = appendIntStr(&txBuf[0], pos, int(myTheta*1000.0))
+	poke1(int(&txBuf[0])+pos, ' ')
+	pos = pos + 1
+	pos = appendIntStr(&txBuf[0], pos, myColor)
+
+	res := ws_send(&txBuf[0], pos)
+	if res < 0 {
+		wsConnected = 0
+	}
+}
+
+func skipSpaces() {
+	for parsePos < parseLen {
+		ch := rxBuf[parsePos]
+		if ch != ' ' && ch != '\t' && ch != '\r' {
+			break
+		}
+		parsePos = parsePos + 1
+	}
+}
+
+func readTokenTo(dst *byte, maxDst int) int {
+	skipSpaces()
+	var n int
+	n = 0
+	for parsePos < parseLen {
+		ch := rxBuf[parsePos]
+		if ch == 0 || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			break
+		}
+		if n+1 < maxDst {
+			poke1(int(dst)+n, int(ch))
+			n = n + 1
+		}
+		parsePos = parsePos + 1
+	}
+	poke1(int(dst)+n, 0)
+	return n
+}
+
+func readIntToken() int {
+	skipSpaces()
+	sign := 1
+	if parsePos < parseLen && rxBuf[parsePos] == '-' {
+		sign = -1
+		parsePos = parsePos + 1
+	}
+	val := 0
+	for parsePos < parseLen {
+		ch := int(rxBuf[parsePos])
+		if ch == '.' {
+			parsePos = parsePos + 1
+			for parsePos < parseLen {
+				c2 := int(rxBuf[parsePos])
+				if c2 < '0' || c2 > '9' {
+					break
+				}
+				parsePos = parsePos + 1
+			}
+			break
+		}
+		if ch < '0' || ch > '9' {
+			break
+		}
+		val = val*10 + (ch - '0')
+		parsePos = parsePos + 1
+	}
+	return val * sign
+}
+
+func cstrEquals(a *byte, b *byte, maxL int) int {
+	var i int
+	for i = 0; i < maxL; i = i + 1 {
+		ca := peek1(int(a) + i)
+		cb := peek1(int(b) + i)
+		if ca != cb {
+			return 0
+		}
+		if ca == 0 {
+			return 1
+		}
+	}
+	return 1
+}
+
+func findOrAllocPeer(idPtr *byte) int {
+	var i int
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] != 0 && cstrEquals(&peerId[i*16], idPtr, 15) != 0 {
+			return i
+		}
+	}
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] == 0 {
+			peerActive[i] = 1
+			appendCStr(&peerId[i*16], 0, idPtr, 15)
+			return i
+		}
+	}
+	return -1
+}
+
+func recountPeers() {
+	c := 0
+	var i int
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] != 0 {
+			c = c + 1
+		}
+	}
+	activePeerCount = c
+}
+
+func mapAvatarColor(c int) int {
+	if c == PAL_AV_CYAN || c == PAL_AV_GOLD || c == PAL_ROOF_LIT {
+		return c
+	}
+	return PAL_ROOF_LIT
+}
+
+func processWsLine() {
+	var cmd [16]byte
+	var tokId [16]byte
+	if readTokenTo(&cmd[0], 16) == 0 {
+		return
+	}
+
+	if cmd[0] == 'Y' && cmd[1] == 'O' && cmd[2] == 'U' && cmd[3] == 0 {
+		if readTokenTo(&myIdBuf[0], 20) > 0 {
+			h := (int(myIdBuf[0]) + int(myIdBuf[1])*3 + int(myIdBuf[2])*7) % 3
+			if h == 0 {
+				myColor = PAL_AV_CYAN
+			} else if h == 1 {
+				myColor = PAL_AV_GOLD
+			} else {
+				myColor = PAL_ROOF_LIT
+			}
+		}
+		return
+	}
+
+	if cmd[0] == 'S' && cmd[1] == 'T' && cmd[2] == 'A' && cmd[3] == 'T' && cmd[4] == 'E' && cmd[5] == 0 {
+		if readTokenTo(&tokId[0], 16) == 0 {
+			return
+		}
+		if myIdBuf[0] != 0 && cstrEquals(&tokId[0], &myIdBuf[0], 15) != 0 {
+			return
+		}
+		px := float32(readIntToken())
+		py := float32(readIntToken())
+		pz := float32(readIntToken())
+		ptMrad := readIntToken()
+		pcol := mapAvatarColor(readIntToken())
+		slot := findOrAllocPeer(&tokId[0])
+		if slot >= 0 {
+			peerX[slot] = px
+			peerY[slot] = py
+			peerZ[slot] = pz
+			peerTheta[slot] = float32(ptMrad) * 0.001
+			peerColor[slot] = pcol
+			recountPeers()
+		}
+		return
+	}
+
+	if cmd[0] == 'L' && cmd[1] == 'E' && cmd[2] == 'A' && cmd[3] == 'V' && cmd[4] == 'E' && cmd[5] == 0 {
+		if readTokenTo(&tokId[0], 16) == 0 {
+			return
+		}
+		var i int
+		for i = 0; i < MAX_PEERS; i = i + 1 {
+			if peerActive[i] != 0 && cstrEquals(&peerId[i*16], &tokId[0], 15) != 0 {
+				peerActive[i] = 0
+			}
+		}
+		recountPeers()
+	}
+}
+
+func pollWebSocket(nowMs int) {
+	if wsConnected == 0 {
+		if nowMs-wsLastRetryMs >= 4000 {
+			wsLastRetryMs = nowMs
+			if ws_open("/croquet") != 0 {
+				wsConnected = 1
+				sendPoseOverWs()
+				wsLastSendMs = nowMs
+			}
+		}
+		return
+	}
+
+	var iter int
+	for iter = 0; iter < 6; iter = iter + 1 {
+		got := ws_recv(&rxBuf[0], 255)
+		if got < 0 {
+			wsConnected = 0
+			wsLastRetryMs = nowMs
+			break
+		}
+		if got == 0 {
+			break
+		}
+		rxBuf[got] = 0
+		parsePos = 0
+		parseLen = got
+		for parsePos < parseLen {
+			processWsLine()
+			for parsePos < parseLen && rxBuf[parsePos] != '\n' {
+				parsePos = parsePos + 1
+			}
+			if parsePos < parseLen && rxBuf[parsePos] == '\n' {
+				parsePos = parsePos + 1
+			}
+		}
+	}
+}
+
+// ============================================================================
+// UI Header Bar:
+//   - Top-left exit wedge (x = 0..11)
+//   - Unlabeled 1..4 Detail Slider (x = 20..110)
+//   - Live FPS number next to slider (x = 118..154, updated once per second)
+//   - Green/Red WebSocket status circle (x = 174)
+//   - [ALAN] bot toggle (x = 206..258) & [EXIT] button (x = 264..316)
+// ============================================================================
+func drawFpsBadge() {
+	tft_fill_rect(116, 2, 42, 20, UI_BG)
+	tft_set_text_datum(4) // MC_DATUM
+	tft_set_text_color(UI_GOLD, UI_BG)
+	tft_draw_int(fpsValue, 136, 12, 2)
+	tft_set_text_datum(0)
+}
+
+func drawHeaderBar() {
+	tft_fill_rect(0, 0, 320, 24, UI_BG)
+	tft_draw_fast_hline(0, 23, 320, UI_BORDER)
+
+	// Standard top-left exit wedge
+	DrawExitWedge()
+
+	// Unlabeled 1..4 Detail Slider (stops at x = 28, 52, 76, 100)
+	tft_fill_rect(28, 10, 72, 4, UI_BTN_BG)
+	tft_draw_rect(28, 10, 72, 4, UI_BORDER)
+	var d int
+	for d = 1; d <= 4; d = d + 1 {
+		tx := 28 + (d-1)*24
+		tft_draw_fast_vline(tx, 6, 12, UI_LIGHTGREY)
+	}
+	knobX := 28 + (detailLevel-1)*24
+	tft_fill_round_rect(knobX-8, 3, 17, 17, 4, UI_BTN_ACT)
+	tft_draw_round_rect(knobX-8, 3, 17, 17, 4, UI_CYAN)
+	tft_set_text_datum(4) // MC_DATUM
+	tft_set_text_color(WHITE, UI_BTN_ACT)
+	tft_draw_int(detailLevel, knobX, 11, 2)
+
+	// FPS Number next to the slider
+	drawFpsBadge()
+
+	// Green / Red WebSocket Connection Circle at x = 174, y = 11
+	if wsConnected != 0 {
+		tft_fill_circle(174, 11, 6, UI_GREEN)
+		tft_draw_circle(174, 11, 7, WHITE)
+		if activePeerCount > 0 {
+			tft_set_text_datum(0)
+			tft_set_text_color(UI_GREEN, UI_BG)
+			tft_draw_int(activePeerCount, 186, 4, 2)
+		}
+	} else {
+		tft_fill_circle(174, 11, 6, RED)
+		tft_draw_circle(174, 11, 7, UI_LIGHTGREY)
+	}
+
+	// [ALAN] bot toggle button
+	tft_set_text_datum(4) // MC_DATUM
+	botBg := UI_BTN_BG
+	if botEnabled != 0 {
+		botBg = UI_BTN_ACT
+	}
+	tft_fill_round_rect(206, 3, 52, 17, 3, botBg)
+	tft_draw_round_rect(206, 3, 52, 17, 3, UI_CYAN)
+	tft_set_text_color(WHITE, botBg)
+	tft_draw_string("ALAN", 232, 11, 1)
+
+	// [EXIT] button
+	tft_fill_round_rect(264, 3, 52, 17, 3, MAROON)
+	tft_draw_round_rect(264, 3, 52, 17, 3, RED)
+	tft_set_text_color(WHITE, MAROON)
+	tft_draw_string("EXIT", 290, 11, 1)
+	tft_set_text_datum(0)
+}
+
+func main() {
+	os_set_corner_exit(1)
+	initPalette()
+	initWorldGeometry()
+
+	detailLevel = 4
+	fpsFrames = 0
+	fpsValue = 0
+	fpsLastMs = millis()
+
+	// Start in the front courtyard facing North (+Y) toward the open front door & North mountains
+	myX = -10.0
+	myY = -175.0
+	myZ = 0.0
+	myTheta = 0.0
+	myColor = PAL_AV_CYAN
+	myWalkPhase = 0.0
+
+	botEnabled = 1
+	botPhase = 0.14
+	updateBot()
+
+	wsConnected = 0
+	wsLastRetryMs = -5000
+	wsLastSendMs = 0
+
+	if ws_open("/croquet") != 0 {
+		wsConnected = 1
+		sendPoseOverWs()
+	}
+
+	drawHeaderBar()
+	renderScene3D()
+
+	wasTopTap := 0
+	prevHeaderState := -1
+	poseDirty := 0
+
+	for {
+		nowMs := millis()
+
+		// Update FPS counter once per second (every 1000 ms)
+		fpsFrames = fpsFrames + 1
+		elapsed := nowMs - fpsLastMs
+		if elapsed >= 1000 {
+			fpsValue = (fpsFrames * 1000) / elapsed
+			fpsFrames = 0
+			fpsLastMs = nowMs
+			drawFpsBadge()
+		}
+
+		// Drain any non-fuse serial commands ('q' or Ctrl+C to exit)
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 3 {
+				ws_close()
+				return
+			}
+		}
+
+		// Continuous touch polling on the full 320x216 3D viewport and top header
+		var tx int
+		var ty int
+		action := 0
+		if read_touch(&tx, &ty) != 0 {
+			if (tx < 16 && ty < 24) || (tx >= 264 && ty < 24) {
+				ws_close()
+				return
+			}
+			// Unlabeled 1..4 Detail Slider touch zone (x = 16..114, y = 0..23)
+			if tx >= 16 && tx <= 114 && ty < 24 {
+				newDetail := 1
+				if tx >= 88 {
+					newDetail = 4
+				} else if tx >= 64 {
+					newDetail = 3
+				} else if tx >= 40 {
+					newDetail = 2
+				}
+				if newDetail != detailLevel {
+					detailLevel = newDetail
+					drawHeaderBar()
+				}
+			} else if tx >= 206 && tx <= 258 && ty < 24 {
+				if wasTopTap == 0 {
+					wasTopTap = 1
+					if botEnabled != 0 {
+						botEnabled = 0
+					} else {
+						botEnabled = 1
+					}
+					drawHeaderBar()
+				}
+			} else {
+				wasTopTap = 0
+			}
+			if ty >= VIEW_Y {
+				// Direct 3D viewport steering:
+				//   Left third (x < 96)   -> Turn Left
+				//   Right third (x > 224) -> Turn Right
+				//   Center (96..224)      -> Walk Forward
+				if tx < 96 {
+					action = 1
+				} else if tx > 224 {
+					action = 4
+				} else {
+					action = 2
+				}
+			}
+		} else {
+			wasTopTap = 0
+		}
+
+		if action == 1 {
+			myTheta = myTheta - 0.065
+			if myTheta < -3.1415926 {
+				myTheta = myTheta + TWO_PI
+			}
+			poseDirty = 1
+		} else if action == 4 {
+			myTheta = myTheta + 0.065
+			if myTheta > 3.1415926 {
+				myTheta = myTheta - TWO_PI
+			}
+			poseDirty = 1
+		} else if action == 2 {
+			moveAvatar(3.4)
+			poseDirty = 1
+		}
+
+		// Poll WebSocket for peer updates and send our pose delta if we moved
+		pollWebSocket(nowMs)
+		if wsConnected != 0 {
+			if (poseDirty != 0 && nowMs-wsLastSendMs >= 100) || (nowMs-wsLastSendMs >= 3000) {
+				sendPoseOverWs()
+				wsLastSendMs = nowMs
+				poseDirty = 0
+			}
+		}
+
+		hdrState := detailLevel*1000 + wsConnected*100 + activePeerCount*10 + botEnabled
+		if hdrState != prevHeaderState {
+			drawHeaderBar()
+			prevHeaderState = hdrState
+		}
+
+		updateBot()
+		renderScene3D()
+		os_yield()
+	}
+}

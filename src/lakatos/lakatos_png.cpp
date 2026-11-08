@@ -672,25 +672,244 @@ void lakatosTftDrawPal4(int x, int y, int w, int h,
   if (!pal565 || !pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) return;
   if (w > LAKATOS_SCREEN_W) w = LAKATOS_SCREEN_W;
 
-  uint16_t pal[16];
-  for (int i = 0; i < 16; i++) {
-    pal[i] = (uint16_t)(pal565[i] & 0xFFFFu);
-  }
-
-  uint16_t line565[LAKATOS_SCREEN_W];
-  int rowBytes = w / 2;
+  int r0 = 0;
+  int r1 = h;
+  if (y < 0) r0 = -y;
+  if (y + r1 > LAKATOS_SCREEN_H) r1 = LAKATOS_SCREEN_H - y;
+  if (r0 >= r1) return;
 
   LakatosTftGuard tftLock;
-  for (int row = 0; row < h; row++) {
-    int sy = y + row;
-    if (sy < 0 || sy >= LAKATOS_SCREEN_H) continue;
+  bool prevSwap = tft.getSwapBytes();
+
+  uint16_t pal[16];
+  for (int i = 0; i < 16; i++) {
+    uint16_t c = (uint16_t)(pal565[i] & 0xFFFFu);
+    if (prevSwap) {
+      c = (uint16_t)((c << 8) | (c >> 8));
+    }
+    pal[i] = c;
+  }
+
+  uint32_t pairLut[256];
+  for (int b = 0; b < 256; b++) {
+    pairLut[b] = (uint32_t)pal[(b >> 4) & 0x0F] | ((uint32_t)pal[b & 0x0F] << 16);
+  }
+
+  uint32_t line32[LAKATOS_SCREEN_W / 2];
+  int rowBytes = w >> 1;
+
+  tft.setSwapBytes(false);
+  tft.startWrite();
+  tft.setAddrWindow(x, y + r0, w, r1 - r0);
+  for (int row = r0; row < r1; row++) {
     const uint8_t* src = pix4bpp + row * rowBytes;
     for (int i = 0; i < rowBytes; i++) {
-      uint8_t b = src[i];
-      line565[i * 2]     = pal[(b >> 4) & 0x0F];
-      line565[i * 2 + 1] = pal[b & 0x0F];
+      line32[i] = pairLut[src[i]];
     }
-    tft.pushImage(x, sy, w, 1, line565);
+    tft.pushPixels(line32, (uint32_t)w);
+  }
+  tft.endWrite();
+  tft.setSwapBytes(prevSwap);
+}
+
+static inline void pal4Plot(uint8_t* pix4bpp, int w, int h, int x, int y, uint8_t col) {
+  if ((unsigned)x >= (unsigned)w || (unsigned)y >= (unsigned)h) return;
+  int idx = y * (w >> 1) + (x >> 1);
+  if ((x & 1) == 0) {
+    pix4bpp[idx] = (uint8_t)((pix4bpp[idx] & 0x0Fu) | ((col & 0x0Fu) << 4));
+  } else {
+    pix4bpp[idx] = (uint8_t)((pix4bpp[idx] & 0xF0u) | (col & 0x0Fu));
+  }
+}
+
+static inline void pal4HLine(uint8_t* pix4bpp, int w, int h, int x0, int x1, int y, uint8_t col) {
+  if ((unsigned)y >= (unsigned)h) return;
+  if (x0 > x1) {
+    int t = x0; x0 = x1; x1 = t;
+  }
+  if (x1 < 0 || x0 >= w) return;
+  if (x0 < 0) x0 = 0;
+  if (x1 >= w) x1 = w - 1;
+
+  uint8_t c    = col & 0x0Fu;
+  uint8_t pair = (uint8_t)((c << 4) | c);
+  uint8_t* row = pix4bpp + y * (w >> 1);
+
+  int x = x0;
+  if ((x & 1) != 0) {
+    int bi = x >> 1;
+    row[bi] = (uint8_t)((row[bi] & 0xF0u) | c);
+    x++;
+  }
+  int spanPairs = (x1 - x + 1) >> 1;
+  if (spanPairs > 0) {
+    memset(row + (x >> 1), pair, (size_t)spanPairs);
+    x += spanPairs << 1;
+  }
+  if (x <= x1) {
+    int bi = x >> 1;
+    row[bi] = (uint8_t)((row[bi] & 0x0Fu) | (uint8_t)(c << 4));
+  }
+}
+
+void lakatosPal4Clear(uint8_t* pix4bpp, int w, int h, int topRows, uint8_t topCol, uint8_t botCol) {
+  if (!pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) return;
+  int rowBytes = w >> 1;
+  if (topRows < 0) topRows = 0;
+  if (topRows > h) topRows = h;
+  uint8_t topByte = (uint8_t)(((topCol & 0x0Fu) << 4) | (topCol & 0x0Fu));
+  uint8_t botByte = (uint8_t)(((botCol & 0x0Fu) << 4) | (botCol & 0x0Fu));
+  size_t splitByte = (size_t)topRows * (size_t)rowBytes;
+  size_t totalBytes = (size_t)h * (size_t)rowBytes;
+  if (splitByte > 0) {
+    memset(pix4bpp, topByte, splitByte);
+  }
+  if (totalBytes > splitByte) {
+    memset(pix4bpp + splitByte, botByte, totalBytes - splitByte);
+  }
+}
+
+void lakatosPal4FillTriangle(uint8_t* pix4bpp, int w, int h,
+                             int x0, int y0, int x1, int y1, int x2, int y2, uint8_t col) {
+  if (!pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) return;
+  if (y0 > y1) { int tx = x0, ty = y0; x0 = x1; y0 = y1; x1 = tx; y1 = ty; }
+  if (y1 > y2) { int tx = x1, ty = y1; x1 = x2; y1 = y2; x2 = tx; y2 = ty; }
+  if (y0 > y1) { int tx = x0, ty = y0; x0 = x1; y0 = y1; x1 = tx; y1 = ty; }
+
+  int minX = x0, maxX = x0;
+  if (x1 < minX) minX = x1;
+  if (x2 < minX) minX = x2;
+  if (x1 > maxX) maxX = x1;
+  if (x2 > maxX) maxX = x2;
+  if (y2 < 0 || y0 >= h || maxX < 0 || minX >= w) return;
+
+  if (y0 == y2) {
+    pal4HLine(pix4bpp, w, h, minX, maxX, y0, col);
+    return;
+  }
+
+  int dx01 = x1 - x0, dy01 = y1 - y0;
+  int dx02 = x2 - x0, dy02 = y2 - y0;
+  int dx12 = x2 - x1, dy12 = y2 - y1;
+  int last = (y1 == y2) ? y1 : (y1 - 1);
+
+  int yA = (y0 < 0) ? 0 : y0;
+  int yB = (last >= h) ? (h - 1) : last;
+  if (yA <= yB) {
+    int32_t sa = (int32_t)dx01 * (int32_t)(yA - y0);
+    int32_t sb = (int32_t)dx02 * (int32_t)(yA - y0);
+    for (int y = yA; y <= yB; y++) {
+      int a = x0 + (int)(sa / dy01);
+      int b = x0 + (int)(sb / dy02);
+      sa += dx01;
+      sb += dx02;
+      pal4HLine(pix4bpp, w, h, a, b, y, col);
+    }
+  }
+
+  if (y1 < y2) {
+    int yC = (y1 < 0) ? 0 : y1;
+    int yD = (y2 >= h) ? (h - 1) : y2;
+    if (yC <= yD) {
+      int32_t sa = (int32_t)dx12 * (int32_t)(yC - y1);
+      int32_t sb = (int32_t)dx02 * (int32_t)(yC - y0);
+      for (int y = yC; y <= yD; y++) {
+        int a = x1 + (int)(sa / dy12);
+        int b = x0 + (int)(sb / dy02);
+        sa += dx12;
+        sb += dx02;
+        pal4HLine(pix4bpp, w, h, a, b, y, col);
+      }
+    }
+  }
+}
+
+void lakatosPal4FillCircle(uint8_t* pix4bpp, int w, int h, int cx, int cy, int r, uint8_t col) {
+  if (!pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0 || r < 0) return;
+  if (cx + r < 0 || cx - r >= w || cy + r < 0 || cy - r >= h) return;
+  int dy0 = -r;
+  int dy1 = r;
+  if (cy + dy0 < 0) dy0 = -cy;
+  if (cy + dy1 >= h) dy1 = h - 1 - cy;
+  int r2 = r * r;
+  for (int dy = dy0; dy <= dy1; dy++) {
+    int y = cy + dy;
+    int dx = 0;
+    int rem = r2 - dy * dy;
+    while ((dx + 1) * (dx + 1) <= rem) {
+      dx++;
+    }
+    pal4HLine(pix4bpp, w, h, cx - dx, cx + dx, y, col);
+  }
+}
+
+void lakatosPal4DrawLine(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1, int y1, uint8_t col) {
+  if (!pix4bpp || w <= 0 || h <= 0 || (w & 1) != 0) return;
+  if (y0 == y1) {
+    pal4HLine(pix4bpp, w, h, x0, x1, y0, col);
+    return;
+  }
+  if ((x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w) ||
+      (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h)) {
+    return;
+  }
+
+  // Cohen-Sutherland 2D clipping to [0, w-1] x [0, h-1] so far-offscreen endpoints
+  // never cause thousands of wasted off-screen Bresenham iterations.
+  auto outCode = [w, h](int x, int y) -> int {
+    int c = 0;
+    if (x < 0) c |= 1;
+    else if (x >= w) c |= 2;
+    if (y < 0) c |= 4;
+    else if (y >= h) c |= 8;
+    return c;
+  };
+  int c0 = outCode(x0, y0);
+  int c1 = outCode(x1, y1);
+  for (int iter = 0; iter < 8 && (c0 | c1) != 0; iter++) {
+    if ((c0 & c1) != 0) return;
+    int co = c0 ? c0 : c1;
+    int x = 0, y = 0;
+    int32_t ddx = (int32_t)(x1 - x0);
+    int32_t ddy = (int32_t)(y1 - y0);
+    if (co & 8) {
+      y = h - 1;
+      x = x0 + (int)(ddx * (int32_t)(y - y0) / (ddy ? ddy : 1));
+    } else if (co & 4) {
+      y = 0;
+      x = x0 + (int)(ddx * (int32_t)(y - y0) / (ddy ? ddy : 1));
+    } else if (co & 2) {
+      x = w - 1;
+      y = y0 + (int)(ddy * (int32_t)(x - x0) / (ddx ? ddx : 1));
+    } else {
+      x = 0;
+      y = y0 + (int)(ddy * (int32_t)(x - x0) / (ddx ? ddx : 1));
+    }
+    if (co == c0) {
+      x0 = x; y0 = y; c0 = outCode(x0, y0);
+    } else {
+      x1 = x; y1 = y; c1 = outCode(x1, y1);
+    }
+  }
+  if ((c0 | c1) != 0) return;
+
+  int dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+  int sx = (x0 < x1) ? 1 : -1;
+  int dy = (y1 > y0) ? -(y1 - y0) : -(y0 - y1);
+  int sy = (y0 < y1) ? 1 : -1;
+  int err = dx + dy;
+  for (;;) {
+    pal4Plot(pix4bpp, w, h, x0, y0, col);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = err << 1;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
   }
 }
 

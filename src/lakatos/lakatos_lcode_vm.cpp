@@ -233,6 +233,15 @@ enum LCodeSyscall : uint8_t {
   SysAudioStart     = 0x4A,
   SysAudioStop      = 0x4B,
   SysAudioSetVoice  = 0x4C,
+
+  SysWsOpen         = 0x4D,
+  SysWsSend         = 0x4E,
+  SysWsRecv         = 0x4F,
+  SysWsClose        = 0x50,
+  SysPal4Clear      = 0x51,
+  SysPal4FillTri    = 0x52,
+  SysPal4FillCirc   = 0x53,
+  SysPal4DrawLine   = 0x54,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -1141,6 +1150,88 @@ struct LCodeVM {
         if (vol > 255u) vol = 255u;
         lakatosAudioSetVoice((int)(int32_t)ch, pcm, ln, loopStart, loopLen,
                              stepFp16, (uint8_t)vol, resetPos != 0);
+        return true;
+      }
+      case SysWsOpen: {
+        char urlBuf[160];
+        if (!popSliceAsCStr(urlBuf, sizeof(urlBuf))) return false;
+        return push(lakatosWsOpen(urlBuf) ? 1 : 0);
+      }
+      case SysWsSend: {
+        uint32_t ln = 0, cp = 0, bs = 0;
+        if (!pop(ln) || !pop(cp) || !pop(bs)) return false;
+        (void)cp;
+        if (ln > 0 && !checkAddr(bs, ln)) return false;
+        int32_t res = lakatosWsSend(ln > 0 ? (mem + bs) : (const uint8_t*)"", ln);
+        return push((uint32_t)(res >= 0 ? 1 : -1));
+      }
+      case SysWsRecv: {
+        uint32_t maxLen = 0, bufAddr = 0;
+        if (!pop(maxLen) || !pop(bufAddr)) return false;
+        if (maxLen == 0) return push(0);
+        if (!checkAddr(bufAddr, maxLen)) return false;
+        int32_t got = lakatosWsRecv(mem + bufAddr, maxLen);
+        return push((uint32_t)got);
+      }
+      case SysWsClose:
+        lakatosWsClose();
+        return true;
+      case SysPal4Clear: {
+        uint32_t botCol = 0, topCol = 0, topRows = 0, h = 0, w = 0, bufAddr = 0;
+        if (!pop(botCol) || !pop(topCol) || !pop(topRows) ||
+            !pop(h) || !pop(w) || !pop(bufAddr)) {
+          return false;
+        }
+        int iw = (int)(int32_t)w, ih = (int)(int32_t)h;
+        if (iw <= 0 || ih <= 0 || (iw & 1) != 0) return true;
+        if (!checkAddr(bufAddr, (uint32_t)((iw * ih) / 2))) return false;
+        lakatosPal4Clear(mem + bufAddr, iw, ih, (int)(int32_t)topRows,
+                         (uint8_t)topCol, (uint8_t)botCol);
+        return true;
+      }
+      case SysPal4FillTri: {
+        uint32_t col = 0, y2 = 0, x2 = 0, y1 = 0, x1 = 0, y0 = 0, x0 = 0, h = 0, w = 0, bufAddr = 0;
+        if (!pop(col) || !pop(y2) || !pop(x2) || !pop(y1) || !pop(x1) ||
+            !pop(y0) || !pop(x0) || !pop(h) || !pop(w) || !pop(bufAddr)) {
+          return false;
+        }
+        int iw = (int)(int32_t)w, ih = (int)(int32_t)h;
+        if (iw <= 0 || ih <= 0 || (iw & 1) != 0) return true;
+        if (!checkAddr(bufAddr, (uint32_t)((iw * ih) / 2))) return false;
+        lakatosPal4FillTriangle(mem + bufAddr, iw, ih,
+                                (int)(int32_t)x0, (int)(int32_t)y0,
+                                (int)(int32_t)x1, (int)(int32_t)y1,
+                                (int)(int32_t)x2, (int)(int32_t)y2,
+                                (uint8_t)col);
+        return true;
+      }
+      case SysPal4FillCirc: {
+        uint32_t col = 0, r = 0, cy = 0, cx = 0, h = 0, w = 0, bufAddr = 0;
+        if (!pop(col) || !pop(r) || !pop(cy) || !pop(cx) ||
+            !pop(h) || !pop(w) || !pop(bufAddr)) {
+          return false;
+        }
+        int iw = (int)(int32_t)w, ih = (int)(int32_t)h;
+        if (iw <= 0 || ih <= 0 || (iw & 1) != 0) return true;
+        if (!checkAddr(bufAddr, (uint32_t)((iw * ih) / 2))) return false;
+        lakatosPal4FillCircle(mem + bufAddr, iw, ih,
+                              (int)(int32_t)cx, (int)(int32_t)cy,
+                              (int)(int32_t)r, (uint8_t)col);
+        return true;
+      }
+      case SysPal4DrawLine: {
+        uint32_t col = 0, y1 = 0, x1 = 0, y0 = 0, x0 = 0, h = 0, w = 0, bufAddr = 0;
+        if (!pop(col) || !pop(y1) || !pop(x1) || !pop(y0) || !pop(x0) ||
+            !pop(h) || !pop(w) || !pop(bufAddr)) {
+          return false;
+        }
+        int iw = (int)(int32_t)w, ih = (int)(int32_t)h;
+        if (iw <= 0 || ih <= 0 || (iw & 1) != 0) return true;
+        if (!checkAddr(bufAddr, (uint32_t)((iw * ih) / 2))) return false;
+        lakatosPal4DrawLine(mem + bufAddr, iw, ih,
+                            (int)(int32_t)x0, (int)(int32_t)y0,
+                            (int)(int32_t)x1, (int)(int32_t)y1,
+                            (uint8_t)col);
         return true;
       }
       default:
@@ -2285,6 +2376,7 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
 
   if (outExitCode) *outExitCode = vm->exitCode;
 
+  lakatosWsClose();
   lakatosPrefetchFree();
   if (vm->codeBuf) free(vm->codeBuf);
   free(vm->mem);

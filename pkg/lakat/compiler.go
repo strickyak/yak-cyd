@@ -3777,6 +3777,35 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		}
 		c.emitOp("SYSCALL", "SYS_AUDIO_SET_VOICE")
 		return VoidType, nil
+	case "ws_open", "os_ws_open":
+		c.emitOp("SYSCALL", "SYS_WS_OPEN")
+		return ScalarInt, nil
+	case "ws_send", "os_ws_send":
+		if len(argTypes) == 2 && argTypes[0].Kind != "slice" {
+			// 2-arg form: ws_send(bufAddr, len) -> convert to 3-word slice (base, len, len)
+			c.emitOp("DUP")
+			c.emitOp("SLICE_NEW")
+		}
+		c.emitOp("SYSCALL", "SYS_WS_SEND")
+		return ScalarInt, nil
+	case "ws_recv", "os_ws_recv":
+		c.emitOp("SYSCALL", "SYS_WS_RECV")
+		return ScalarInt, nil
+	case "ws_close", "os_ws_close":
+		c.emitOp("SYSCALL", "SYS_WS_CLOSE")
+		return VoidType, nil
+	case "pal4_clear", "tft_pal4_clear":
+		c.emitOp("SYSCALL", "SYS_PAL4_CLEAR")
+		return VoidType, nil
+	case "pal4_fill_triangle", "pal4_fill_tri", "tft_pal4_fill_triangle":
+		c.emitOp("SYSCALL", "SYS_PAL4_FILL_TRI")
+		return VoidType, nil
+	case "pal4_fill_circle", "pal4_fill_circ", "tft_pal4_fill_circle":
+		c.emitOp("SYSCALL", "SYS_PAL4_FILL_CIRC")
+		return VoidType, nil
+	case "pal4_draw_line", "tft_pal4_draw_line":
+		c.emitOp("SYSCALL", "SYS_PAL4_DRAW_LINE")
+		return VoidType, nil
 	}
 
 	return TypeDesc{}, fmt.Errorf("line %d: unknown function or syscall %q", line, name)

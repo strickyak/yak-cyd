@@ -585,6 +585,8 @@ func TestAllEightNewAppsCompileAndRun(t *testing.T) {
 		{"puzzle15", "../../apps/puzzle15/puzzle15.lgolf", "15-Puzzle", true},
 		{"dendrite", "../../apps/dendrite/dendrite.lgolf", "Dendrite DLA", true},
 		{"paint", "../../apps/paint/paint.lgolf", "Paint", false},
+		{"dice-3d", "../../apps/dice-3d/dice-3d.lgolf", "3D Dice Roller", false},
+		{"croquet", "../../apps/croquet/croquet.lgolf", "Croquet 3D World", false},
 	}
 
 	for _, tc := range apps {
@@ -705,5 +707,119 @@ func TestPaintKebabSavePngPal4(t *testing.T) {
 	// Verify canvas pixel on VM screen at (100, 80) was restored with the new palette color (0xFFFF)
 	if vm.Screen[80][100] != 0xFFFF {
 		t.Fatalf("expected restored screen pixel (100,80)=0xFFFF after modal resume, got 0x%04X", vm.Screen[80][100])
+	}
+}
+
+func TestCroquetWebSocketMultiUser(t *testing.T) {
+	receivedPose := make(chan string, 8)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = rw.Flush()
+
+		writeWsText := func(msg string) {
+			data := []byte(msg)
+			_ = rw.WriteByte(0x81)
+			_ = rw.WriteByte(byte(len(data)))
+			_, _ = rw.Write(data)
+			_ = rw.Flush()
+		}
+
+		// Send initial YOU + a remote peer STATE standing near the front door
+		writeWsText("YOU cyd-local\n")
+		writeWsText("STATE cyd-peer -20 -120 0 3141 15\n")
+
+		// Read client frames
+		for {
+			hdr := make([]byte, 2)
+			if _, err := conn.Read(hdr); err != nil {
+				return
+			}
+			opcode := hdr[0] & 0x0F
+			masked := (hdr[1] & 0x80) != 0
+			pLen := int(hdr[1] & 0x7F)
+			var mask [4]byte
+			if masked {
+				if _, err := conn.Read(mask[:]); err != nil {
+					return
+				}
+			}
+			payload := make([]byte, pLen)
+			if pLen > 0 {
+				if _, err := conn.Read(payload); err != nil {
+					return
+				}
+				if masked {
+					for i := 0; i < pLen; i++ {
+						payload[i] ^= mask[i&3]
+					}
+				}
+			}
+			if opcode == 0x8 {
+				return
+			}
+			if opcode == 0x1 {
+				select {
+				case receivedPose <- string(payload):
+				default:
+				}
+			}
+		}
+	}))
+	defer srv.Close()
+
+	srcBytes, err := os.ReadFile("../../apps/croquet/croquet.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(croquet.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("Croquet 3D World", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.ShUrl = srv.URL
+	vm.MaxInstructions = 900000
+
+	// Walk forward several steps ([ ^ WALK ] at x=125, y=220), turn right ([ RIGHT > ] at x=280, y=220), then exit
+	vm.TouchQueue = []TouchEvent{
+		{Touched: true, X: 125, Y: 220},
+		{Touched: true, X: 125, Y: 220},
+		{Touched: true, X: 125, Y: 220},
+		{Touched: true, X: 280, Y: 220},
+		{Touched: false},
+		{Touched: true, X: 5, Y: 5},
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("croquet did not exit cleanly")
+	}
+	if dumpPath := os.Getenv("CROQUET_DUMP_PPM"); dumpPath != "" {
+		_ = vm.SavePPM(dumpPath)
+	}
+
+	select {
+	case msg := <-receivedPose:
+		if !strings.HasPrefix(msg, "POSE ") {
+			t.Fatalf("expected POSE message from croquet app, got %q", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for POSE message over WebSocket")
 	}
 }
