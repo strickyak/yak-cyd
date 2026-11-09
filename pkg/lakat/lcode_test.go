@@ -886,3 +886,65 @@ func TestCompileAndRunBasicApp(t *testing.T) {
 		t.Fatalf("expected POINT 160, 108, 2 to draw red (0xF800) at Screen[132][160], got 0x%04X", got)
 	}
 }
+
+func TestCompileAndRunLogoApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/logo/logo.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(logo.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("logo", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	tmpVfs := t.TempDir()
+
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpVfs
+	vm.MaxInstructions = 2500000
+	vm.TouchQueue = []TouchEvent{
+		{Touched: false},
+		// Click line 2 (CS) at y=40 to open line editor modal
+		{Touched: true, X: 100, Y: 40},
+		{Touched: false, X: 100, Y: 40},
+		// Click [OPEN FULL KEYBOARD (ABC/123)] at (100, 218)
+		{Touched: true, X: 100, Y: 218},
+		{Touched: false, X: 100, Y: 218},
+		// Click SAVE in top bar at (290, 10)
+		{Touched: true, X: 290, Y: 10},
+		{Touched: false, X: 290, Y: 10},
+		// Click RUN in top bar at (65, 10)
+		{Touched: true, X: 65, Y: 10},
+		{Touched: false, X: 65, Y: 10},
+		// Exit via corner tap
+		{Touched: true, X: 5, Y: 5},
+	}
+	vm.KeyboardQueue = []string{
+		"CS PU SETXY -120 0 PD PC 2 DOT PU HOME PD",
+		"CUSTOM.LGO",
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("logo app did not exit cleanly")
+	}
+
+	// Verify /sd/logo/CUSTOM.LGO was written with the edited line
+	savedBytes, err := os.ReadFile(filepath.Join(tmpVfs, "sd/logo/CUSTOM.LGO"))
+	if err != nil {
+		t.Fatalf("expected /sd/logo/CUSTOM.LGO to exist: %v", err)
+	}
+	if !strings.Contains(string(savedBytes), "CS PU SETXY -120 0 PD PC 2 DOT") {
+		t.Fatalf("expected edited line in /sd/logo/CUSTOM.LGO, got:\n%s", string(savedBytes))
+	}
+
+	// Verify DOT at (-120, 0) with PC 2 (Red = 0xF800) drew at Screen[24+108][160-120] = Screen[132][40]
+	if got := vm.Screen[132][40]; got != 0xF800 {
+		t.Fatalf("expected PC 2 DOT at (-120, 0) to draw red (0xF800) at Screen[132][40], got 0x%04X", got)
+	}
+}

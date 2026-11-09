@@ -1,0 +1,2266 @@
+package main
+
+import "wedge"
+
+// ============================================================================
+// Screen & UI Layout Constants (Top Bar Only: RUN, STOP, EDIT, LOAD, SAVE)
+// ============================================================================
+const TOP_H = 24
+const VIEW_Y = 24
+const VIEW_W = 320
+const VIEW_H = 216
+const CENTER_X = 160
+const CENTER_Y = 108
+
+const MODE_EDIT = 0
+const MODE_GFX = 1
+
+const MAX_LINES = 80
+const LINE_STRIDE = 64
+const MAX_LINE_LEN = 62
+const VISIBLE_ROWS = 16
+const ROW_H = 12
+const FS_ENTRY_STRIDE = 88
+const MAX_FS_ENTRIES = 16
+
+const UI_BG = 0x0841       // Very dark slate editor background
+const UI_ROW_ALT = 0x1082  // Alternating row background
+const UI_ROW_SEL = 0x1926  // Selected row highlight
+const UI_TOP_BG = 0x18C3   // Top bar background
+const UI_MODAL_BG = 0x10A2 // Modal background
+const UI_BORDER = 0x6B6D   // Button border grey
+const UI_BTN_RUN = 0x03E0  // Dark green
+const UI_BTN_STOP = 0x6000 // Dark red
+const UI_BTN_EDIT = 0x2104 // Dark slate
+const UI_BTN_LOAD = 0x0290 // Dark teal/blue
+const UI_BTN_SAVE = 0x380C // Dark purple
+
+// ============================================================================
+// P-Code / Token Types for Logo Compiler & Interpreter
+// ============================================================================
+const MAX_TOKENS = 768
+const MAX_IDENT_POOL = 2048
+
+const TOK_EOF = 0
+const TOK_NUM = 1     // float32 literal in tokNum[i]
+const TOK_WORD = 2    // uppercase identifier in identPool at tokVal[i]
+const TOK_VAR = 3     // :VAR reference in identPool at tokVal[i]
+const TOK_QUOTE = 4   // "VAR quoted word in identPool at tokVal[i]
+const TOK_LBRACK = 5  // '[' with matching ']' index in tokVal[i]
+const TOK_RBRACK = 6  // ']' with matching '[' index in tokVal[i]
+const TOK_OP = 7      // operator char ('+', '-', '*', '/', '%', '=', '<', '>', '!', 'L'<=, 'G'>=)
+const TOK_LPAREN = 8  // '('
+const TOK_RPAREN = 9  // ')'
+
+// Built-in Command IDs stored in tokSub[i] when TOK_WORD is a known keyword
+const CMD_USER = 0
+const CMD_FD = 1
+const CMD_BK = 2
+const CMD_RT = 3
+const CMD_LT = 4
+const CMD_PU = 5
+const CMD_PD = 6
+const CMD_CS = 7
+const CMD_CLEAN = 8
+const CMD_HOME = 9
+const CMD_SETXY = 10
+const CMD_SETX = 11
+const CMD_SETY = 12
+const CMD_SETH = 13
+const CMD_PC = 14
+const CMD_BG = 15
+const CMD_REPEAT = 16
+const CMD_IF = 17
+const CMD_IFELSE = 18
+const CMD_TO = 19
+const CMD_END = 20
+const CMD_STOP = 21
+const CMD_MAKE = 22
+const CMD_DOT = 23
+const CMD_CIRCLE = 24
+const CMD_FCIRCLE = 25
+const CMD_HT = 26
+const CMD_ST = 27
+const CMD_STAMP = 28
+const CMD_WAIT = 29
+
+// Built-in Reporter / Function IDs
+const FN_NONE = 0
+const FN_SIN = 1
+const FN_COS = 2
+const FN_SQRT = 3
+const FN_ABS = 4
+const FN_INT = 5
+const FN_RANDOM = 6
+const FN_XCOR = 7
+const FN_YCOR = 8
+const FN_HEADING = 9
+const FN_REPCOUNT = 10
+
+// ============================================================================
+// Program Storage & Editor State
+// ============================================================================
+var lineCount int = 0
+var lineBody [5120]byte // 80 * 64 bytes
+
+var uiMode int = MODE_EDIT
+var isRunning int = 0
+var selectedLine int = 0
+var scrollTop int = 0
+
+var statusMsg [64]byte
+var statusErr int = 0
+
+var fileNameBuf [32]byte
+var fullPathBuf [64]byte
+var editWorkBuf [64]byte
+var rowDispBuf [64]byte
+var numConvBuf [24]byte
+var wordScratch [32]byte
+
+var fileIoBuf [4096]byte
+var fsEntries [1408]byte // 16 * 88 bytes
+
+// ============================================================================
+// Compiled Logo Token Stream & Procedure Table
+// ============================================================================
+var tokCount int = 0
+var tokKind [768]byte
+var tokSub [768]byte
+var tokVal [768]int
+var tokNum [768]float32
+
+var identPool [2048]byte
+var identPoolUsed int = 0
+
+// User Procedures: TO name :p1 :p2 ... END
+const MAX_PROCS = 24
+const MAX_PROC_PARAMS = 4
+var procCount int = 0
+var procNameId [24]int
+var procParamCount [24]int
+var procParamId [96]int // 24 * 4
+var procBodyTok [24]int // first token inside body
+var procEndTok [24]int  // token of END
+
+// Global Variables (named by ident ID)
+const MAX_VARS = 32
+var varCount int = 0
+var varNameId [32]int
+var varVal [32]float32
+
+// Execution Frame Stack (unified for REPEAT blocks, IF blocks, and Procedure Calls)
+const MAX_FRAMES = 48
+const FRAME_REPEAT = 1
+const FRAME_IF = 2
+const FRAME_PROC = 3
+
+var frameDepth int = 0
+var frameKind [48]int
+var frameRetTok [48]int     // token to jump to when frame finishes
+var frameLoopStart [48]int  // first token inside REPEAT [...]
+var frameLoopEnd [48]int    // RBRACK token of REPEAT [...]
+var frameRepLeft [48]int    // remaining iterations for REPEAT
+var frameRepIdx [48]int     // 1-based REPCOUNT for REPEAT
+var frameLocalCount [48]int // number of local params for FRAME_PROC
+var frameLocalId [192]int   // 48 * 4 parameter ident IDs
+var frameLocalVal [192]float32
+var procArgVals [4]float32
+
+var pcTok int = 0
+var exprTok int = 0
+var waitUntilMs int = 0
+
+// ============================================================================
+// Turtle Graphics State
+// ============================================================================
+var turtleX float32 = 0.0
+var turtleY float32 = 0.0
+var turtleHeading float32 = 0.0 // degrees: 0 = North (+Y), 90 = East (+X)
+var penDown int = 1
+var penColor int = 1  // 1 = White
+var bgColor int = 0   // 0 = Black
+var turtleVisible int = 1
+
+// ============================================================================
+// 16-Color Palette: 0 = Black, 1 = White, 2..15 = Reasonable Vivid Colors
+// ============================================================================
+func logoColor565(idx int) int {
+	c := idx & 15
+	switch c {
+	case 0:
+		return 0x0000 // 0: Black
+	case 1:
+		return 0xFFFF // 1: White
+	case 2:
+		return 0xF800 // 2: Red
+	case 3:
+		return 0x07E0 // 3: Green
+	case 4:
+		return 0x001F // 4: Blue
+	case 5:
+		return 0x07FF // 5: Cyan
+	case 6:
+		return 0xF81F // 6: Magenta
+	case 7:
+		return 0xFFE0 // 7: Yellow
+	case 8:
+		return 0xFD20 // 8: Orange
+	case 9:
+		return 0x8200 // 9: Brown
+	case 10:
+		return 0xFE19 // 10: Pink
+	case 11:
+		return 0x4208 // 11: Dark Grey
+	case 12:
+		return 0xC618 // 12: Light Grey
+	case 13:
+		return 0x87E0 // 13: Lime
+	case 14:
+		return 0x5DFF // 14: Sky Blue
+	default:
+		return 0x981F // 15: Purple
+	}
+}
+
+// ============================================================================
+// Viewport-Clipped Graphics Primitives (Viewport: x in [0..319], y in [0..215])
+// ============================================================================
+func gfxClear(colIdx int) {
+	bgColor = colIdx & 15
+	tft_fill_rect(0, VIEW_Y, VIEW_W, VIEW_H, logoColor565(bgColor))
+}
+
+func gfxPoint(x int, y int, colIdx int) {
+	if x >= 0 && x < VIEW_W && y >= 0 && y < VIEW_H {
+		tft_fill_rect(x, VIEW_Y+y, 1, 1, logoColor565(colIdx))
+	}
+}
+
+func clipOutcode(x int, y int) int {
+	code := 0
+	if x < 0 {
+		code = code | 1
+	} else if x >= VIEW_W {
+		code = code | 2
+	}
+	if y < 0 {
+		code = code | 4
+	} else if y >= VIEW_H {
+		code = code | 8
+	}
+	return code
+}
+
+func gfxDrawLineClipped(x0 int, y0 int, x1 int, y1 int, colIdx int) {
+	c0 := clipOutcode(x0, y0)
+	c1 := clipOutcode(x1, y1)
+	for {
+		if (c0 | c1) == 0 {
+			tft_draw_line(x0, VIEW_Y+y0, x1, VIEW_Y+y1, logoColor565(colIdx))
+			return
+		}
+		if (c0 & c1) != 0 {
+			return
+		}
+		co := c0
+		if co == 0 {
+			co = c1
+		}
+		var x int
+		var y int
+		dx := x1 - x0
+		dy := y1 - y0
+		if (co & 8) != 0 {
+			y = VIEW_H - 1
+			if dy != 0 {
+				x = x0 + dx*(y-y0)/dy
+			} else {
+				x = x0
+			}
+		} else if (co & 4) != 0 {
+			y = 0
+			if dy != 0 {
+				x = x0 + dx*(y-y0)/dy
+			} else {
+				x = x0
+			}
+		} else if (co & 2) != 0 {
+			x = VIEW_W - 1
+			if dx != 0 {
+				y = y0 + dy*(x-x0)/dx
+			} else {
+				y = y0
+			}
+		} else {
+			x = 0
+			if dx != 0 {
+				y = y0 + dy*(x-x0)/dx
+			} else {
+				y = y0
+			}
+		}
+		if co == c0 {
+			x0 = x
+			y0 = y
+			c0 = clipOutcode(x0, y0)
+		} else {
+			x1 = x
+			y1 = y
+			c1 = clipOutcode(x1, y1)
+		}
+	}
+}
+
+func turtleScreenX(tx float32) int {
+	return CENTER_X + int(round(tx))
+}
+
+func turtleScreenY(ty float32) int {
+	return CENTER_Y - int(round(ty))
+}
+
+func turtleMoveTo(nx float32, ny float32) {
+	if penDown != 0 {
+		x0 := turtleScreenX(turtleX)
+		y0 := turtleScreenY(turtleY)
+		x1 := turtleScreenX(nx)
+		y1 := turtleScreenY(ny)
+		gfxDrawLineClipped(x0, y0, x1, y1, penColor)
+	}
+	turtleX = nx
+	turtleY = ny
+}
+
+func turtleForward(dist float32) {
+	rad := turtleHeading * DEG_TO_RAD
+	nx := turtleX + dist*sin(rad)
+	ny := turtleY + dist*cos(rad)
+	turtleMoveTo(nx, ny)
+}
+
+func turtleReset() {
+	turtleX = 0.0
+	turtleY = 0.0
+	turtleHeading = 0.0
+	penDown = 1
+	penColor = 1
+	turtleVisible = 1
+}
+
+// Draw oriented turtle triangle at current (turtleX, turtleY, turtleHeading)
+func drawTurtleCursor() {
+	if turtleVisible == 0 {
+		return
+	}
+	rad := turtleHeading * DEG_TO_RAD
+	// Tip 9px ahead, back corners 6px behind at +/- 135 deg
+	tipX := turtleScreenX(turtleX + 9.0*sin(rad))
+	tipY := turtleScreenY(turtleY + 9.0*cos(rad))
+
+	leftRad := (turtleHeading - 140.0) * DEG_TO_RAD
+	lx := turtleScreenX(turtleX + 7.0*sin(leftRad))
+	ly := turtleScreenY(turtleY + 7.0*cos(leftRad))
+
+	rightRad := (turtleHeading + 140.0) * DEG_TO_RAD
+	rx := turtleScreenX(turtleX + 7.0*sin(rightRad))
+	ry := turtleScreenY(turtleY + 7.0*cos(rightRad))
+
+	gfxDrawLineClipped(lx, ly, tipX, tipY, 3) // Green turtle outline
+	gfxDrawLineClipped(tipX, tipY, rx, ry, 3)
+	gfxDrawLineClipped(rx, ry, lx, ly, 3)
+}
+
+// ============================================================================
+// Low-Level C-String & Buffer Helpers
+// ============================================================================
+func cstrLen(buf *byte, maxLen int) int {
+	var i int
+	for i = 0; i < maxLen; i = i + 1 {
+		if peek1(int(buf)+i) == 0 {
+			return i
+		}
+	}
+	return maxLen
+}
+
+func copyCStr(dst *byte, src *byte, maxLen int) {
+	copyCStrAddr(int(dst), int(src), maxLen)
+}
+
+func copyCStrAddr(dstAddr int, srcAddr int, maxLen int) {
+	var i int
+	for i = 0; i < maxLen-1; i = i + 1 {
+		ch := peek1(srcAddr + i)
+		poke1(dstAddr+i, ch)
+		if ch == 0 {
+			return
+		}
+	}
+	poke1(dstAddr+maxLen-1, 0)
+}
+
+func setCStrLiteral(dst *byte, s string, maxLen int) {
+	n := len(s)
+	if n > maxLen-1 {
+		n = maxLen - 1
+	}
+	if n > 0 {
+		memcpy(int(dst), cstr(s), n)
+	}
+	poke1(int(dst)+n, 0)
+}
+
+func appendCStr(dst *byte, pos int, src *byte, maxLen int) int {
+	var i int
+	for i = 0; pos < maxLen-1; i = i + 1 {
+		ch := peek1(int(src) + i)
+		if ch == 0 {
+			break
+		}
+		poke1(int(dst)+pos, ch)
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendLiteral(dst *byte, pos int, s string, maxLen int) int {
+	n := len(s)
+	var i int
+	srcAddr := cstr(s)
+	for i = 0; i < n && pos < maxLen-1; i = i + 1 {
+		poke1(int(dst)+pos, peek1(srcAddr+i))
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendInt(dst *byte, pos int, val int, maxLen int) int {
+	s := int_to_str(val)
+	return appendLiteral(dst, pos, s, maxLen)
+}
+
+func toUpperChar(ch int) int {
+	if ch >= 'a' && ch <= 'z' {
+		return ch - 32
+	}
+	return ch
+}
+
+func isSpaceChar(ch int) int {
+	if ch == ' ' || ch == '\t' || ch == '\r' {
+		return 1
+	}
+	return 0
+}
+
+func isDigitChar(ch int) int {
+	if ch >= '0' && ch <= '9' {
+		return 1
+	}
+	return 0
+}
+
+func isWordChar(ch int) int {
+	u := toUpperChar(ch)
+	if (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '.' {
+		return 1
+	}
+	return 0
+}
+
+func setStatus(msg string, isError int) {
+	setCStrLiteral(&statusMsg[0], msg, 64)
+	statusErr = isError
+}
+
+// ============================================================================
+// Line Editor Operations (Insert, Update, Delete, Parse/Serialize)
+// ============================================================================
+func clearProgramLines() {
+	lineCount = 0
+	selectedLine = 0
+	scrollTop = 0
+}
+
+func appendProgLineAddr(bodyAddr int) {
+	if lineCount >= MAX_LINES {
+		return
+	}
+	// Trim leading spaces
+	p := bodyAddr
+	for peek1(p) == ' ' || peek1(p) == '\t' {
+		p = p + 1
+	}
+	if peek1(p) == 0 {
+		return
+	}
+	copyCStrAddr(int(&lineBody[0])+lineCount*LINE_STRIDE, p, LINE_STRIDE)
+	lineCount = lineCount + 1
+}
+
+func addProgLine(s string) {
+	setCStrLiteral(&editWorkBuf[0], s, LINE_STRIDE)
+	appendProgLineAddr(int(&editWorkBuf[0]))
+}
+
+func deleteLineAt(idx int) {
+	if idx < 0 || idx >= lineCount {
+		return
+	}
+	var i int
+	for i = idx; i < lineCount-1; i = i + 1 {
+		copyCStrAddr(int(&lineBody[0])+i*LINE_STRIDE, int(&lineBody[0])+(i+1)*LINE_STRIDE, LINE_STRIDE)
+	}
+	lineCount = lineCount - 1
+	if selectedLine >= lineCount && selectedLine > 0 {
+		selectedLine = lineCount - 1
+	}
+}
+
+func insertBlankLineAt(idx int) {
+	if lineCount >= MAX_LINES {
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > lineCount {
+		idx = lineCount
+	}
+	var i int
+	for i = lineCount; i > idx; i = i - 1 {
+		copyCStrAddr(int(&lineBody[0])+i*LINE_STRIDE, int(&lineBody[0])+(i-1)*LINE_STRIDE, LINE_STRIDE)
+	}
+	setCStrLiteral(&lineBody[idx*LINE_STRIDE], "FD 50", LINE_STRIDE)
+	lineCount = lineCount + 1
+	selectedLine = idx
+}
+
+func applyEditedLine(lineIdx int, buf *byte) {
+	p := int(buf)
+	for peek1(p) == ' ' || peek1(p) == '\t' {
+		p = p + 1
+	}
+	if peek1(p) == 0 {
+		// Empty line -> delete if existing
+		if lineIdx >= 0 && lineIdx < lineCount {
+			deleteLineAt(lineIdx)
+			setStatus("Deleted line", 0)
+		}
+		return
+	}
+	if lineIdx >= 0 && lineIdx < lineCount {
+		copyCStrAddr(int(&lineBody[0])+lineIdx*LINE_STRIDE, p, LINE_STRIDE)
+		selectedLine = lineIdx
+	} else if lineCount < MAX_LINES {
+		copyCStrAddr(int(&lineBody[0])+lineCount*LINE_STRIDE, p, LINE_STRIDE)
+		selectedLine = lineCount
+		lineCount = lineCount + 1
+	}
+	if selectedLine < scrollTop {
+		scrollTop = selectedLine
+	} else if selectedLine >= scrollTop+VISIBLE_ROWS {
+		scrollTop = selectedLine - VISIBLE_ROWS + 1
+	}
+	setStatus("Line updated", 0)
+}
+
+func serializeProgramToText(dst *byte, maxBytes int) int {
+	pos := 0
+	var i int
+	for i = 0; i < lineCount; i = i + 1 {
+		pos = appendCStr(dst, pos, &lineBody[i*LINE_STRIDE], maxBytes)
+		if pos < maxBytes-1 {
+			poke1(int(dst)+pos, '\n')
+			pos = pos + 1
+			poke1(int(dst)+pos, 0)
+		}
+	}
+	return pos
+}
+
+func parseProgramFromText(src *byte, length int) {
+	clearProgramLines()
+	pos := 0
+	for pos < length && lineCount < MAX_LINES {
+		for pos < length {
+			ch := peek1(int(src) + pos)
+			if ch != '\r' && ch != '\n' {
+				break
+			}
+			pos = pos + 1
+		}
+		if pos >= length {
+			break
+		}
+		w := 0
+		for pos < length {
+			ch := peek1(int(src) + pos)
+			if ch == '\r' || ch == '\n' {
+				break
+			}
+			if w < MAX_LINE_LEN {
+				editWorkBuf[w] = byte(ch)
+				w = w + 1
+			}
+			pos = pos + 1
+		}
+		editWorkBuf[w] = 0
+		appendProgLineAddr(int(&editWorkBuf[0]))
+	}
+}
+
+// ============================================================================
+// Built-In Demo Programs & SD Card Persistence (/sd/logo/FILENAME)
+// ============================================================================
+func loadBuiltInStarProgram() {
+	clearProgramLines()
+	setCStrLiteral(&fileNameBuf[0], "STAR.LGO", 32)
+	addProgLine("; RAINBOW TURTLE STARBURST")
+	addProgLine("CS")
+	addProgLine("TO STAR :SZ :C")
+	addProgLine("  PC :C")
+	addProgLine("  REPEAT 5 [ FD :SZ RT 144 ]")
+	addProgLine("END")
+	addProgLine("REPEAT 18 [")
+	addProgLine("  STAR 92 2 + REPCOUNT % 14")
+	addProgLine("  PU FD 12 PD RT 20")
+	addProgLine("]")
+	addProgLine("PU HOME PD")
+}
+
+func loadBuiltInFlowerProgram() {
+	clearProgramLines()
+	setCStrLiteral(&fileNameBuf[0], "FLOWER.LGO", 32)
+	addProgLine("; GEOMETRIC TURTLE FLOWER")
+	addProgLine("CS")
+	addProgLine("TO POLY :SIDES :LEN :ANG")
+	addProgLine("  REPEAT :SIDES [ FD :LEN RT :ANG ]")
+	addProgLine("END")
+	addProgLine("REPEAT 24 [")
+	addProgLine("  PC 2 + REPCOUNT % 14")
+	addProgLine("  POLY 6 36 60")
+	addProgLine("  RT 15")
+	addProgLine("]")
+	addProgLine("PC 7 FCIRCLE 8")
+}
+
+func loadBuiltInTreeProgram() {
+	clearProgramLines()
+	setCStrLiteral(&fileNameBuf[0], "TREE.LGO", 32)
+	addProgLine("; RECURSIVE FRACTAL TREE")
+	addProgLine("CS")
+	addProgLine("TO TREE :LEN")
+	addProgLine("  IF :LEN < 6 [ STOP ]")
+	addProgLine("  PC 3")
+	addProgLine("  IF :LEN > 18 [ PC 9 ]")
+	addProgLine("  FD :LEN")
+	addProgLine("  LT 28 TREE :LEN * 0.72")
+	addProgLine("  RT 56 TREE :LEN * 0.72")
+	addProgLine("  LT 28")
+	addProgLine("  PU BK :LEN PD")
+	addProgLine("END")
+	addProgLine("PU SETXY 0 -90 PD")
+	addProgLine("TREE 44")
+}
+
+func buildSdLogoPath(fname *byte) int {
+	pos := appendLiteral(&fullPathBuf[0], 0, "/sd/logo/", 64)
+	if peek1(int(fname)) == '/' {
+		copyCStr(&fullPathBuf[0], fname, 64)
+		return cstrLen(&fullPathBuf[0], 64)
+	}
+	pos = appendCStr(&fullPathBuf[0], pos, fname, 64)
+	return pos
+}
+
+func saveProgramToSd(fname *byte) int {
+	fs_mkdir("/sd/logo", 1)
+	pLen := buildSdLogoPath(fname)
+	bytesLen := serializeProgramToText(&fileIoBuf[0], 4096)
+	ok := fs_write(fullPathBuf[0:pLen], &fileIoBuf[0], bytesLen)
+	if ok != 0 {
+		pos := appendLiteral(&statusMsg[0], 0, "Saved ", 64)
+		pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+		statusErr = 0
+		return 1
+	}
+	setStatus("Error saving to /sd/logo/", 1)
+	return 0
+}
+
+func loadProgramFromSd(fname *byte) int {
+	pLen := buildSdLogoPath(fname)
+	got := fs_read(fullPathBuf[0:pLen], 0, &fileIoBuf[0], 4095)
+	if got <= 0 {
+		pos := appendLiteral(&statusMsg[0], 0, "Not found: ", 64)
+		pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+		statusErr = 1
+		return 0
+	}
+	fileIoBuf[got] = 0
+	parseProgramFromText(&fileIoBuf[0], got)
+	pos := appendLiteral(&statusMsg[0], 0, "Loaded ", 64)
+	pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+	statusErr = 0
+	return 1
+}
+
+func seedSdLogoDemos() {
+	fs_mkdir("/sd/logo", 1)
+	n := fs_ls("/sd/logo", &fsEntries[0], MAX_FS_ENTRIES)
+	if n <= 0 {
+		loadBuiltInFlowerProgram()
+		saveProgramToSd(&fileNameBuf[0])
+		loadBuiltInTreeProgram()
+		saveProgramToSd(&fileNameBuf[0])
+		loadBuiltInStarProgram()
+		saveProgramToSd(&fileNameBuf[0])
+	} else {
+		loadBuiltInStarProgram()
+	}
+}
+
+// ============================================================================
+// UI Drawing: Top Bar (EXIT, RUN, STOP, EDIT, LOAD, SAVE) & Editor Listing
+// ============================================================================
+func drawButton(x int, y int, w int, h int, bg int, border int, fg int, label string) {
+	tft_fill_round_rect(x, y, w, h, 3, bg)
+	tft_draw_round_rect(x, y, w, h, 3, border)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(fg, bg)
+	tft_draw_string(label, x+w/2, y+h/2, 1)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawTopBar() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_H, UI_TOP_BG)
+	tft_draw_fast_hline(0, TOP_H-1, SCREEN_W, UI_BORDER)
+
+	// Top-left EXIT + 12x12 X mark
+	drawButton(14, 2, 34, 19, MAROON, RED, WHITE, "EXIT")
+	DrawExitWedge()
+
+	// [RUN] (x = 50..101)
+	runBg := UI_BTN_RUN
+	if isRunning != 0 {
+		runBg = 0x05E0
+	}
+	drawButton(50, 2, 51, 19, runBg, GREEN, WHITE, "RUN")
+
+	// [STOP] (x = 104..155)
+	stopBg := UI_BTN_STOP
+	stopBorder := RED
+	if isRunning != 0 {
+		stopBg = RED
+		stopBorder = YELLOW
+	}
+	drawButton(104, 2, 51, 19, stopBg, stopBorder, WHITE, "STOP")
+
+	// [EDIT] (x = 158..209)
+	editBg := UI_BTN_EDIT
+	if uiMode == MODE_EDIT {
+		editBg = 0x4228
+	}
+	drawButton(158, 2, 51, 19, editBg, YELLOW, YELLOW, "EDIT")
+
+	// [LOAD] (x = 212..263)
+	drawButton(212, 2, 51, 19, UI_BTN_LOAD, CYAN, CYAN, "LOAD")
+
+	// [SAVE] (x = 266..317)
+	drawButton(266, 2, 51, 19, UI_BTN_SAVE, MAGENTA, WHITE, "SAVE")
+}
+
+func drawStatusStrip() {
+	tft_fill_rect(0, 224, SCREEN_W, 16, 0x1082)
+	tft_draw_fast_hline(0, 224, SCREEN_W, 0x3186)
+	fg := CYAN
+	if statusErr != 0 {
+		fg = YELLOW
+	}
+	tft_set_text_color(fg, 0x1082)
+	tft_draw_cstr(&statusMsg[0], 4, 228, 1)
+}
+
+func drawEditorScreen() {
+	drawTopBar()
+	tft_fill_rect(0, VIEW_Y, SCREEN_W, VIEW_H-16, UI_BG)
+
+	var r int
+	for r = 0; r < VISIBLE_ROWS; r = r + 1 {
+		idx := scrollTop + r
+		ry := VIEW_Y + 3 + r*ROW_H
+		if idx > lineCount {
+			break
+		}
+		rowBg := UI_BG
+		if (r & 1) == 1 {
+			rowBg = UI_ROW_ALT
+		}
+		sel := 0
+		if idx == selectedLine {
+			rowBg = UI_ROW_SEL
+			sel = 1
+		}
+		tft_fill_rect(2, ry-1, 300, ROW_H, rowBg)
+
+		if idx < lineCount {
+			numFg := YELLOW
+			if sel != 0 {
+				numFg = CYAN
+			}
+			tft_set_text_color(numFg, rowBg)
+			numW := tft_draw_int(idx+1, 5, ry+1, 1)
+
+			bodyFg := LIGHTGREY
+			if sel != 0 {
+				bodyFg = WHITE
+			}
+			copyCStr(&rowDispBuf[0], &lineBody[idx*LINE_STRIDE], 44)
+			tft_set_text_color(bodyFg, rowBg)
+			tft_draw_cstr(&rowDispBuf[0], 10+numW, ry+1, 1)
+		} else {
+			tft_set_text_color(GREENYELLOW, rowBg)
+			numW := tft_draw_int(lineCount+1, 5, ry+1, 1)
+			tft_draw_string("[+ Tap to add Logo line]", 12+numW, ry+1, 1)
+		}
+	}
+
+	// Right-edge scroll gutter (x = 304..319, y = 26..223)
+	tft_fill_rect(304, 26, 15, 198, 0x1082)
+	tft_draw_rect(304, 26, 15, 198, UI_BORDER)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(LIGHTGREY, 0x1082)
+	tft_draw_string("^", 311, 40, 1)
+	tft_draw_string("v", 311, 210, 1)
+	tft_set_text_datum(TL_DATUM)
+
+	drawStatusStrip()
+}
+
+// ============================================================================
+// Quick-Token + Stylus Keyboard Line Editor Modal (like BASIC & SmallerTalk)
+// ============================================================================
+func getQuickLogoToken(idx int) string {
+	switch idx {
+	case 0:
+		return "FD "
+	case 1:
+		return "BK "
+	case 2:
+		return "RT "
+	case 3:
+		return "LT "
+	case 4:
+		return "REPEAT "
+	case 5:
+		return "[ "
+	case 6:
+		return " ]"
+	case 7:
+		return "PC "
+	case 8:
+		return "PU "
+	case 9:
+		return "PD "
+	case 10:
+		return "CS "
+	case 11:
+		return "HOME "
+	case 12:
+		return "TO "
+	case 13:
+		return "END"
+	case 14:
+		return "IF "
+	default:
+		return "MAKE \""
+	}
+}
+
+func drawLineEditorModal() {
+	tft_fill_screen(UI_MODAL_BG)
+
+	// Top bar
+	tft_fill_rect(0, 0, 320, 24, NAVY)
+	drawButton(2, 2, 56, 20, 0x4800, RED, WHITE, "CANCEL")
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, NAVY)
+	tft_draw_string("EDIT LOGO LINE", 154, 12, 2)
+	tft_set_text_datum(TL_DATUM)
+	drawButton(250, 2, 68, 20, DARKGREEN, GREEN, WHITE, "SAVE/OK")
+
+	// Current line text box (y = 27..59)
+	tft_fill_round_rect(4, 27, 232, 32, 4, BLACK)
+	tft_draw_round_rect(4, 27, 232, 32, 4, CYAN)
+
+	ln := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+	startOff := 0
+	if ln > 35 {
+		startOff = ln - 35
+	}
+	copyCStr(&rowDispBuf[0], &editWorkBuf[startOff], 38)
+	dLen := cstrLen(&rowDispBuf[0], 38)
+	rowDispBuf[dLen] = '_'
+	rowDispBuf[dLen+1] = 0
+	tft_set_text_color(WHITE, BLACK)
+	tft_draw_cstr(&rowDispBuf[0], 10, 39, 1)
+
+	drawButton(240, 27, 38, 32, 0x4800, RED, WHITE, "DEL")
+	drawButton(280, 27, 36, 32, 0x3186, LIGHTGREY, YELLOW, "CLR")
+
+	// 4x4 Quick Logo Token Grid (y = 64..192)
+	var r int
+	var c int
+	for r = 0; r < 4; r = r + 1 {
+		by := 64 + r*32
+		for c = 0; c < 4; c = c + 1 {
+			bx := 4 + c*78
+			tok := getQuickLogoToken(r*4 + c)
+			drawButton(bx, by, 75, 29, 0x18E3, CYAN, WHITE, tok)
+		}
+	}
+
+	// Bottom controls inside modal: Open Full Stylus Keyboard or Save Line
+	drawButton(4, 198, 210, 36, 0x2945, YELLOW, YELLOW, "OPEN FULL KEYBOARD (ABC/123)")
+	drawButton(218, 198, 98, 36, DARKGREEN, GREEN, WHITE, "SAVE LINE")
+}
+
+func runLineEditorModal(lineIdx int) {
+	if lineIdx >= 0 && lineIdx < lineCount {
+		copyCStr(&editWorkBuf[0], &lineBody[lineIdx*LINE_STRIDE], MAX_LINE_LEN)
+	} else {
+		editWorkBuf[0] = 0
+	}
+	drawLineEditorModal()
+
+	for {
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if ty < 25 {
+				if tx <= 60 {
+					return // Cancelled
+				}
+				if tx >= 248 {
+					applyEditedLine(lineIdx, &editWorkBuf[0])
+					return
+				}
+			} else if ty >= 27 && ty <= 60 {
+				if tx >= 238 && tx < 279 {
+					l := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+					if l > 0 {
+						editWorkBuf[l-1] = 0
+						drawLineEditorModal()
+					}
+				} else if tx >= 279 {
+					editWorkBuf[0] = 0
+					drawLineEditorModal()
+				} else {
+					kr := os_prompt_keyboard("EDIT LOGO LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					if kr == 1 {
+						applyEditedLine(lineIdx, &editWorkBuf[0])
+						return
+					}
+					drawLineEditorModal()
+				}
+			} else if ty >= 64 && ty < 192 {
+				r := (ty - 64) / 32
+				c := (tx - 4) / 78
+				if r >= 0 && r < 4 && c >= 0 && c < 4 {
+					tok := getQuickLogoToken(r*4 + c)
+					curLen := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+					appendLiteral(&editWorkBuf[0], curLen, tok, MAX_LINE_LEN)
+					drawLineEditorModal()
+				}
+			} else if ty >= 196 {
+				if tx < 216 {
+					kr := os_prompt_keyboard("EDIT LOGO LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					if kr == 1 {
+						applyEditedLine(lineIdx, &editWorkBuf[0])
+						return
+					}
+					drawLineEditorModal()
+				} else {
+					applyEditedLine(lineIdx, &editWorkBuf[0])
+					return
+				}
+			}
+		}
+		os_delay_ms(15)
+	}
+}
+
+// ============================================================================
+// LOAD & SAVE Dialogs (/sd/logo/FILENAME)
+// ============================================================================
+func runSaveDialog() {
+	kr := os_prompt_keyboard("SAVE /sd/logo/FILENAME", &fileNameBuf[0], 31, 0)
+	if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
+		saveProgramToSd(&fileNameBuf[0])
+	}
+}
+
+func runLoadDialog() {
+	fs_mkdir("/sd/logo", 1)
+	entryCount := fs_ls("/sd/logo", &fsEntries[0], MAX_FS_ENTRIES)
+	if entryCount < 0 {
+		entryCount = 0
+	}
+
+	for {
+		tft_fill_screen(UI_MODAL_BG)
+		tft_fill_rect(0, 0, 320, 24, NAVY)
+		drawButton(2, 2, 56, 20, 0x4800, RED, WHITE, "CANCEL")
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(CYAN, NAVY)
+		tft_draw_string("LOAD /sd/logo/", 145, 12, 2)
+		tft_set_text_datum(TL_DATUM)
+		drawButton(236, 2, 82, 20, 0x3800, YELLOW, YELLOW, "NEW / CLR")
+
+		drawButton(6, 28, 308, 24, 0x2945, YELLOW, YELLOW, "KEYBOARD: TYPE /sd/logo/FILENAME")
+
+		tft_set_text_color(LIGHTGREY, UI_MODAL_BG)
+		tft_draw_string("Files in /sd/logo/ (tap to load):", 8, 56, 1)
+
+		var i int
+		shown := 0
+		for i = 0; i < entryCount && shown < 8; i = i + 1 {
+			entAddr := int(&fsEntries[0]) + i*FS_ENTRY_STRIDE
+			isDir := peek1(entAddr + 80)
+			if isDir == 0 {
+				col := shown % 2
+				row := shown / 2
+				bx := 6 + col*156
+				by := 68 + row*30
+				tft_fill_round_rect(bx, by, 150, 26, 3, 0x18E3)
+				tft_draw_round_rect(bx, by, 150, 26, 3, CYAN)
+				tft_set_text_color(WHITE, 0x18E3)
+				tft_draw_cstr(&fsEntries[i*FS_ENTRY_STRIDE], bx+8, by+9, 1)
+				shown = shown + 1
+			}
+		}
+
+		tft_set_text_color(LIGHTGREY, UI_MODAL_BG)
+		tft_draw_string("Built-in Demos:", 8, 192, 1)
+		drawButton(6, 204, 100, 30, 0x18E3, GREEN, WHITE, "STAR.LGO")
+		drawButton(110, 204, 100, 30, 0x18E3, CYAN, WHITE, "FLOWER.LGO")
+		drawButton(214, 204, 100, 30, 0x18E3, MAGENTA, WHITE, "TREE.LGO")
+
+		var clicked bool
+		var tx int
+		var ty int
+		for {
+			clicked, tx, ty = os_read_click()
+			if clicked {
+				break
+			}
+			os_delay_ms(15)
+		}
+
+		if ty < 25 {
+			if tx <= 60 {
+				return
+			}
+			if tx >= 234 {
+				clearProgramLines()
+				setCStrLiteral(&fileNameBuf[0], "UNTITLED.LGO", 32)
+				addProgLine("CS")
+				addProgLine("REPEAT 4 [ FD 60 RT 90 ]")
+				setStatus("New program ready", 0)
+				return
+			}
+		} else if ty >= 28 && ty <= 53 {
+			kr := os_prompt_keyboard("LOAD /sd/logo/FILENAME", &fileNameBuf[0], 31, 0)
+			if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
+				if loadProgramFromSd(&fileNameBuf[0]) != 0 {
+					return
+				}
+			}
+		} else if ty >= 68 && ty < 188 {
+			col := (tx - 6) / 156
+			row := (ty - 68) / 30
+			target := row*2 + col
+			if col >= 0 && col < 2 && row >= 0 && row < 4 {
+				idx := 0
+				for i = 0; i < entryCount; i = i + 1 {
+					entAddr := int(&fsEntries[0]) + i*FS_ENTRY_STRIDE
+					if peek1(entAddr+80) == 0 {
+						if idx == target {
+							copyCStr(&fileNameBuf[0], &fsEntries[i*FS_ENTRY_STRIDE], 32)
+							loadProgramFromSd(&fileNameBuf[0])
+							return
+						}
+						idx = idx + 1
+					}
+				}
+			}
+		} else if ty >= 200 {
+			if tx < 108 {
+				loadBuiltInStarProgram()
+				setStatus("Loaded STAR.LGO", 0)
+				return
+			} else if tx < 212 {
+				loadBuiltInFlowerProgram()
+				setStatus("Loaded FLOWER.LGO", 0)
+				return
+			} else {
+				loadBuiltInTreeProgram()
+				setStatus("Loaded TREE.LGO", 0)
+				return
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Logo P-Code / Token Compiler (String Interning, Bracket Linking, Proc Table)
+// ============================================================================
+func internIdent(word *byte) int {
+	// Search existing identPool for case-insensitive match
+	pos := 0
+	for pos < identPoolUsed {
+		start := pos
+		match := 1
+		i := 0
+		for {
+			ca := peek1(int(&identPool[0]) + pos)
+			cb := toUpperChar(peek1(int(word) + i))
+			if ca != cb {
+				match = 0
+			}
+			if ca == 0 {
+				break
+			}
+			pos = pos + 1
+			i = i + 1
+		}
+		pos = pos + 1
+		if match != 0 {
+			return start
+		}
+	}
+	// Add new uppercase entry
+	if identPoolUsed+32 >= MAX_IDENT_POOL {
+		return 0
+	}
+	start := identPoolUsed
+	i := 0
+	for i < 30 {
+		ch := toUpperChar(peek1(int(word) + i))
+		identPool[identPoolUsed] = byte(ch)
+		identPoolUsed = identPoolUsed + 1
+		if ch == 0 {
+			break
+		}
+		i = i + 1
+	}
+	identPool[identPoolUsed-1] = 0
+	return start
+}
+
+func wordEqLit(word *byte, lit string) int {
+	n := len(lit)
+	litAddr := cstr(lit)
+	var i int
+	for i = 0; i < n; i = i + 1 {
+		if toUpperChar(peek1(int(word)+i)) != peek1(litAddr+i) {
+			return 0
+		}
+	}
+	if peek1(int(word)+n) != 0 {
+		return 0
+	}
+	return 1
+}
+
+func classifyKeyword(word *byte) int {
+	if wordEqLit(word, "FD") != 0 || wordEqLit(word, "FORWARD") != 0 {
+		return CMD_FD
+	}
+	if wordEqLit(word, "BK") != 0 || wordEqLit(word, "BACK") != 0 {
+		return CMD_BK
+	}
+	if wordEqLit(word, "RT") != 0 || wordEqLit(word, "RIGHT") != 0 {
+		return CMD_RT
+	}
+	if wordEqLit(word, "LT") != 0 || wordEqLit(word, "LEFT") != 0 {
+		return CMD_LT
+	}
+	if wordEqLit(word, "PU") != 0 || wordEqLit(word, "PENUP") != 0 {
+		return CMD_PU
+	}
+	if wordEqLit(word, "PD") != 0 || wordEqLit(word, "PENDOWN") != 0 {
+		return CMD_PD
+	}
+	if wordEqLit(word, "CS") != 0 || wordEqLit(word, "CLEARSCREEN") != 0 || wordEqLit(word, "CLS") != 0 {
+		return CMD_CS
+	}
+	if wordEqLit(word, "CLEAN") != 0 {
+		return CMD_CLEAN
+	}
+	if wordEqLit(word, "HOME") != 0 {
+		return CMD_HOME
+	}
+	if wordEqLit(word, "SETXY") != 0 {
+		return CMD_SETXY
+	}
+	if wordEqLit(word, "SETX") != 0 {
+		return CMD_SETX
+	}
+	if wordEqLit(word, "SETY") != 0 {
+		return CMD_SETY
+	}
+	if wordEqLit(word, "SETH") != 0 || wordEqLit(word, "SETHEADING") != 0 {
+		return CMD_SETH
+	}
+	if wordEqLit(word, "PC") != 0 || wordEqLit(word, "SETPENCOLOR") != 0 || wordEqLit(word, "COLOR") != 0 {
+		return CMD_PC
+	}
+	if wordEqLit(word, "BG") != 0 || wordEqLit(word, "SETBG") != 0 {
+		return CMD_BG
+	}
+	if wordEqLit(word, "REPEAT") != 0 {
+		return CMD_REPEAT
+	}
+	if wordEqLit(word, "IF") != 0 {
+		return CMD_IF
+	}
+	if wordEqLit(word, "IFELSE") != 0 {
+		return CMD_IFELSE
+	}
+	if wordEqLit(word, "TO") != 0 {
+		return CMD_TO
+	}
+	if wordEqLit(word, "END") != 0 {
+		return CMD_END
+	}
+	if wordEqLit(word, "STOP") != 0 {
+		return CMD_STOP
+	}
+	if wordEqLit(word, "MAKE") != 0 || wordEqLit(word, "LET") != 0 {
+		return CMD_MAKE
+	}
+	if wordEqLit(word, "DOT") != 0 || wordEqLit(word, "POINT") != 0 {
+		return CMD_DOT
+	}
+	if wordEqLit(word, "CIRCLE") != 0 {
+		return CMD_CIRCLE
+	}
+	if wordEqLit(word, "FCIRCLE") != 0 {
+		return CMD_FCIRCLE
+	}
+	if wordEqLit(word, "HT") != 0 || wordEqLit(word, "HIDETURTLE") != 0 {
+		return CMD_HT
+	}
+	if wordEqLit(word, "ST") != 0 || wordEqLit(word, "SHOWTURTLE") != 0 {
+		return CMD_ST
+	}
+	if wordEqLit(word, "STAMP") != 0 {
+		return CMD_STAMP
+	}
+	if wordEqLit(word, "WAIT") != 0 || wordEqLit(word, "SLEEP") != 0 {
+		return CMD_WAIT
+	}
+	return CMD_USER
+}
+
+func classifyReporter(word *byte) int {
+	if wordEqLit(word, "SIN") != 0 {
+		return FN_SIN
+	}
+	if wordEqLit(word, "COS") != 0 {
+		return FN_COS
+	}
+	if wordEqLit(word, "SQRT") != 0 || wordEqLit(word, "SQR") != 0 {
+		return FN_SQRT
+	}
+	if wordEqLit(word, "ABS") != 0 {
+		return FN_ABS
+	}
+	if wordEqLit(word, "INT") != 0 {
+		return FN_INT
+	}
+	if wordEqLit(word, "RANDOM") != 0 || wordEqLit(word, "RND") != 0 {
+		return FN_RANDOM
+	}
+	if wordEqLit(word, "XCOR") != 0 {
+		return FN_XCOR
+	}
+	if wordEqLit(word, "YCOR") != 0 {
+		return FN_YCOR
+	}
+	if wordEqLit(word, "HEADING") != 0 {
+		return FN_HEADING
+	}
+	if wordEqLit(word, "REPCOUNT") != 0 {
+		return FN_REPCOUNT
+	}
+	return FN_NONE
+}
+
+func emitToken(kind int, sub int, val int, num float32) {
+	if tokCount >= MAX_TOKENS-1 {
+		return
+	}
+	tokKind[tokCount] = byte(kind)
+	tokSub[tokCount] = byte(sub)
+	tokVal[tokCount] = val
+	tokNum[tokCount] = num
+	tokCount = tokCount + 1
+}
+
+func tokenizeLine(lineAddr int) {
+	pos := 0
+	for {
+		for isSpaceChar(peek1(lineAddr+pos)) != 0 || peek1(lineAddr+pos) == ',' {
+			pos = pos + 1
+		}
+		ch := peek1(lineAddr + pos)
+		if ch == 0 || ch == ';' {
+			return
+		}
+		if ch == '[' {
+			emitToken(TOK_LBRACK, 0, -1, 0.0)
+			pos = pos + 1
+			continue
+		}
+		if ch == ']' {
+			emitToken(TOK_RBRACK, 0, -1, 0.0)
+			pos = pos + 1
+			continue
+		}
+		if ch == '(' {
+			emitToken(TOK_LPAREN, 0, 0, 0.0)
+			pos = pos + 1
+			continue
+		}
+		if ch == ')' {
+			emitToken(TOK_RPAREN, 0, 0, 0.0)
+			pos = pos + 1
+			continue
+		}
+		// Signed negative number literal when '-' is followed immediately by digit (e.g. -90)
+		isNegNum := 0
+		if ch == '-' && (isDigitChar(peek1(lineAddr+pos+1)) != 0 || peek1(lineAddr+pos+1) == '.') {
+			prevKind := TOK_EOF
+			if tokCount > 0 {
+				prevKind = int(tokKind[tokCount-1])
+			}
+			prevWasSpace := 1
+			if pos > 0 && isSpaceChar(peek1(lineAddr+pos-1)) == 0 {
+				prevWasSpace = 0
+			}
+			if prevWasSpace != 0 || (prevKind != TOK_NUM && prevKind != TOK_VAR && prevKind != TOK_RPAREN) {
+				isNegNum = 1
+			}
+		}
+		if isDigitChar(ch) != 0 || ch == '.' || isNegNum != 0 {
+			sign := float32(1.0)
+			if ch == '-' {
+				sign = -1.0
+				pos = pos + 1
+			}
+			val := float32(0.0)
+			for isDigitChar(peek1(lineAddr+pos)) != 0 {
+				val = val*10.0 + float32(peek1(lineAddr+pos)-'0')
+				pos = pos + 1
+			}
+			if peek1(lineAddr+pos) == '.' {
+				pos = pos + 1
+				scale := float32(0.1)
+				for isDigitChar(peek1(lineAddr+pos)) != 0 {
+					val = val + float32(peek1(lineAddr+pos)-'0')*scale
+					scale = scale * 0.1
+					pos = pos + 1
+				}
+			}
+			emitToken(TOK_NUM, 0, 0, sign*val)
+			continue
+		}
+		// Operators: +, -, *, /, %, =, <>, !=, <=, >=, <, >
+		if ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%' || ch == '=' {
+			emitToken(TOK_OP, ch, 0, 0.0)
+			pos = pos + 1
+			continue
+		}
+		if ch == '<' {
+			nx := peek1(lineAddr + pos + 1)
+			if nx == '>' {
+				emitToken(TOK_OP, '!', 0, 0.0)
+				pos = pos + 2
+			} else if nx == '=' {
+				emitToken(TOK_OP, 'L', 0, 0.0)
+				pos = pos + 2
+			} else {
+				emitToken(TOK_OP, '<', 0, 0.0)
+				pos = pos + 1
+			}
+			continue
+		}
+		if ch == '>' {
+			if peek1(lineAddr+pos+1) == '=' {
+				emitToken(TOK_OP, 'G', 0, 0.0)
+				pos = pos + 2
+			} else {
+				emitToken(TOK_OP, '>', 0, 0.0)
+				pos = pos + 1
+			}
+			continue
+		}
+		if ch == '!' && peek1(lineAddr+pos+1) == '=' {
+			emitToken(TOK_OP, '!', 0, 0.0)
+			pos = pos + 2
+			continue
+		}
+		// :VAR or "VAR or WORD
+		prefix := TOK_WORD
+		if ch == ':' {
+			prefix = TOK_VAR
+			pos = pos + 1
+		} else if ch == '"' {
+			prefix = TOK_QUOTE
+			pos = pos + 1
+		}
+		w := 0
+		for isWordChar(peek1(lineAddr+pos)) != 0 && w < 30 {
+			wordScratch[w] = byte(toUpperChar(peek1(lineAddr + pos)))
+			w = w + 1
+			pos = pos + 1
+		}
+		wordScratch[w] = 0
+		if w == 0 {
+			pos = pos + 1
+			continue
+		}
+		if prefix == TOK_WORD && wordEqLit(&wordScratch[0], "REM") != 0 {
+			return
+		}
+		id := internIdent(&wordScratch[0])
+		sub := 0
+		if prefix == TOK_WORD {
+			sub = classifyKeyword(&wordScratch[0])
+			if sub == CMD_USER {
+				rep := classifyReporter(&wordScratch[0])
+				if rep != FN_NONE {
+					sub = 100 + rep
+				}
+			}
+		}
+		emitToken(prefix, sub, id, 0.0)
+	}
+}
+
+var brackStack [32]int
+
+func compileLogoProgram() int {
+	tokCount = 0
+	identPoolUsed = 0
+	procCount = 0
+
+	var i int
+	for i = 0; i < lineCount; i = i + 1 {
+		tokenizeLine(int(&lineBody[0]) + i*LINE_STRIDE)
+	}
+	emitToken(TOK_EOF, 0, 0, 0.0)
+
+	// Match '[' and ']' brackets
+	bDepth := 0
+	for i = 0; i < tokCount; i = i + 1 {
+		k := int(tokKind[i])
+		if k == TOK_LBRACK {
+			if bDepth >= 32 {
+				setStatus("Bracket nesting too deep", 1)
+				return 0
+			}
+			brackStack[bDepth] = i
+			bDepth = bDepth + 1
+		} else if k == TOK_RBRACK {
+			if bDepth <= 0 {
+				setStatus("Unmatched ] in program", 1)
+				return 0
+			}
+			bDepth = bDepth - 1
+			openIdx := brackStack[bDepth]
+			tokVal[openIdx] = i
+			tokVal[i] = openIdx
+		}
+	}
+	if bDepth != 0 {
+		setStatus("Unclosed [ in program", 1)
+		return 0
+	}
+
+	// Scan TO ... END procedure definitions
+	i = 0
+	for i < tokCount {
+		if int(tokKind[i]) == TOK_WORD && int(tokSub[i]) == CMD_TO {
+			toIdx := i
+			i = i + 1
+			if i >= tokCount || int(tokKind[i]) != TOK_WORD {
+				setStatus("Expected name after TO", 1)
+				return 0
+			}
+			if procCount >= MAX_PROCS {
+				setStatus("Too many TO procedures", 1)
+				return 0
+			}
+			pIdx := procCount
+			procCount = procCount + 1
+			procNameId[pIdx] = tokVal[i]
+			procParamCount[pIdx] = 0
+			i = i + 1
+			for i < tokCount && int(tokKind[i]) == TOK_VAR {
+				if procParamCount[pIdx] < MAX_PROC_PARAMS {
+					procParamId[pIdx*MAX_PROC_PARAMS+procParamCount[pIdx]] = tokVal[i]
+					procParamCount[pIdx] = procParamCount[pIdx] + 1
+				}
+				i = i + 1
+			}
+			procBodyTok[pIdx] = i
+			foundEnd := 0
+			for i < tokCount {
+				if int(tokKind[i]) == TOK_WORD && int(tokSub[i]) == CMD_END {
+					procEndTok[pIdx] = i
+					// Store jump target past END in tokVal[toIdx] so top-level execution skips TO..END
+					tokVal[toIdx] = i + 1
+					foundEnd = 1
+					i = i + 1
+					break
+				}
+				i = i + 1
+			}
+			if foundEnd == 0 {
+				setStatus("Missing END for TO procedure", 1)
+				return 0
+			}
+		} else {
+			i = i + 1
+		}
+	}
+	return 1
+}
+
+// ============================================================================
+// Variable Lookup & Expression Evaluator
+// ============================================================================
+func getVarValue(nameId int) float32 {
+	// 1. Search active procedure frames from top down for local parameter :param
+	var f int
+	for f = frameDepth - 1; f >= 0; f = f - 1 {
+		if frameKind[f] == FRAME_PROC {
+			cnt := frameLocalCount[f]
+			var p int
+			for p = 0; p < cnt; p = p + 1 {
+				if frameLocalId[f*MAX_PROC_PARAMS+p] == nameId {
+					return frameLocalVal[f*MAX_PROC_PARAMS+p]
+				}
+			}
+			break
+		}
+	}
+	// 2. Search global variables
+	var i int
+	for i = 0; i < varCount; i = i + 1 {
+		if varNameId[i] == nameId {
+			return varVal[i]
+		}
+	}
+	return 0.0
+}
+
+func setVarValue(nameId int, val float32) {
+	// If matches local parameter in current proc frame, update it
+	var f int
+	for f = frameDepth - 1; f >= 0; f = f - 1 {
+		if frameKind[f] == FRAME_PROC {
+			cnt := frameLocalCount[f]
+			var p int
+			for p = 0; p < cnt; p = p + 1 {
+				if frameLocalId[f*MAX_PROC_PARAMS+p] == nameId {
+					frameLocalVal[f*MAX_PROC_PARAMS+p] = val
+					return
+				}
+			}
+			break
+		}
+	}
+	var i int
+	for i = 0; i < varCount; i = i + 1 {
+		if varNameId[i] == nameId {
+			varVal[i] = val
+			return
+		}
+	}
+	if varCount < MAX_VARS {
+		varNameId[varCount] = nameId
+		varVal[varCount] = val
+		varCount = varCount + 1
+	}
+}
+
+func currentRepcount() float32 {
+	var f int
+	for f = frameDepth - 1; f >= 0; f = f - 1 {
+		if frameKind[f] == FRAME_REPEAT {
+			return float32(frameRepIdx[f])
+		}
+	}
+	return 1.0
+}
+
+// Non-recursive precedence-climbing expression evaluator over token stream at `exprTok`
+var valStack [24]float32
+var opStack [24]int
+var opPrec [24]int
+
+func tokenOpPrecedence(op int) int {
+	if op == '=' || op == '!' || op == '<' || op == '>' || op == 'L' || op == 'G' {
+		return 1
+	}
+	if op == '+' || op == '-' {
+		return 2
+	}
+	if op == '*' || op == '/' || op == '%' {
+		return 3
+	}
+	return 0
+}
+
+func applyMathOp(op int, a float32, b float32) float32 {
+	switch op {
+	case '+':
+		return a + b
+	case '-':
+		return a - b
+	case '*':
+		return a * b
+	case '/':
+		if b == 0.0 {
+			return 0.0
+		}
+		return a / b
+	case '%':
+		ib := int(b)
+		if ib == 0 {
+			return 0.0
+		}
+		return float32(int(a) % ib)
+	case '=':
+		if fabs(a-b) < 0.0001 {
+			return 1.0
+		}
+		return 0.0
+	case '!':
+		if fabs(a-b) >= 0.0001 {
+			return 1.0
+		}
+		return 0.0
+	case '<':
+		if a < b {
+			return 1.0
+		}
+		return 0.0
+	case '>':
+		if a > b {
+			return 1.0
+		}
+		return 0.0
+	case 'L':
+		if a <= b {
+			return 1.0
+		}
+		return 0.0
+	case 'G':
+		if a >= b {
+			return 1.0
+		}
+		return 0.0
+	}
+	return 0.0
+}
+
+func applyReporter(fnId int, arg float32) float32 {
+	switch fnId {
+	case FN_SIN:
+		return sin(arg * DEG_TO_RAD)
+	case FN_COS:
+		return cos(arg * DEG_TO_RAD)
+	case FN_SQRT:
+		if arg <= 0.0 {
+			return 0.0
+		}
+		return sqrt(arg)
+	case FN_ABS:
+		return fabs(arg)
+	case FN_INT:
+		return float32(int(arg))
+	case FN_RANDOM:
+		lim := int(arg)
+		if lim <= 1 {
+			return 0.0
+		}
+		return float32(int(os_rand(lim)))
+	}
+	return arg
+}
+
+func evalLogoExpr() float32 {
+	vTop := 0
+	oTop := 0
+
+	for {
+		sign := float32(1.0)
+		for exprTok < tokCount && int(tokKind[exprTok]) == TOK_OP && (int(tokSub[exprTok]) == '+' || int(tokSub[exprTok]) == '-') {
+			if int(tokSub[exprTok]) == '-' {
+				sign = -sign
+			}
+			exprTok = exprTok + 1
+		}
+
+		// Check for unary 1-arg reporters (SIN, COS, SQRT, ABS, INT, RANDOM) or '('
+		for exprTok < tokCount {
+			k := int(tokKind[exprTok])
+			sub := int(tokSub[exprTok])
+			if k == TOK_LPAREN {
+				exprTok = exprTok + 1
+				opStack[oTop] = '('
+				opPrec[oTop] = 0
+				if sign < 0.0 {
+					opStack[oTop] = '(' + 256
+					sign = 1.0
+				}
+				oTop = oTop + 1
+				continue
+			}
+			if k == TOK_WORD && sub > 100 {
+				fnId := sub - 100
+				if fnId >= FN_SIN && fnId <= FN_RANDOM {
+					exprTok = exprTok + 1
+					opStack[oTop] = 1000 + fnId
+					opPrec[oTop] = 4
+					oTop = oTop + 1
+					continue
+				}
+			}
+			break
+		}
+
+		// Read primary value
+		val := float32(0.0)
+		k := int(tokKind[exprTok])
+		sub := int(tokSub[exprTok])
+		if k == TOK_NUM {
+			val = tokNum[exprTok]
+			exprTok = exprTok + 1
+		} else if k == TOK_VAR {
+			val = getVarValue(int(tokVal[exprTok]))
+			exprTok = exprTok + 1
+		} else if k == TOK_WORD && sub > 100 {
+			fnId := sub - 100
+			exprTok = exprTok + 1
+			if fnId == FN_XCOR {
+				val = turtleX
+			} else if fnId == FN_YCOR {
+				val = turtleY
+			} else if fnId == FN_HEADING {
+				val = turtleHeading
+			} else if fnId == FN_REPCOUNT {
+				val = currentRepcount()
+			}
+		}
+		val = val * sign
+
+		// Apply pending unary function calls (prec == 4)
+		for oTop > 0 && opPrec[oTop-1] == 4 {
+			oTop = oTop - 1
+			fnId := opStack[oTop] - 1000
+			val = applyReporter(fnId, val)
+		}
+
+		valStack[vTop] = val
+		vTop = vTop + 1
+
+		// Consume closing ')'
+		for exprTok < tokCount && int(tokKind[exprTok]) == TOK_RPAREN {
+			exprTok = exprTok + 1
+			for oTop > 0 && (opStack[oTop-1]&255) != '(' {
+				oTop = oTop - 1
+				if opPrec[oTop] == 4 {
+					valStack[vTop-1] = applyReporter(opStack[oTop]-1000, valStack[vTop-1])
+				} else if vTop >= 2 {
+					b := valStack[vTop-1]
+					a := valStack[vTop-2]
+					vTop = vTop - 1
+					valStack[vTop-1] = applyMathOp(opStack[oTop], a, b)
+				}
+			}
+			if oTop > 0 && (opStack[oTop-1]&255) == '(' {
+				parenTag := opStack[oTop-1]
+				oTop = oTop - 1
+				if (parenTag & 256) != 0 {
+					valStack[vTop-1] = -valStack[vTop-1]
+				}
+				for oTop > 0 && opPrec[oTop-1] == 4 {
+					oTop = oTop - 1
+					valStack[vTop-1] = applyReporter(opStack[oTop]-1000, valStack[vTop-1])
+				}
+			}
+		}
+
+		// Check if next token is a binary infix operator
+		if exprTok < tokCount && int(tokKind[exprTok]) == TOK_OP {
+			op := int(tokSub[exprTok])
+			prec := tokenOpPrecedence(op)
+			if prec > 0 {
+				exprTok = exprTok + 1
+				for oTop > 0 && opPrec[oTop-1] >= prec && (opStack[oTop-1]&255) != '(' {
+					oTop = oTop - 1
+					if vTop >= 2 {
+						b := valStack[vTop-1]
+						a := valStack[vTop-2]
+						vTop = vTop - 1
+						valStack[vTop-1] = applyMathOp(opStack[oTop], a, b)
+					}
+				}
+				opStack[oTop] = op
+				opPrec[oTop] = prec
+				oTop = oTop + 1
+				continue
+			}
+		}
+		break
+	}
+
+	for oTop > 0 {
+		oTop = oTop - 1
+		if opPrec[oTop] == 4 {
+			valStack[vTop-1] = applyReporter(opStack[oTop]-1000, valStack[vTop-1])
+		} else if (opStack[oTop]&255) != '(' && vTop >= 2 {
+			b := valStack[vTop-1]
+			a := valStack[vTop-2]
+			vTop = vTop - 1
+			valStack[vTop-1] = applyMathOp(opStack[oTop], a, b)
+		}
+	}
+
+	if vTop > 0 {
+		return valStack[0]
+	}
+	return 0.0
+}
+
+func evalArgAtPc() float32 {
+	exprTok = pcTok
+	v := evalLogoExpr()
+	pcTok = exprTok
+	return v
+}
+
+// ============================================================================
+// Logo Interpreter Execution Engine
+// ============================================================================
+func findProcById(nameId int) int {
+	var i int
+	for i = 0; i < procCount; i = i + 1 {
+		if procNameId[i] == nameId {
+			return i
+		}
+	}
+	return -1
+}
+
+func startLogoRun() {
+	if lineCount <= 0 {
+		setStatus("No Logo lines to run", 1)
+		return
+	}
+	if compileLogoProgram() == 0 {
+		drawEditorScreen()
+		return
+	}
+
+	uiMode = MODE_GFX
+	isRunning = 1
+	varCount = 0
+	frameDepth = 0
+	pcTok = 0
+	waitUntilMs = 0
+
+	turtleReset()
+	drawTopBar()
+	gfxClear(0)
+}
+
+func stopLogoRun(msg string, isErr int) {
+	isRunning = 0
+	drawTurtleCursor()
+	setStatus(msg, isErr)
+	drawTopBar()
+}
+
+func stepLogoToken() {
+	if pcTok >= tokCount {
+		stopLogoRun("Done", 0)
+		return
+	}
+	k := int(tokKind[pcTok])
+	sub := int(tokSub[pcTok])
+
+	if k == TOK_EOF {
+		stopLogoRun("Done", 0)
+		return
+	}
+
+	// Closing ']' of a REPEAT or IF block
+	if k == TOK_RBRACK {
+		if frameDepth > 0 {
+			top := frameDepth - 1
+			if frameKind[top] == FRAME_REPEAT && pcTok == frameLoopEnd[top] {
+				frameRepLeft[top] = frameRepLeft[top] - 1
+				if frameRepLeft[top] > 0 {
+					frameRepIdx[top] = frameRepIdx[top] + 1
+					pcTok = frameLoopStart[top]
+					return
+				}
+				pcTok = frameRetTok[top]
+				frameDepth = frameDepth - 1
+				return
+			}
+			if frameKind[top] == FRAME_IF && pcTok == frameLoopEnd[top] {
+				pcTok = frameRetTok[top]
+				frameDepth = frameDepth - 1
+				return
+			}
+		}
+		pcTok = pcTok + 1
+		return
+	}
+
+	if k != TOK_WORD {
+		pcTok = pcTok + 1
+		return
+	}
+
+	// Skip TO ... END definition at top level
+	if sub == CMD_TO {
+		nextTok := int(tokVal[pcTok])
+		if nextTok > pcTok {
+			pcTok = nextTok
+		} else {
+			pcTok = pcTok + 1
+		}
+		return
+	}
+
+	// Return from user procedure on END or STOP
+	if sub == CMD_END || sub == CMD_STOP {
+		// Pop any nested REPEAT/IF frames inside the current procedure
+		for frameDepth > 0 {
+			frameDepth = frameDepth - 1
+			if frameKind[frameDepth] == FRAME_PROC {
+				pcTok = frameRetTok[frameDepth]
+				return
+			}
+		}
+		stopLogoRun("Stopped", 0)
+		return
+	}
+
+	pcTok = pcTok + 1
+
+	switch sub {
+	case CMD_FD:
+		d := evalArgAtPc()
+		turtleForward(d)
+	case CMD_BK:
+		d := evalArgAtPc()
+		turtleForward(-d)
+	case CMD_RT:
+		ang := evalArgAtPc()
+		turtleHeading = turtleHeading + ang
+	case CMD_LT:
+		ang := evalArgAtPc()
+		turtleHeading = turtleHeading - ang
+	case CMD_PU:
+		penDown = 0
+	case CMD_PD:
+		penDown = 1
+	case CMD_CS:
+		gfxClear(0)
+		turtleReset()
+	case CMD_CLEAN:
+		gfxClear(bgColor)
+	case CMD_HOME:
+		turtleMoveTo(0.0, 0.0)
+		turtleHeading = 0.0
+	case CMD_SETXY:
+		nx := evalArgAtPc()
+		ny := evalArgAtPc()
+		turtleMoveTo(nx, ny)
+	case CMD_SETX:
+		nx := evalArgAtPc()
+		turtleMoveTo(nx, turtleY)
+	case CMD_SETY:
+		ny := evalArgAtPc()
+		turtleMoveTo(turtleX, ny)
+	case CMD_SETH:
+		turtleHeading = evalArgAtPc()
+	case CMD_PC:
+		c := int(round(evalArgAtPc()))
+		penColor = c & 15
+	case CMD_BG:
+		c := int(round(evalArgAtPc()))
+		gfxClear(c & 15)
+	case CMD_DOT:
+		gfxPoint(turtleScreenX(turtleX), turtleScreenY(turtleY), penColor)
+	case CMD_CIRCLE:
+		r := int(round(evalArgAtPc()))
+		sx := turtleScreenX(turtleX)
+		sy := turtleScreenY(turtleY)
+		if r > 0 && sy-r >= 0 && sy+r < VIEW_H {
+			tft_draw_circle(sx, VIEW_Y+sy, r, logoColor565(penColor))
+		}
+	case CMD_FCIRCLE:
+		r := int(round(evalArgAtPc()))
+		sx := turtleScreenX(turtleX)
+		sy := turtleScreenY(turtleY)
+		if r > 0 && sy-r >= 0 && sy+r < VIEW_H {
+			tft_fill_circle(sx, VIEW_Y+sy, r, logoColor565(penColor))
+		}
+	case CMD_HT:
+		turtleVisible = 0
+	case CMD_ST:
+		turtleVisible = 1
+	case CMD_STAMP:
+		savedVis := turtleVisible
+		turtleVisible = 1
+		drawTurtleCursor()
+		turtleVisible = savedVis
+	case CMD_WAIT:
+		ms := int(evalArgAtPc())
+		if ms > 0 {
+			waitUntilMs = os_millis() + ms
+		}
+	case CMD_MAKE:
+		if pcTok < tokCount {
+			nameId := int(tokVal[pcTok])
+			pcTok = pcTok + 1
+			if pcTok < tokCount && int(tokKind[pcTok]) == TOK_OP && int(tokSub[pcTok]) == '=' {
+				pcTok = pcTok + 1
+			}
+			v := evalArgAtPc()
+			setVarValue(nameId, v)
+		}
+	case CMD_REPEAT:
+		count := int(round(evalArgAtPc()))
+		if pcTok < tokCount && int(tokKind[pcTok]) == TOK_LBRACK {
+			openIdx := pcTok
+			closeIdx := int(tokVal[openIdx])
+			if count <= 0 {
+				pcTok = closeIdx + 1
+			} else if frameDepth < MAX_FRAMES {
+				frameKind[frameDepth] = FRAME_REPEAT
+				frameLoopStart[frameDepth] = openIdx + 1
+				frameLoopEnd[frameDepth] = closeIdx
+				frameRetTok[frameDepth] = closeIdx + 1
+				frameRepLeft[frameDepth] = count
+				frameRepIdx[frameDepth] = 1
+				frameDepth = frameDepth + 1
+				pcTok = openIdx + 1
+			}
+		}
+	case CMD_IF:
+		cond := evalArgAtPc()
+		if pcTok < tokCount && int(tokKind[pcTok]) == TOK_LBRACK {
+			openIdx := pcTok
+			closeIdx := int(tokVal[openIdx])
+			if cond != 0.0 {
+				if frameDepth < MAX_FRAMES {
+					frameKind[frameDepth] = FRAME_IF
+					frameLoopEnd[frameDepth] = closeIdx
+					frameRetTok[frameDepth] = closeIdx + 1
+					frameDepth = frameDepth + 1
+					pcTok = openIdx + 1
+				}
+			} else {
+				pcTok = closeIdx + 1
+			}
+		}
+	case CMD_IFELSE:
+		cond := evalArgAtPc()
+		if pcTok < tokCount && int(tokKind[pcTok]) == TOK_LBRACK {
+			open1 := pcTok
+			close1 := int(tokVal[open1])
+			open2 := close1 + 1
+			if open2 < tokCount && int(tokKind[open2]) == TOK_LBRACK {
+				close2 := int(tokVal[open2])
+				if cond != 0.0 {
+					if frameDepth < MAX_FRAMES {
+						frameKind[frameDepth] = FRAME_IF
+						frameLoopEnd[frameDepth] = close1
+						frameRetTok[frameDepth] = close2 + 1
+						frameDepth = frameDepth + 1
+						pcTok = open1 + 1
+					}
+				} else {
+					if frameDepth < MAX_FRAMES {
+						frameKind[frameDepth] = FRAME_IF
+						frameLoopEnd[frameDepth] = close2
+						frameRetTok[frameDepth] = close2 + 1
+						frameDepth = frameDepth + 1
+						pcTok = open2 + 1
+					}
+				}
+			}
+		}
+	case CMD_USER:
+		nameId := int(tokVal[pcTok-1])
+		pIdx := findProcById(nameId)
+		if pIdx < 0 {
+			stopLogoRun("Unknown word", 1)
+			return
+		}
+		pCnt := procParamCount[pIdx]
+		var argIdx int
+		for argIdx = 0; argIdx < pCnt; argIdx = argIdx + 1 {
+			procArgVals[argIdx] = evalArgAtPc()
+		}
+		if frameDepth >= MAX_FRAMES {
+			stopLogoRun("Stack overflow", 1)
+			return
+		}
+		f := frameDepth
+		frameDepth = frameDepth + 1
+		frameKind[f] = FRAME_PROC
+		frameRetTok[f] = pcTok
+		frameLocalCount[f] = pCnt
+		for argIdx = 0; argIdx < pCnt; argIdx = argIdx + 1 {
+			frameLocalId[f*MAX_PROC_PARAMS+argIdx] = procParamId[pIdx*MAX_PROC_PARAMS+argIdx]
+			frameLocalVal[f*MAX_PROC_PARAMS+argIdx] = procArgVals[argIdx]
+		}
+		pcTok = procBodyTok[pIdx]
+	}
+}
+
+const SLICE_STEPS = 24
+
+func execLogoSlice() {
+	if isRunning == 0 {
+		return
+	}
+	if waitUntilMs != 0 {
+		if os_millis() < waitUntilMs {
+			return
+		}
+		waitUntilMs = 0
+	}
+	steps := 0
+	for steps < SLICE_STEPS && isRunning != 0 && waitUntilMs == 0 {
+		stepLogoToken()
+		steps = steps + 1
+	}
+}
+
+// ============================================================================
+// Main Event Loop
+// ============================================================================
+func main() {
+	os_set_corner_exit(1)
+	seedSdLogoDemos()
+	setStatus("Tap line to edit, or RUN", 0)
+	drawEditorScreen()
+
+	for {
+		if isRunning != 0 {
+			execLogoSlice()
+		}
+
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if ty < TOP_H {
+				// Top Bar Buttons: EXIT, RUN, STOP, EDIT, LOAD, SAVE
+				if tx < 48 {
+					os_exit(0)
+				} else if tx >= 50 && tx <= 101 {
+					// [RUN]
+					startLogoRun()
+				} else if tx >= 104 && tx <= 155 {
+					// [STOP]
+					if isRunning != 0 {
+						stopLogoRun("Stopped by user", 0)
+					} else {
+						uiMode = MODE_EDIT
+						drawEditorScreen()
+					}
+				} else if tx >= 158 && tx <= 209 {
+					// [EDIT]
+					if isRunning != 0 {
+						isRunning = 0
+					}
+					if uiMode != MODE_EDIT {
+						uiMode = MODE_EDIT
+						drawEditorScreen()
+					} else {
+						runLineEditorModal(selectedLine)
+						drawEditorScreen()
+					}
+				} else if tx >= 212 && tx <= 263 {
+					// [LOAD]
+					if isRunning != 0 {
+						isRunning = 0
+					}
+					runLoadDialog()
+					uiMode = MODE_EDIT
+					drawEditorScreen()
+				} else if tx >= 266 {
+					// [SAVE]
+					if isRunning != 0 {
+						isRunning = 0
+					}
+					runSaveDialog()
+					uiMode = MODE_EDIT
+					drawEditorScreen()
+				}
+			} else if uiMode == MODE_EDIT {
+				if tx >= 302 {
+					// Right scrollbar
+					if ty < 125 {
+						if scrollTop > 0 {
+							scrollTop = scrollTop - 4
+							if scrollTop < 0 {
+								scrollTop = 0
+							}
+							drawEditorScreen()
+						}
+					} else {
+						if scrollTop+VISIBLE_ROWS <= lineCount {
+							scrollTop = scrollTop + 4
+							drawEditorScreen()
+						}
+					}
+				} else if ty >= VIEW_Y+2 && ty < 222 {
+					row := (ty - (VIEW_Y + 3)) / ROW_H
+					idx := scrollTop + row
+					if idx >= 0 && idx < lineCount {
+						selectedLine = idx
+						runLineEditorModal(idx)
+						drawEditorScreen()
+					} else if idx >= lineCount {
+						selectedLine = lineCount
+						runLineEditorModal(lineCount)
+						drawEditorScreen()
+					}
+				}
+			}
+		}
+
+		if isRunning != 0 {
+			os_delay_ms(5)
+		} else {
+			os_delay_ms(15)
+		}
+	}
+}

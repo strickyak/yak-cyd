@@ -60,6 +60,7 @@ apps: lakat
 	$(LAKAT) compile -title "3D Dice Roller" -o build/apps/dice-3d.lapp apps/dice-3d/dice-3d.lgolf
 	$(LAKAT) compile -title "Croquet 3D World" -o build/apps/croquet.lapp apps/croquet/croquet.lgolf
 	$(LAKAT) compile -title "basic" -o build/apps/basic.lapp apps/basic/basic.lgolf
+	$(LAKAT) compile -title "logo" -o build/apps/logo.lapp apps/logo/logo.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps
