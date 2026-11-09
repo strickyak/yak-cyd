@@ -61,6 +61,7 @@ apps: lakat
 	$(LAKAT) compile -title "Croquet 3D World" -o build/apps/croquet.lapp apps/croquet/croquet.lgolf
 	$(LAKAT) compile -title "basic" -o build/apps/basic.lapp apps/basic/basic.lgolf
 	$(LAKAT) compile -title "logo" -o build/apps/logo.lapp apps/logo/logo.lgolf
+	$(LAKAT) compile -title "chat" -o build/apps/chat.lapp apps/chat/chat.lgolf
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps

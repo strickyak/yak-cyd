@@ -948,3 +948,135 @@ func TestCompileAndRunLogoApp(t *testing.T) {
 		t.Fatalf("expected PC 2 DOT at (-120, 0) to draw red (0xF800) at Screen[132][40], got 0x%04X", got)
 	}
 }
+
+func TestChatWebSocketMultiUser(t *testing.T) {
+	receivedLines := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+		if key == "" {
+			http.Error(w, "missing key", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = rw.Flush()
+
+		sendFrame := func(txt string) {
+			msg := []byte(txt)
+			frame := append([]byte{0x81, byte(len(msg))}, msg...)
+			_, _ = conn.Write(frame)
+		}
+
+		// Send initial greeting, peer presence, and an existing message from bob
+		sendFrame("YOU alice")
+		sendFrame("STATE bob online")
+		sendFrame("MSG bob Welcome to Lakatos Chat!")
+
+		var hdr [2]byte
+		for {
+			if _, err := conn.Read(hdr[:]); err != nil {
+				return
+			}
+			opcode := hdr[0] & 0x0F
+			masked := (hdr[1] & 0x80) != 0
+			pLen := int(hdr[1] & 0x7F)
+			var mask [4]byte
+			if masked {
+				if _, err := conn.Read(mask[:]); err != nil {
+					return
+				}
+			}
+			payload := make([]byte, pLen)
+			if pLen > 0 {
+				if _, err := conn.Read(payload); err != nil {
+					return
+				}
+				if masked {
+					for i := 0; i < pLen; i++ {
+						payload[i] ^= mask[i&3]
+					}
+				}
+			}
+			if opcode == 0x8 {
+				return
+			}
+			if opcode == 0x1 {
+				line := strings.TrimSpace(string(payload))
+				receivedLines <- line
+				if strings.HasPrefix(line, "MSG ") {
+					// Broadcast back to the room as Superhighway does
+					sendFrame("MSG alice " + strings.TrimSpace(strings.TrimPrefix(line, "MSG ")))
+				}
+			}
+		}
+	}))
+	defer srv.Close()
+
+	srcBytes, err := os.ReadFile("../../apps/chat/chat.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(chat.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("chat", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.ShUrl = srv.URL
+	vm.MaxInstructions = 1500000
+	vm.TouchQueue = []TouchEvent{
+		{Touched: false},
+		// Tap bottom compose bar at (160, 224) to open keyboard and send message
+		{Touched: true, X: 160, Y: 224},
+		{Touched: false, X: 160, Y: 224},
+		// Let one loop iteration process the echoed MSG frame from server
+		{Touched: false},
+		// Exit via NW corner tap
+		{Touched: true, X: 5, Y: 5},
+	}
+	vm.KeyboardQueue = []string{
+		"Hello Bob from CYD!",
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("chat app did not exit cleanly")
+	}
+
+	var sawOnline, sawMsg bool
+	for len(receivedLines) > 0 {
+		l := <-receivedLines
+		if l == "SET online" {
+			sawOnline = true
+		}
+		if l == "MSG Hello Bob from CYD!" {
+			sawMsg = true
+		}
+	}
+	if !sawOnline {
+		t.Fatalf("expected 'SET online' from chat app")
+	}
+	if !sawMsg {
+		t.Fatalf("expected 'MSG Hello Bob from CYD!' from chat app")
+	}
+}
+

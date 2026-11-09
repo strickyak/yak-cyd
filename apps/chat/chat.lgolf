@@ -1,0 +1,775 @@
+package main
+
+import "wedge"
+
+// ============================================================================
+// Lakatos OS Multi-User Chat App ("chat")
+// Connects to Superhighway WebSocket Hub at /ws/chat
+// Protocol:
+//   Client -> Server:
+//     SET online
+//     MSG <line of text>
+//     ID <newNickname>
+//   Server -> Client:
+//     YOU <assignedId>
+//     STATE <peerId> <blob>
+//     LEAVE <peerId>
+//     MSG <senderId> <line of text>
+// ============================================================================
+
+const UI_BG = 0x0861
+const UI_HEADER_BG = 0x10A2
+const UI_INPUT_BG = 0x18E3
+const UI_BTN_BG = 0x2124
+const UI_BTN_ACT = 0x03EF
+const UI_SEND_BG = 0x03E0
+const UI_BORDER = 0x4A69
+const UI_CYAN = 0x07FF
+const UI_GOLD = 0xFFE0
+const UI_GREEN = 0x07E0
+const UI_ORANGE = 0xFDA0
+const UI_PINK = 0xFE19
+const UI_WHITE = 0xFFFF
+const UI_LIGHTGREY = 0xD69A
+const UI_MUTED = 0x8410
+
+const MAX_PEERS = 16
+const MAX_LINES = 36
+const VISIBLE_LINES = 11
+const LINE_STRIDE = 44
+const SENDER_STRIDE = 16
+
+var myIdBuf [20]byte
+var nickBuf [20]byte
+var composeBuf [128]byte
+var txBuf [160]byte
+var rxBuf [256]byte
+var lineAccum [256]byte
+var lineAccumLen int
+
+var peerActive [16]int
+var peerId [256]byte
+var activePeerCount int
+
+var lineSender [576]byte // MAX_LINES * SENDER_STRIDE (36 * 16)
+var lineText [1584]byte  // MAX_LINES * LINE_STRIDE (36 * 44)
+var lineColor [36]int
+var lineCount int
+var scrollTop int
+
+var wsConnected int
+var wsLastRetryMs int
+var lastAcceptedClickMs int
+
+var parsePos int
+var parseLen int
+
+func settleModalTransition() {
+	os_delay_ms(220)
+}
+
+func pollFilteredClick() (bool, int, int) {
+	clicked, tx, ty := os_read_click()
+	if clicked {
+		now := millis()
+		if now-lastAcceptedClickMs < 220 {
+			return false, 0, 0
+		}
+		lastAcceptedClickMs = now
+		return true, tx, ty
+	}
+	return false, 0, 0
+}
+
+func cstrLen(ptr *byte, maxL int) int {
+	var i int
+	for i = 0; i < maxL; i = i + 1 {
+		if peek1(int(ptr)+i) == 0 {
+			return i
+		}
+	}
+	return maxL
+}
+
+func cstrCopy(dst *byte, src *byte, maxL int) int {
+	var i int
+	for i = 0; i < maxL-1; i = i + 1 {
+		ch := peek1(int(src) + i)
+		if ch == 0 {
+			break
+		}
+		poke1(int(dst)+i, ch)
+	}
+	poke1(int(dst)+i, 0)
+	return i
+}
+
+func cstrEquals(a *byte, b *byte, maxL int) int {
+	var i int
+	for i = 0; i < maxL; i = i + 1 {
+		ca := peek1(int(a) + i)
+		cb := peek1(int(b) + i)
+		if ca != cb {
+			return 0
+		}
+		if ca == 0 {
+			return 1
+		}
+	}
+	return 1
+}
+
+func appendLiteral(dst *byte, pos int, lit string, maxL int) int {
+	n := len(lit)
+	var i int
+	for i = 0; i < n; i = i + 1 {
+		if pos+1 >= maxL {
+			break
+		}
+		poke1(int(dst)+pos, int(lit[i]))
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendCStr(dst *byte, pos int, src *byte, maxL int) int {
+	var i int
+	for i = 0; i < maxL; i = i + 1 {
+		ch := peek1(int(src) + i)
+		if ch == 0 || pos+1 >= maxL {
+			break
+		}
+		poke1(int(dst)+pos, ch)
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func colorForSender(senderPtr *byte) int {
+	if myIdBuf[0] != 0 && cstrEquals(senderPtr, &myIdBuf[0], 15) != 0 {
+		return UI_GOLD
+	}
+	h := 0
+	var i int
+	for i = 0; i < 15; i = i + 1 {
+		ch := peek1(int(senderPtr) + i)
+		if ch == 0 {
+			break
+		}
+		h = h*31 + ch
+	}
+	if h < 0 {
+		h = -h
+	}
+	m := h % 4
+	if m == 0 {
+		return UI_CYAN
+	} else if m == 1 {
+		return UI_GREEN
+	} else if m == 2 {
+		return UI_ORANGE
+	}
+	return UI_PINK
+}
+
+func shiftLinesUp() {
+	var i int
+	var j int
+	for i = 0; i < MAX_LINES-1; i = i + 1 {
+		dstS := i * SENDER_STRIDE
+		srcS := (i + 1) * SENDER_STRIDE
+		for j = 0; j < SENDER_STRIDE; j = j + 1 {
+			lineSender[dstS+j] = lineSender[srcS+j]
+		}
+		dstT := i * LINE_STRIDE
+		srcT := (i + 1) * LINE_STRIDE
+		for j = 0; j < LINE_STRIDE; j = j + 1 {
+			lineText[dstT+j] = lineText[srcT+j]
+		}
+		lineColor[i] = lineColor[i+1]
+	}
+	lineCount = MAX_LINES - 1
+}
+
+var emptyCStr [4]byte
+
+func pushRawDisplayLine(senderPtr *byte, textPtr *byte, textStart int, textLen int, col int) {
+	if lineCount >= MAX_LINES {
+		shiftLinesUp()
+	}
+	idx := lineCount
+	sBase := idx * SENDER_STRIDE
+	tBase := idx * LINE_STRIDE
+
+	if int(senderPtr) != 0 && peek1(int(senderPtr)) != 0 {
+		cstrCopy(&lineSender[sBase], senderPtr, SENDER_STRIDE)
+	} else {
+		lineSender[sBase] = 0
+	}
+
+	outPos := 0
+	var i int
+	for i = 0; i < textLen && outPos < LINE_STRIDE-1; i = i + 1 {
+		ch := peek1(int(textPtr) + textStart + i)
+		if ch == 0 {
+			break
+		}
+		lineText[tBase+outPos] = byte(ch)
+		outPos = outPos + 1
+	}
+	lineText[tBase+outPos] = 0
+	lineColor[idx] = col
+	lineCount = lineCount + 1
+
+	if lineCount > VISIBLE_LINES {
+		scrollTop = lineCount - VISIBLE_LINES
+	} else {
+		scrollTop = 0
+	}
+}
+
+func appendChatMessage(senderPtr *byte, textPtr *byte, colOverride int) {
+	col := colOverride
+	if col == 0 {
+		col = colorForSender(senderPtr)
+	}
+
+	sLen := 0
+	if int(senderPtr) != 0 {
+		sLen = cstrLen(senderPtr, 15)
+	}
+	tLen := cstrLen(textPtr, 220)
+	if tLen == 0 {
+		return
+	}
+
+	// First visual line has "<sender>: " prefix, so allow up to (36 - sLen) chars
+	firstMax := 36 - sLen
+	if firstMax < 16 {
+		firstMax = 16
+	}
+
+	if tLen <= firstMax {
+		pushRawDisplayLine(senderPtr, textPtr, 0, tLen, col)
+		return
+	}
+
+	// Find a clean word break near firstMax if possible
+	cut := firstMax
+	var k int
+	for k = firstMax; k > firstMax-10 && k > 0; k = k - 1 {
+		if peek1(int(textPtr)+k) == ' ' {
+			cut = k
+			break
+		}
+	}
+	pushRawDisplayLine(senderPtr, textPtr, 0, cut, col)
+
+	pos := cut
+	for pos < tLen && peek1(int(textPtr)+pos) == ' ' {
+		pos = pos + 1
+	}
+
+	// Continuation lines have no sender prefix and fit up to 36 chars per line
+	for pos < tLen {
+		rem := tLen - pos
+		chunk := rem
+		if chunk > 36 {
+			chunk = 36
+			for k = 36; k > 24; k = k - 1 {
+				if peek1(int(textPtr)+pos+k) == ' ' {
+					chunk = k
+					break
+				}
+			}
+		}
+		pushRawDisplayLine(&emptyCStr[0], textPtr, pos, chunk, col)
+		pos = pos + chunk
+		for pos < tLen && peek1(int(textPtr)+pos) == ' ' {
+			pos = pos + 1
+		}
+	}
+}
+
+func findOrAllocPeer(idPtr *byte) int {
+	var i int
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] != 0 && cstrEquals(&peerId[i*16], idPtr, 15) != 0 {
+			return i
+		}
+	}
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] == 0 {
+			peerActive[i] = 1
+			cstrCopy(&peerId[i*16], idPtr, 16)
+			return i
+		}
+	}
+	return -1
+}
+
+func recountPeers() {
+	c := 0
+	var i int
+	for i = 0; i < MAX_PEERS; i = i + 1 {
+		if peerActive[i] != 0 {
+			c = c + 1
+		}
+	}
+	activePeerCount = c
+}
+
+// ============================================================================
+// UI Rendering: Header Bar, Chat Viewport, and Bottom Compose Bar
+// ============================================================================
+
+func drawHeaderBar() {
+	tft_fill_rect(0, 0, 320, 24, UI_HEADER_BG)
+	tft_draw_fast_hline(0, 23, 320, UI_BORDER)
+
+	DrawExitWedge()
+
+	tft_set_text_datum(0) // TL_DATUM
+	tft_set_text_color(UI_CYAN, UI_HEADER_BG)
+	tft_draw_string("CHAT", 18, 4, 2)
+
+	// Nickname pill button [ @myId ] at x = 58..162, y = 3..20
+	tft_fill_round_rect(58, 3, 104, 17, 3, UI_BTN_BG)
+	tft_draw_round_rect(58, 3, 104, 17, 3, UI_BORDER)
+	tft_set_text_color(UI_GOLD, UI_BTN_BG)
+	nx := 63
+	nx = nx + tft_draw_string("@", nx, 4, 2)
+	tft_draw_cstr(&myIdBuf[0], nx, 4, 2)
+
+	// Connection circle + online count at x = 174..258
+	if wsConnected != 0 {
+		tft_fill_circle(174, 11, 5, UI_GREEN)
+		tft_draw_circle(174, 11, 6, UI_WHITE)
+		tft_set_text_color(UI_GREEN, UI_HEADER_BG)
+		ox := 185
+		ox = ox + tft_draw_int(activePeerCount+1, ox, 4, 2)
+		tft_draw_string(" on", ox, 4, 2)
+	} else {
+		tft_fill_circle(174, 11, 5, RED)
+		tft_draw_circle(174, 11, 6, UI_LIGHTGREY)
+		tft_set_text_color( UI_LIGHTGREY, UI_HEADER_BG)
+		tft_draw_string("OFFLINE", 185, 4, 2)
+	}
+
+	// [CLR] button at x = 266..316, y = 3..20
+	tft_fill_round_rect(266, 3, 50, 17, 3, UI_BTN_BG)
+	tft_draw_round_rect(266, 3, 50, 17, 3, UI_BORDER)
+	tft_set_text_datum(4) // MC_DATUM
+	tft_set_text_color(UI_LIGHTGREY, UI_BTN_BG)
+	tft_draw_string("CLR", 291, 11, 1)
+	tft_set_text_datum(0)
+}
+
+func drawChatViewport() {
+	tft_fill_rect(0, 24, 320, 184, UI_BG)
+
+	if lineCount == 0 {
+		tft_set_text_datum(4) // MC_DATUM
+		tft_set_text_color(UI_MUTED, UI_BG)
+		tft_draw_string("No messages yet.", 160, 98, 2)
+		tft_draw_string("Tap the bottom bar to chat!", 160, 120, 2)
+		tft_set_text_datum(0)
+		return
+	}
+
+	tft_set_text_datum(0) // TL_DATUM
+	var row int
+	for row = 0; row < VISIBLE_LINES; row = row + 1 {
+		idx := scrollTop + row
+		if idx < 0 || idx >= lineCount {
+			continue
+		}
+		y := 27 + row*16
+		sBase := idx * SENDER_STRIDE
+		tBase := idx * LINE_STRIDE
+		col := lineColor[idx]
+
+		x := 6
+		if lineSender[sBase] != 0 {
+			tft_set_text_color(col, UI_BG)
+			x = x + tft_draw_cstr(&lineSender[sBase], x, y, 2)
+			x = x + tft_draw_string(": ", x, y, 2)
+			tft_set_text_color(UI_WHITE, UI_BG)
+			tft_draw_cstr(&lineText[tBase], x, y, 2)
+		} else {
+			tft_set_text_color(UI_LIGHTGREY, UI_BG)
+			tft_draw_cstr(&lineText[tBase], x+10, y, 2)
+		}
+	}
+
+	// Scroll buttons if history exceeds VISIBLE_LINES
+	if lineCount > VISIBLE_LINES {
+		tft_set_text_datum(4) // MC_DATUM
+		if scrollTop > 0 {
+			tft_fill_round_rect(298, 26, 20, 18, 3, UI_BTN_BG)
+			tft_draw_round_rect(298, 26, 20, 18, 3, UI_CYAN)
+			tft_set_text_color(UI_CYAN, UI_BTN_BG)
+			tft_draw_string("^", 308, 35, 2)
+		}
+		if scrollTop+VISIBLE_LINES < lineCount {
+			tft_fill_round_rect(298, 186, 20, 18, 3, UI_BTN_BG)
+			tft_draw_round_rect(298, 186, 20, 18, 3, UI_CYAN)
+			tft_set_text_color(UI_CYAN, UI_BTN_BG)
+			tft_draw_string("v", 308, 195, 2)
+		}
+		tft_set_text_datum(0)
+	}
+}
+
+func drawComposeBar() {
+	tft_fill_rect(0, 208, 320, 32, UI_HEADER_BG)
+	tft_draw_fast_hline(0, 208, 320, UI_BORDER)
+
+	// Input field box (x = 4..248, y = 211..236)
+	tft_fill_round_rect(4, 211, 244, 25, 4, UI_INPUT_BG)
+	tft_draw_round_rect(4, 211, 244, 25, 4, UI_CYAN)
+	tft_set_text_datum(0) // TL_DATUM
+	tft_set_text_color(UI_LIGHTGREY, UI_INPUT_BG)
+	tft_draw_string("Tap to type message...", 12, 216, 2)
+
+	// [SEND] button (x = 252..316, y = 211..236)
+	tft_fill_round_rect(252, 211, 64, 25, 4, UI_SEND_BG)
+	tft_draw_round_rect(252, 211, 64, 25, 4, UI_GREEN)
+	tft_set_text_datum(4) // MC_DATUM
+	tft_set_text_color(UI_WHITE, UI_SEND_BG)
+	tft_draw_string("SEND", 284, 223, 2)
+	tft_set_text_datum(0)
+}
+
+func redrawAll() {
+	drawHeaderBar()
+	drawChatViewport()
+	drawComposeBar()
+}
+
+// ============================================================================
+// WebSocket Protocol Client (/ws/chat)
+// ============================================================================
+
+func sendOnlineState() {
+	pos := 0
+	pos = appendLiteral(&txBuf[0], pos, "SET online\n", 150)
+	ws_send(&txBuf[0], pos)
+}
+
+func sendChatLine(msgPtr *byte) int {
+	mLen := cstrLen(msgPtr, 120)
+	if mLen == 0 {
+		return 0
+	}
+	pos := 0
+	pos = appendLiteral(&txBuf[0], pos, "MSG ", 155)
+	pos = appendCStr(&txBuf[0], pos, msgPtr, 155)
+	pos = appendLiteral(&txBuf[0], pos, "\n", 158)
+	return ws_send(&txBuf[0], pos)
+}
+
+func sendNickChange(newNickPtr *byte) int {
+	nLen := cstrLen(newNickPtr, 16)
+	if nLen == 0 {
+		return 0
+	}
+	pos := 0
+	pos = appendLiteral(&txBuf[0], pos, "ID ", 64)
+	pos = appendCStr(&txBuf[0], pos, newNickPtr, 64)
+	pos = appendLiteral(&txBuf[0], pos, "\n", 64)
+	return ws_send(&txBuf[0], pos)
+}
+
+func skipSpaces() {
+	for parsePos < parseLen {
+		ch := lineAccum[parsePos]
+		if ch != ' ' && ch != '\t' && ch != '\r' {
+			break
+		}
+		parsePos = parsePos + 1
+	}
+}
+
+func readTokenTo(dst *byte, maxDst int) int {
+	skipSpaces()
+	n := 0
+	for parsePos < parseLen {
+		ch := lineAccum[parsePos]
+		if ch == 0 || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			break
+		}
+		if n+1 < maxDst {
+			poke1(int(dst)+n, int(ch))
+			n = n + 1
+		}
+		parsePos = parsePos + 1
+	}
+	poke1(int(dst)+n, 0)
+	return n
+}
+
+func readRestOfLineTo(dst *byte, maxDst int) int {
+	skipSpaces()
+	n := 0
+	for parsePos < parseLen {
+		ch := lineAccum[parsePos]
+		if ch == 0 || ch == '\r' || ch == '\n' {
+			break
+		}
+		if n+1 < maxDst {
+			poke1(int(dst)+n, int(ch))
+			n = n + 1
+		}
+		parsePos = parsePos + 1
+	}
+	poke1(int(dst)+n, 0)
+	return n
+}
+
+func processWsLine() {
+	var cmd [16]byte
+	var tokId [16]byte
+	var body [200]byte
+
+	if readTokenTo(&cmd[0], 16) == 0 {
+		return
+	}
+
+	// YOU <assignedId>
+	if cmd[0] == 'Y' && cmd[1] == 'O' && cmd[2] == 'U' && cmd[3] == 0 {
+		if readTokenTo(&myIdBuf[0], 18) > 0 {
+			drawHeaderBar()
+		}
+		return
+	}
+
+	// STATE <peerId> <blob>
+	if cmd[0] == 'S' && cmd[1] == 'T' && cmd[2] == 'A' && cmd[3] == 'T' && cmd[4] == 'E' && cmd[5] == 0 {
+		if readTokenTo(&tokId[0], 16) == 0 {
+			return
+		}
+		if myIdBuf[0] != 0 && cstrEquals(&tokId[0], &myIdBuf[0], 15) != 0 {
+			return
+		}
+		if findOrAllocPeer(&tokId[0]) >= 0 {
+			recountPeers()
+			drawHeaderBar()
+		}
+		return
+	}
+
+	// LEAVE <peerId>
+	if cmd[0] == 'L' && cmd[1] == 'E' && cmd[2] == 'A' && cmd[3] == 'V' && cmd[4] == 'E' && cmd[5] == 0 {
+		if readTokenTo(&tokId[0], 16) == 0 {
+			return
+		}
+		var i int
+		for i = 0; i < MAX_PEERS; i = i + 1 {
+			if peerActive[i] != 0 && cstrEquals(&peerId[i*16], &tokId[0], 15) != 0 {
+				peerActive[i] = 0
+			}
+		}
+		recountPeers()
+		drawHeaderBar()
+		return
+	}
+
+	// MSG <senderId> <text>
+	if cmd[0] == 'M' && cmd[1] == 'S' && cmd[2] == 'G' && cmd[3] == 0 {
+		if readTokenTo(&tokId[0], 16) == 0 {
+			return
+		}
+		if readRestOfLineTo(&body[0], 196) > 0 {
+			appendChatMessage(&tokId[0], &body[0], 0)
+			drawChatViewport()
+		}
+		return
+	}
+}
+
+func connectChatWs(nowMs int) int {
+	wsLastRetryMs = nowMs
+	if ws_open("/ws/chat") != 0 {
+		wsConnected = 1
+		sendOnlineState()
+		drawHeaderBar()
+		return 1
+	}
+	return 0
+}
+
+func pollWebSocket(nowMs int) {
+	if wsConnected == 0 {
+		if nowMs-wsLastRetryMs >= 4000 {
+			connectChatWs(nowMs)
+		}
+		return
+	}
+
+	var iter int
+	for iter = 0; iter < 8; iter = iter + 1 {
+		got := ws_recv(&rxBuf[0], 250)
+		if got < 0 {
+			wsConnected = 0
+			wsLastRetryMs = nowMs
+			var i int
+			for i = 0; i < MAX_PEERS; i = i + 1 {
+				peerActive[i] = 0
+			}
+			activePeerCount = 0
+			drawHeaderBar()
+			break
+		}
+		if got == 0 {
+			break
+		}
+		var j int
+		for j = 0; j < got; j = j + 1 {
+			ch := rxBuf[j]
+			if ch == '\n' {
+				lineAccum[lineAccumLen] = 0
+				parsePos = 0
+				parseLen = lineAccumLen
+				processWsLine()
+				lineAccumLen = 0
+			} else if ch != '\r' {
+				if lineAccumLen < 250 {
+					lineAccum[lineAccumLen] = ch
+					lineAccumLen = lineAccumLen + 1
+				}
+			}
+		}
+		if lineAccumLen > 0 {
+			lineAccum[lineAccumLen] = 0
+			parsePos = 0
+			parseLen = lineAccumLen
+			processWsLine()
+			lineAccumLen = 0
+		}
+	}
+}
+
+func promptAndSendChatMessage() {
+	composeBuf[0] = 0
+	settleModalTransition()
+	ok := os_prompt_keyboard("Send Chat Message:", &composeBuf[0], 110, 0)
+	settleModalTransition()
+	lastAcceptedClickMs = millis()
+	redrawAll()
+
+	if ok == 1 && composeBuf[0] != 0 {
+		if wsConnected == 0 {
+			connectChatWs(millis())
+		}
+		sent := 0
+		if wsConnected != 0 {
+			if sendChatLine(&composeBuf[0]) > 0 {
+				sent = 1
+			} else {
+				wsConnected = 0
+				drawHeaderBar()
+			}
+		}
+		// If offline, still display locally so standalone/offline typing works cleanly
+		if sent == 0 {
+			appendChatMessage(&myIdBuf[0], &composeBuf[0], 0)
+			drawChatViewport()
+		}
+	}
+}
+
+func promptAndChangeNickname() {
+	cstrCopy(&nickBuf[0], &myIdBuf[0], 16)
+	settleModalTransition()
+	ok := os_prompt_keyboard("Your Chat Nickname:", &nickBuf[0], 15, 0)
+	settleModalTransition()
+	lastAcceptedClickMs = millis()
+
+	if ok == 1 && nickBuf[0] != 0 {
+		cstrCopy(&myIdBuf[0], &nickBuf[0], 16)
+		if wsConnected != 0 {
+			sendNickChange(&myIdBuf[0])
+		}
+	}
+	redrawAll()
+}
+
+func main() {
+	os_set_corner_exit(1)
+
+	devName := os_get_device_name()
+	if len(devName) > 0 {
+		appendLiteral(&myIdBuf[0], 0, devName, 16)
+	} else {
+		appendLiteral(&myIdBuf[0], 0, "cyd", 16)
+	}
+
+	lineCount = 0
+	scrollTop = 0
+	activePeerCount = 0
+	wsConnected = 0
+	wsLastRetryMs = -5000
+	lastAcceptedClickMs = -1000
+	lineAccumLen = 0
+
+	redrawAll()
+	connectChatWs(millis())
+
+	for {
+		nowMs := millis()
+
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 3 {
+				ws_close()
+				return
+			}
+		}
+
+		pollWebSocket(nowMs)
+
+		clicked, tx, ty := pollFilteredClick()
+		if clicked {
+			// Top-left exit wedge (0..15, 0..23)
+			if tx < 16 && ty < 24 {
+				ws_close()
+				return
+			}
+			// Header bar interactions
+			if ty < 24 {
+				if tx >= 58 && tx <= 162 {
+					promptAndChangeNickname()
+				} else if tx >= 166 && tx <= 258 {
+					connectChatWs(nowMs)
+				} else if tx >= 266 {
+					lineCount = 0
+					scrollTop = 0
+					drawChatViewport()
+				}
+			} else if ty >= 208 {
+				// Bottom compose bar ([Tap to type...] or [SEND])
+				promptAndSendChatMessage()
+			} else if lineCount > VISIBLE_LINES && tx >= 290 {
+				// Scroll up / down buttons on right side of chat viewport
+				if ty < 115 && scrollTop > 0 {
+					scrollTop = scrollTop - 3
+					if scrollTop < 0 {
+						scrollTop = 0
+					}
+					drawChatViewport()
+				} else if ty >= 115 && scrollTop+VISIBLE_LINES < lineCount {
+					scrollTop = scrollTop + 3
+					if scrollTop+VISIBLE_LINES > lineCount {
+						scrollTop = lineCount - VISIBLE_LINES
+					}
+					drawChatViewport()
+				}
+			}
+		}
+
+		os_delay_ms(20)
+	}
+}

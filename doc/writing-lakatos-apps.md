@@ -227,6 +227,10 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | | `os_wifi_connected() int` | Returns `1` if Wi-Fi is connected, `0` otherwise |
 | | `os_http_get(url string, bufAddr *byte, maxLen int) int` | Performs an HTTP/HTTPS `GET` into `bufAddr` (up to `maxLen` bytes); returns bytes read or `<0` on error (also `os.HttpGet`) |
 | | `os.FetchWithCache(url string, bufAddr *byte, maxLen int, maxAgeSec int) int` | Reads `/net/cache/<CityHash32(url)>`; if missing or older than `maxAgeSec`, fetches `url` and caches it (also `os_fetch_with_cache`) |
+| | `ws_open(urlOrPath string) int` | Connects an RFC 6455 WebSocket to a Superhighway room path (e.g. `"/ws/chat"`, `"/croquet"`) or `ws://` URL (`1` on success, `0` on failure) |
+| | `ws_send(bufAddr *byte, len int) int` | Sends a WebSocket text frame (`1` on success, `-1` on disconnect; also accepts a 1-arg `string`/`[]byte` slice) |
+| | `ws_recv(bufAddr *byte, maxLen int) int` | Non-blocking poll for the next WebSocket frame into `bufAddr` (`>0` bytes read, `0` if none waiting, `<0` on disconnect) |
+| | `ws_close()` | Closes the active WebSocket connection |
 | **Core 0 Prefetch** | `os_prefetch_start(path string, bufAddr, maxLen int) int` | Starts asynchronous file prefetch on Core 0 (`PRO_CPU`) into `bufAddr` (`maxLen` cap) |
 | | `os_prefetch_status() (state int, bytesRead int)` | Polls Core 0 prefetcher (`0`=IDLE, `1`=BUSY, `2`=READY, `<0`=ERROR) and bytes read |
 | | `os_prefetch_cancel()` | Cancels any in-flight Core 0 prefetch and waits for idle |
