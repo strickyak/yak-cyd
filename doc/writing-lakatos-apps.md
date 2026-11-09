@@ -192,6 +192,11 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | | `ftoa(val float32, decimals int) string` | Formats `float32` as a `string` slice |
 | | `tft_push_rgb565(x, y, w, h, pixAddr int)` | Pushes raw `uint16` RGB565 sprite buffer at `pixAddr` |
 | | `tft_draw_pal4(x, y, w, h, palAddr, pix4bppAddr int)` | Renders a 4-bit indexed bitmap (`2 pixels/byte`, high nibble first) using 16-entry `uint16` RGB565 palette at `palAddr` |
+| | `pal4_clear(bufAddr, w, h, colorIdx int)` | Fast-clears a 4-bit `pal4` buffer (`w * h / 2` bytes) to `colorIdx` (`0..15`) |
+| | `pal4_fill_triangle(bufAddr, w, h, x0, y0, x1, y1, x2, y2, colorIdx int)` | Rasterizes a clipped filled triangle into a 4-bit `pal4` buffer |
+| | `pal4_fill_circle(bufAddr, w, h, cx, cy, r, colorIdx int)` | Rasterizes a clipped filled circle into a 4-bit `pal4` buffer |
+| | `pal4_draw_line(bufAddr, w, h, x0, y0, x1, y1, colorIdx int)` | Draws a Cohen-Sutherland viewport-clipped line into a 4-bit `pal4` buffer |
+| | `pal4_render_3d(bufAddr, w, h, camAddr, primsAddr, primCount int) int` | Renders a 3D scene graph (`primCount` 64-byte `float32[16]` primitives at `primsAddr` with 48-byte `float32[12]` camera at `camAddr`) into a 4-bit `pal4` buffer and returns visible count |
 | | `save_png_pal4(path string, w, h, palAddr, pix4bppAddr int) int` | Encodes and writes a 4-bit indexed-color `.png` file to VFS (`1` on success, `0` on error) |
 | | `tft_draw_png_file(path string, x, y int) bool` | Streams and draws a `.png` file from `/flash`, `/sd`, or `/net` at `(x,y)` (transparent pixels skipped) |
 | | `tft_draw_png(bufAddr, len, x, y int) bool` | Decodes and draws a PNG image from RAM buffer (or 3-arg `(sliceOrPath, x, y)`) |

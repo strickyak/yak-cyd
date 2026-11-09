@@ -3818,6 +3818,9 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 	case "pal4_draw_line", "tft_pal4_draw_line":
 		c.emitOp("SYSCALL", "SYS_PAL4_DRAW_LINE")
 		return VoidType, nil
+	case "pal4_render_3d", "tft_pal4_render_3d":
+		c.emitOp("SYSCALL", "SYS_PAL4_RENDER_3D")
+		return ScalarInt, nil
 	}
 
 	return TypeDesc{}, fmt.Errorf("line %d: unknown function or syscall %q", line, name)

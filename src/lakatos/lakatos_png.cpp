@@ -913,6 +913,315 @@ void lakatosPal4DrawLine(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1,
   }
 }
 
+int lakatosPal4Render3D(uint8_t* pix4bpp, int w, int h,
+                        const uint8_t* camBytes, uint8_t* primsBytes, int primCount) {
+  if (!pix4bpp || !camBytes || w <= 0 || h <= 0 || (w & 1) != 0) return 0;
+
+  float cam[12];
+  memcpy(cam, camBytes, sizeof(cam));
+  float camX        = cam[0];
+  float camY        = cam[1];
+  float camZ        = cam[2];
+  float yaw         = cam[3];
+  float pitch       = cam[4];
+  float focalLen    = cam[5];
+  int   horizonY    = (int)cam[6];
+  int   skyTopCol   = (int)cam[7];
+  int   skyHorizCol = (int)cam[8];
+  int   groundCol   = (int)cam[9];
+  int   detailLevel = (int)cam[10];
+
+  if (skyTopCol >= 0 && groundCol >= 0) {
+    lakatosPal4Clear(pix4bpp, w, h, horizonY, (uint8_t)skyTopCol, (uint8_t)groundCol);
+  }
+  if (skyHorizCol >= 0) {
+    for (int hy = horizonY - 12; hy < horizonY; hy++) {
+      lakatosPal4DrawLine(pix4bpp, w, h, 0, hy, w - 1, hy, (uint8_t)skyHorizCol);
+    }
+  }
+
+  if (!primsBytes || primCount <= 0) return 0;
+  if (primCount > 256) primCount = 256;
+
+  float camSin    = sinf(yaw);
+  float camCos    = cosf(yaw);
+  float camAbsSin = fabsf(camSin);
+  float camAbsCos = fabsf(camCos);
+  float camSinP   = sinf(pitch);
+  float camCosP   = cosf(pitch);
+  int   halfW     = w / 2;
+
+  struct SortItem {
+    int16_t index;
+    float   depth;
+  };
+  SortItem items[256];
+  int itemCount = 0;
+
+  for (int i = 0; i < primCount; i++) {
+    float p[16];
+    memcpy(p, primsBytes + i * 64, 64);
+    int kind      = (int)p[0];
+    int minDetail = (int)p[1];
+    if (kind == 2 || kind == 4) {
+      float zero = 0.0f;
+      memcpy(primsBytes + i * 64 + 15 * 4, &zero, 4);
+    }
+    if (minDetail <= 0 || minDetail > detailLevel) continue;
+
+    if (kind == 0 || kind == 1) {
+      float cx = (p[4] + p[7] + p[10] + p[13]) * 0.25f;
+      float cy = (p[5] + p[8] + p[11] + p[14]) * 0.25f;
+      float cz = (p[6] + p[9] + p[12] + p[15]) * 0.25f;
+      float hx = 4.0f, hy = 4.0f;
+      for (int v = 0; v < 4; v++) {
+        float dxv = fabsf(p[4 + v * 3] - cx);
+        float dyv = fabsf(p[5 + v * 3] - cy);
+        if (dxv > hx) hx = dxv;
+        if (dyv > hy) hy = dyv;
+      }
+      float dx    = cx - camX;
+      float dy    = cy - camY;
+      float ry    = dx * camSin + dy * camCos;
+      float ryMax = ry + hx * camAbsSin + hy * camAbsCos;
+      float z2    = p[12];
+      float minRY = (z2 <= 1.0f) ? 62.0f : 8.0f;
+      if (ryMax < minRY) continue;
+      float rx     = dx * camCos - dy * camSin;
+      float rxSpan = ryMax + hx * camAbsCos + hy * camAbsSin;
+      if (rx < -rxSpan || rx > rxSpan) continue;
+      float bias = (z2 <= 1.0f) ? (40.0f - z2 * 12.0f) : 0.0f;
+      float d    = ry * camCosP - (cz - camZ) * camSinP + bias;
+      if (d > 5.0f) {
+        items[itemCount].index = (int16_t)i;
+        items[itemCount].depth = d;
+        itemCount++;
+      }
+    } else if (kind == 2) {
+      float dx = p[4] - camX;
+      float dy = p[5] - camY;
+      float dz = (p[6] + 18.0f) - camZ;
+      float ry = dx * camSin + dy * camCos;
+      float d  = ry * camCosP - dz * camSinP;
+      if (d > 5.0f) {
+        items[itemCount].index = (int16_t)i;
+        items[itemCount].depth = d;
+        itemCount++;
+      }
+    } else if (kind == 3) {
+      float dx = 0.5f * (p[4] + p[7]) - camX;
+      float dy = 0.5f * (p[5] + p[8]) - camY;
+      float dz = 0.5f * (p[6] + p[9]) - camZ;
+      float ry = dx * camSin + dy * camCos;
+      float d  = ry * camCosP - dz * camSinP;
+      if (d > 5.0f) {
+        items[itemCount].index = (int16_t)i;
+        items[itemCount].depth = d;
+        itemCount++;
+      }
+    } else if (kind == 4) {
+      float dx = p[4] - camX;
+      float dy = p[5] - camY;
+      float dz = p[6] - camZ;
+      float ry = dx * camSin + dy * camCos;
+      float d  = ry * camCosP - dz * camSinP;
+      if (d > 5.0f) {
+        items[itemCount].index = (int16_t)i;
+        items[itemCount].depth = d;
+        itemCount++;
+      }
+    }
+  }
+
+  static const int kGaps[4] = {40, 13, 4, 1};
+  for (int gi = 0; gi < 4; gi++) {
+    int gap = kGaps[gi];
+    for (int a = gap; a < itemCount; a++) {
+      SortItem kv = items[a];
+      int b = a - gap;
+      while (b >= 0 && items[b].depth < kv.depth) {
+        items[b + gap] = items[b];
+        b -= gap;
+      }
+      items[b + gap] = kv;
+    }
+  }
+
+  auto projectPt = [&](float wx, float wy, float wz, int& sx, int& sy, float& depth) -> bool {
+    float dx = wx - camX;
+    float dy = wy - camY;
+    float dz = wz - camZ;
+    float ry = dx * camSin + dy * camCos;
+    float cy = ry * camCosP - dz * camSinP;
+    if (cy < 8.0f) return false;
+    float invY = focalLen / cy;
+    depth = cy;
+    sx = halfW + (int)((dx * camCos - dy * camSin) * invY);
+    sy = horizonY - (int)((ry * camSinP + dz * camCosP) * invY);
+    return true;
+  };
+
+  for (int k = 0; k < itemCount; k++) {
+    int idx = items[k].index;
+    float p[16];
+    memcpy(p, primsBytes + idx * 64, 64);
+    int kind    = (int)p[0];
+    int fillCol = (int)p[2];
+    int edgeCol = (int)p[3];
+
+    if (kind == 0 || kind == 1) {
+      int sx0, sy0, sx1, sy1, sx2, sy2;
+      float d0, d1, d2;
+      if (!projectPt(p[4], p[5], p[6], sx0, sy0, d0)) continue;
+      if (!projectPt(p[7], p[8], p[9], sx1, sy1, d1)) continue;
+      if (!projectPt(p[10], p[11], p[12], sx2, sy2, d2)) continue;
+
+      bool isTri = (kind == 1) || (p[10] == p[13] && p[11] == p[14] && p[12] == p[15]);
+      if (isTri) {
+        if ((sx0 < 0 && sx1 < 0 && sx2 < 0) || (sx0 >= w && sx1 >= w && sx2 >= w) ||
+            (sy0 < 0 && sy1 < 0 && sy2 < 0) || (sy0 >= h && sy1 >= h && sy2 >= h)) {
+          continue;
+        }
+        if (fillCol >= 0) {
+          lakatosPal4FillTriangle(pix4bpp, w, h, sx0, sy0, sx1, sy1, sx2, sy2, (uint8_t)fillCol);
+        }
+        if (edgeCol >= 0) {
+          lakatosPal4DrawLine(pix4bpp, w, h, sx0, sy0, sx1, sy1, (uint8_t)edgeCol);
+          lakatosPal4DrawLine(pix4bpp, w, h, sx1, sy1, sx2, sy2, (uint8_t)edgeCol);
+          lakatosPal4DrawLine(pix4bpp, w, h, sx2, sy2, sx0, sy0, (uint8_t)edgeCol);
+        }
+      } else {
+        int sx3, sy3;
+        float d3;
+        if (!projectPt(p[13], p[14], p[15], sx3, sy3, d3)) continue;
+        if ((sx0 < 0 && sx1 < 0 && sx2 < 0 && sx3 < 0) ||
+            (sx0 >= w && sx1 >= w && sx2 >= w && sx3 >= w) ||
+            (sy0 < 0 && sy1 < 0 && sy2 < 0 && sy3 < 0) ||
+            (sy0 >= h && sy1 >= h && sy2 >= h && sy3 >= h)) {
+          continue;
+        }
+        if (fillCol >= 0) {
+          lakatosPal4FillTriangle(pix4bpp, w, h, sx0, sy0, sx1, sy1, sx2, sy2, (uint8_t)fillCol);
+          lakatosPal4FillTriangle(pix4bpp, w, h, sx0, sy0, sx2, sy2, sx3, sy3, (uint8_t)fillCol);
+        }
+        if (edgeCol >= 0) {
+          lakatosPal4DrawLine(pix4bpp, w, h, sx0, sy0, sx1, sy1, (uint8_t)edgeCol);
+          lakatosPal4DrawLine(pix4bpp, w, h, sx1, sy1, sx2, sy2, (uint8_t)edgeCol);
+          lakatosPal4DrawLine(pix4bpp, w, h, sx2, sy2, sx3, sy3, (uint8_t)edgeCol);
+          lakatosPal4DrawLine(pix4bpp, w, h, sx3, sy3, sx0, sy0, (uint8_t)edgeCol);
+        }
+      }
+    } else if (kind == 2) {
+      float ax = p[4], ay = p[5], az = p[6];
+      float theta = p[7];
+      int isSelf = (int)p[8];
+      uint8_t bodyCol = (uint8_t)(fillCol & 0x0F);
+      uint8_t darkCol = (edgeCol >= 0) ? (uint8_t)(edgeCol & 0x0F) : 12;
+      uint8_t whiteCol = 11;
+
+      int shSX, shSY, botSX, botSY, headSX, headSY;
+      float shDepth, botDepth, headDepth;
+      if (!projectPt(ax, ay, az + 18.0f, shSX, shSY, shDepth)) continue;
+      if (shDepth < 14.0f || shDepth > 680.0f) continue;
+      if (!projectPt(ax, ay, az + 1.5f, botSX, botSY, botDepth)) continue;
+
+      int rTop = (int)(8.5f * focalLen / shDepth);
+      int rBot = (int)(8.5f * focalLen / botDepth);
+      if (rTop < 2) rTop = 2; else if (rTop > 36) rTop = 36;
+      if (rBot < 2) rBot = 2; else if (rBot > 36) rBot = 36;
+
+      lakatosPal4FillCircle(pix4bpp, w, h, botSX, botSY + 2, rBot / 2 + 2, darkCol);
+      lakatosPal4FillCircle(pix4bpp, w, h, shSX, shSY, rTop + 1, darkCol);
+      lakatosPal4FillCircle(pix4bpp, w, h, shSX, shSY, rTop, bodyCol);
+
+      int shHiR = rTop / 4;
+      if (shHiR < 1) shHiR = 1;
+      lakatosPal4FillCircle(pix4bpp, w, h, shSX - rTop / 2, shSY - rTop / 2, shHiR, whiteCol);
+
+      int baseCapR = rBot / 3;
+      if (baseCapR < 1) baseCapR = 1;
+      lakatosPal4FillCircle(pix4bpp, w, h, botSX, botSY, baseCapR + 1, darkCol);
+
+      int bxL = botSX - rBot, bxR = botSX + rBot;
+      int txL = shSX - rTop,  txR = shSX + rTop;
+      lakatosPal4FillTriangle(pix4bpp, w, h, bxL, botSY, bxR, botSY, txR, shSY, bodyCol);
+      lakatosPal4FillTriangle(pix4bpp, w, h, bxL, botSY, txR, shSY, txL, shSY, bodyCol);
+      lakatosPal4FillCircle(pix4bpp, w, h, botSX, botSY, baseCapR, bodyCol);
+
+      int hx1 = txL + (txR - txL) / 4;
+      int hx2 = bxL + (bxR - bxL) / 4;
+      lakatosPal4DrawLine(pix4bpp, w, h, hx1, shSY + 1, hx2, botSY - 1, whiteCol);
+      if (rTop >= 6) {
+        lakatosPal4DrawLine(pix4bpp, w, h, hx1 + 1, shSY + 1, hx2 + 1, botSY - 1, whiteCol);
+      }
+      lakatosPal4DrawLine(pix4bpp, w, h, txL - 1, shSY, bxL - 1, botSY, darkCol);
+      lakatosPal4DrawLine(pix4bpp, w, h, txR + 1, shSY, bxR + 1, botSY, darkCol);
+      lakatosPal4DrawLine(pix4bpp, w, h, bxL, botSY + baseCapR, bxR, botSY + baseCapR, darkCol);
+      lakatosPal4DrawLine(pix4bpp, w, h, txL + 2, shSY, txR - 2, shSY, darkCol);
+
+      if (!projectPt(ax, ay, az + 33.5f, headSX, headSY, headDepth)) continue;
+      int headR = (int)(6.5f * focalLen / headDepth);
+      if (headR < 3) headR = 3; else if (headR > 26) headR = 26;
+
+      lakatosPal4FillCircle(pix4bpp, w, h, headSX, headSY, headR + 1, darkCol);
+      lakatosPal4FillCircle(pix4bpp, w, h, headSX, headSY, headR, bodyCol);
+      int hiR = headR / 3;
+      if (hiR < 1) hiR = 1;
+      lakatosPal4FillCircle(pix4bpp, w, h, headSX - headR / 3, headSY - headR / 3, hiR, whiteCol);
+
+      float eyeL_X = ax + sinf(theta - 0.38f) * 5.8f;
+      float eyeL_Y = ay + cosf(theta - 0.38f) * 5.8f;
+      float eyeR_X = ax + sinf(theta + 0.38f) * 5.8f;
+      float eyeR_Y = ay + cosf(theta + 0.38f) * 5.8f;
+      float eyeZ   = az + 34.2f;
+      int eyeR = headR / 4;
+      if (eyeR < 1) eyeR = 1;
+
+      int ex, ey;
+      float ed;
+      if (projectPt(eyeL_X, eyeL_Y, eyeZ, ex, ey, ed) && ed < headDepth + 1.0f) {
+        lakatosPal4FillCircle(pix4bpp, w, h, ex, ey, eyeR + 1, whiteCol);
+        lakatosPal4FillCircle(pix4bpp, w, h, ex, ey, eyeR, darkCol);
+      }
+      if (projectPt(eyeR_X, eyeR_Y, eyeZ, ex, ey, ed) && ed < headDepth + 1.0f) {
+        lakatosPal4FillCircle(pix4bpp, w, h, ex, ey, eyeR + 1, whiteCol);
+        lakatosPal4FillCircle(pix4bpp, w, h, ex, ey, eyeR, darkCol);
+      }
+      if (isSelf != 0) {
+        lakatosPal4DrawLine(pix4bpp, w, h, headSX - headR / 2, headSY + 1, headSX + headR / 2, headSY + 1, darkCol);
+      }
+
+      float outVals[3] = {(float)headSX, (float)(headSY - headR - 10), 1.0f};
+      memcpy(primsBytes + idx * 64 + 13 * 4, outVals, sizeof(outVals));
+    } else if (kind == 3) {
+      int sx0, sy0, sx1, sy1;
+      float d0, d1;
+      if (projectPt(p[4], p[5], p[6], sx0, sy0, d0) &&
+          projectPt(p[7], p[8], p[9], sx1, sy1, d1) && fillCol >= 0) {
+        lakatosPal4DrawLine(pix4bpp, w, h, sx0, sy0, sx1, sy1, (uint8_t)fillCol);
+      }
+    } else if (kind == 4) {
+      int sx0, sy0;
+      float d0;
+      if (projectPt(p[4], p[5], p[6], sx0, sy0, d0)) {
+        float worldR = (p[7] > 0.5f) ? p[7] : 5.0f;
+        int r = (int)(worldR * focalLen / d0);
+        if (r < 1) r = 1; else if (r > 64) r = 64;
+        if (edgeCol >= 0) {
+          lakatosPal4FillCircle(pix4bpp, w, h, sx0, sy0, r + 1, (uint8_t)edgeCol);
+        }
+        if (fillCol >= 0) {
+          lakatosPal4FillCircle(pix4bpp, w, h, sx0, sy0, r, (uint8_t)fillCol);
+        }
+        float outVals[3] = {(float)sx0, (float)(sy0 - r - 4), 1.0f};
+        memcpy(primsBytes + idx * 64 + 13 * 4, outVals, sizeof(outVals));
+      }
+    }
+  }
+
+  return itemCount;
+}
+
 namespace {
 
 static uint32_t calcPngCrc32(const uint8_t* data, size_t len) {

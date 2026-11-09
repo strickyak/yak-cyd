@@ -242,6 +242,7 @@ enum LCodeSyscall : uint8_t {
   SysPal4FillTri    = 0x52,
   SysPal4FillCirc   = 0x53,
   SysPal4DrawLine   = 0x54,
+  SysPal4Render3D   = 0x55,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -1233,6 +1234,30 @@ struct LCodeVM {
                             (int)(int32_t)x1, (int)(int32_t)y1,
                             (uint8_t)col);
         return true;
+      }
+      case SysPal4Render3D: {
+        uint32_t primCount = 0, primsAddr = 0, camAddr = 0, h = 0, w = 0, bufAddr = 0;
+        if (!pop(primCount) || !pop(primsAddr) || !pop(camAddr) ||
+            !pop(h) || !pop(w) || !pop(bufAddr)) {
+          return false;
+        }
+        int iw = (int)(int32_t)w, ih = (int)(int32_t)h;
+        int icnt = (int)(int32_t)primCount;
+        if (iw <= 0 || ih <= 0 || (iw & 1) != 0) {
+          return push(0);
+        }
+        if (!checkAddr(bufAddr, (uint32_t)((iw * ih) / 2)) ||
+            !checkAddr(camAddr, 48u)) {
+          return false;
+        }
+        if (icnt > 0 && !checkAddr(primsAddr, (uint32_t)icnt * 64u)) {
+          return false;
+        }
+        int vis = lakatosPal4Render3D(mem + bufAddr, iw, ih,
+                                      mem + camAddr,
+                                      (icnt > 0) ? (mem + primsAddr) : nullptr,
+                                      icnt);
+        return push((uint32_t)vis);
       }
       default:
         setErr("Unknown syscall");

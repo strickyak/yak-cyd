@@ -213,6 +213,7 @@ void lakatosPal4Clear(uint8_t* pix4bpp, int w, int h, int topRows, uint8_t topCo
 void lakatosPal4FillTriangle(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1, int y1, int x2, int y2, uint8_t col);
 void lakatosPal4FillCircle(uint8_t* pix4bpp, int w, int h, int cx, int cy, int r, uint8_t col);
 void lakatosPal4DrawLine(uint8_t* pix4bpp, int w, int h, int x0, int y0, int x1, int y1, uint8_t col);
+int  lakatosPal4Render3D(uint8_t* pix4bpp, int w, int h, const uint8_t* camBytes, uint8_t* primsBytes, int primCount);
 
 // ---------------------------------------------------------------------------
 // JPEG Image Decoder & Renderer via ROM tjpgd (implemented in lakatos_jpg.cpp)

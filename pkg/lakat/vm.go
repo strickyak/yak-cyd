@@ -2550,6 +2550,38 @@ func (vm *VM) execSyscall(sysId byte) error {
 		vm.pal4DrawLine(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], int(w), int(h),
 			int(int32(x0)), int(int32(y0)), int(int32(x1)), int(int32(y1)), byte(col&0x0F))
 
+	case SysPal4Render3D:
+		primCount, _ := vm.pop()
+		primsAddr, _ := vm.pop()
+		camAddr, _ := vm.pop()
+		h, _ := vm.pop()
+		w, _ := vm.pop()
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		iw := int(int32(w))
+		ih := int(int32(h))
+		icnt := int(int32(primCount))
+		if iw <= 0 || ih <= 0 || (iw&1) != 0 {
+			vm.push(0)
+			return nil
+		}
+		totalBytes := (iw * ih) / 2
+		if err := vm.checkAddr(bufAddr, totalBytes); err != nil {
+			return err
+		}
+		if err := vm.checkAddr(camAddr, 48); err != nil {
+			return err
+		}
+		if icnt > 0 {
+			if err := vm.checkAddr(primsAddr, icnt*64); err != nil {
+				return err
+			}
+		}
+		vis := vm.pal4Render3D(vm.Memory[bufAddr:bufAddr+uint32(totalBytes)], iw, ih, camAddr, primsAddr, icnt)
+		vm.push(uint32(vis))
+
 	default:
 		return vm.errf("unimplemented syscall 0x%02X", sysId)
 	}
@@ -3673,5 +3705,380 @@ func (vm *VM) pal4DrawLine(buf []byte, w, h, x0, y0, x1, y1 int, col byte) {
 			y0 += sy
 		}
 	}
+}
+
+func (vm *VM) readFloat32At(addr uint32) float32 {
+	return math.Float32frombits(binary.LittleEndian.Uint32(vm.Memory[addr : addr+4]))
+}
+
+func (vm *VM) writeFloat32At(addr uint32, v float32) {
+	binary.LittleEndian.PutUint32(vm.Memory[addr:addr+4], math.Float32bits(v))
+}
+
+func (vm *VM) pal4Render3D(buf []byte, w, h int, camAddr, primsAddr uint32, primCount int) int {
+	var cam [12]float32
+	for i := 0; i < 12; i++ {
+		cam[i] = vm.readFloat32At(camAddr + uint32(i*4))
+	}
+	camX := cam[0]
+	camY := cam[1]
+	camZ := cam[2]
+	yaw := cam[3]
+	pitch := cam[4]
+	focalLen := cam[5]
+	horizonY := int(cam[6])
+	skyTopCol := int(cam[7])
+	skyHorizCol := int(cam[8])
+	groundCol := int(cam[9])
+	detailLevel := int(cam[10])
+
+	if skyTopCol >= 0 && groundCol >= 0 {
+		vm.pal4Clear(buf, w, h, horizonY, byte(skyTopCol&0x0F), byte(groundCol&0x0F))
+	}
+	if skyHorizCol >= 0 {
+		for hy := horizonY - 12; hy < horizonY; hy++ {
+			vm.pal4DrawLine(buf, w, h, 0, hy, w-1, hy, byte(skyHorizCol&0x0F))
+		}
+	}
+
+	if primCount <= 0 {
+		return 0
+	}
+	if primCount > 256 {
+		primCount = 256
+	}
+
+	camSin := float32(math.Sin(float64(yaw)))
+	camCos := float32(math.Cos(float64(yaw)))
+	camAbsSin := float32(math.Abs(float64(camSin)))
+	camAbsCos := float32(math.Abs(float64(camCos)))
+	camSinP := float32(math.Sin(float64(pitch)))
+	camCosP := float32(math.Cos(float64(pitch)))
+	halfW := w / 2
+
+	type sortItem struct {
+		index int
+		depth float32
+	}
+	var items [256]sortItem
+	itemCount := 0
+
+	for i := 0; i < primCount; i++ {
+		pBase := primsAddr + uint32(i*64)
+		var p [16]float32
+		for j := 0; j < 16; j++ {
+			p[j] = vm.readFloat32At(pBase + uint32(j*4))
+		}
+		kind := int(p[0])
+		minDetail := int(p[1])
+		if kind == 2 || kind == 4 {
+			vm.writeFloat32At(pBase+15*4, 0.0)
+		}
+		if minDetail <= 0 || minDetail > detailLevel {
+			continue
+		}
+
+		switch kind {
+		case 0, 1:
+			cx := (p[4] + p[7] + p[10] + p[13]) * 0.25
+			cy := (p[5] + p[8] + p[11] + p[14]) * 0.25
+			cz := (p[6] + p[9] + p[12] + p[15]) * 0.25
+			hx := float32(4.0)
+			hy := float32(4.0)
+			for v := 0; v < 4; v++ {
+				dxv := float32(math.Abs(float64(p[4+v*3] - cx)))
+				dyv := float32(math.Abs(float64(p[5+v*3] - cy)))
+				if dxv > hx {
+					hx = dxv
+				}
+				if dyv > hy {
+					hy = dyv
+				}
+			}
+			dx := cx - camX
+			dy := cy - camY
+			ry := dx*camSin + dy*camCos
+			ryMax := ry + hx*camAbsSin + hy*camAbsCos
+			z2 := p[12]
+			minRY := float32(8.0)
+			if z2 <= 1.0 {
+				minRY = 62.0
+			}
+			if ryMax < minRY {
+				continue
+			}
+			rx := dx*camCos - dy*camSin
+			rxSpan := ryMax + hx*camAbsCos + hy*camAbsSin
+			if rx < -rxSpan || rx > rxSpan {
+				continue
+			}
+			bias := float32(0.0)
+			if z2 <= 1.0 {
+				bias = 40.0 - z2*12.0
+			}
+			d := ry*camCosP - (cz-camZ)*camSinP + bias
+			if d > 5.0 {
+				items[itemCount] = sortItem{index: i, depth: d}
+				itemCount++
+			}
+		case 2:
+			dx := p[4] - camX
+			dy := p[5] - camY
+			dz := (p[6] + 18.0) - camZ
+			ry := dx*camSin + dy*camCos
+			d := ry*camCosP - dz*camSinP
+			if d > 5.0 {
+				items[itemCount] = sortItem{index: i, depth: d}
+				itemCount++
+			}
+		case 3:
+			dx := 0.5*(p[4]+p[7]) - camX
+			dy := 0.5*(p[5]+p[8]) - camY
+			dz := 0.5*(p[6]+p[9]) - camZ
+			ry := dx*camSin + dy*camCos
+			d := ry*camCosP - dz*camSinP
+			if d > 5.0 {
+				items[itemCount] = sortItem{index: i, depth: d}
+				itemCount++
+			}
+		case 4:
+			dx := p[4] - camX
+			dy := p[5] - camY
+			dz := p[6] - camZ
+			ry := dx*camSin + dy*camCos
+			d := ry*camCosP - dz*camSinP
+			if d > 5.0 {
+				items[itemCount] = sortItem{index: i, depth: d}
+				itemCount++
+			}
+		}
+	}
+
+	gaps := [4]int{40, 13, 4, 1}
+	for _, gap := range gaps {
+		for a := gap; a < itemCount; a++ {
+			kv := items[a]
+			b := a - gap
+			for b >= 0 && items[b].depth < kv.depth {
+				items[b+gap] = items[b]
+				b -= gap
+			}
+			items[b+gap] = kv
+		}
+	}
+
+	projectPt := func(wx, wy, wz float32) (int, int, float32, bool) {
+		dx := wx - camX
+		dy := wy - camY
+		dz := wz - camZ
+		ry := dx*camSin + dy*camCos
+		cy := ry*camCosP - dz*camSinP
+		if cy < 8.0 {
+			return 0, 0, 0, false
+		}
+		invY := focalLen / cy
+		sx := halfW + int((dx*camCos-dy*camSin)*invY)
+		sy := horizonY - int((ry*camSinP+dz*camCosP)*invY)
+		return sx, sy, cy, true
+	}
+
+	for k := 0; k < itemCount; k++ {
+		idx := items[k].index
+		pBase := primsAddr + uint32(idx*64)
+		var p [16]float32
+		for j := 0; j < 16; j++ {
+			p[j] = vm.readFloat32At(pBase + uint32(j*4))
+		}
+		kind := int(p[0])
+		fillCol := int(p[2])
+		edgeCol := int(p[3])
+
+		switch kind {
+		case 0, 1:
+			sx0, sy0, _, ok0 := projectPt(p[4], p[5], p[6])
+			sx1, sy1, _, ok1 := projectPt(p[7], p[8], p[9])
+			sx2, sy2, _, ok2 := projectPt(p[10], p[11], p[12])
+			if !ok0 || !ok1 || !ok2 {
+				continue
+			}
+			isTri := (kind == 1) || (p[10] == p[13] && p[11] == p[14] && p[12] == p[15])
+			if isTri {
+				if (sx0 < 0 && sx1 < 0 && sx2 < 0) || (sx0 >= w && sx1 >= w && sx2 >= w) ||
+					(sy0 < 0 && sy1 < 0 && sy2 < 0) || (sy0 >= h && sy1 >= h && sy2 >= h) {
+					continue
+				}
+				if fillCol >= 0 {
+					vm.pal4FillTriangle(buf, w, h, sx0, sy0, sx1, sy1, sx2, sy2, byte(fillCol&0x0F))
+				}
+				if edgeCol >= 0 {
+					ec := byte(edgeCol & 0x0F)
+					vm.pal4DrawLine(buf, w, h, sx0, sy0, sx1, sy1, ec)
+					vm.pal4DrawLine(buf, w, h, sx1, sy1, sx2, sy2, ec)
+					vm.pal4DrawLine(buf, w, h, sx2, sy2, sx0, sy0, ec)
+				}
+			} else {
+				sx3, sy3, _, ok3 := projectPt(p[13], p[14], p[15])
+				if !ok3 {
+					continue
+				}
+				if (sx0 < 0 && sx1 < 0 && sx2 < 0 && sx3 < 0) ||
+					(sx0 >= w && sx1 >= w && sx2 >= w && sx3 >= w) ||
+					(sy0 < 0 && sy1 < 0 && sy2 < 0 && sy3 < 0) ||
+					(sy0 >= h && sy1 >= h && sy2 >= h && sy3 >= h) {
+					continue
+				}
+				if fillCol >= 0 {
+					fc := byte(fillCol & 0x0F)
+					vm.pal4FillTriangle(buf, w, h, sx0, sy0, sx1, sy1, sx2, sy2, fc)
+					vm.pal4FillTriangle(buf, w, h, sx0, sy0, sx2, sy2, sx3, sy3, fc)
+				}
+				if edgeCol >= 0 {
+					ec := byte(edgeCol & 0x0F)
+					vm.pal4DrawLine(buf, w, h, sx0, sy0, sx1, sy1, ec)
+					vm.pal4DrawLine(buf, w, h, sx1, sy1, sx2, sy2, ec)
+					vm.pal4DrawLine(buf, w, h, sx2, sy2, sx3, sy3, ec)
+					vm.pal4DrawLine(buf, w, h, sx3, sy3, sx0, sy0, ec)
+				}
+			}
+		case 2:
+			ax, ay, az := p[4], p[5], p[6]
+			theta := p[7]
+			isSelf := int(p[8])
+			bodyCol := byte(fillCol & 0x0F)
+			darkCol := byte(12)
+			if edgeCol >= 0 {
+				darkCol = byte(edgeCol & 0x0F)
+			}
+			whiteCol := byte(11)
+
+			shSX, shSY, shDepth, okSh := projectPt(ax, ay, az+18.0)
+			if !okSh || shDepth < 14.0 || shDepth > 680.0 {
+				continue
+			}
+			botSX, botSY, botDepth, okBot := projectPt(ax, ay, az+1.5)
+			if !okBot {
+				continue
+			}
+			rTop := int(8.5 * focalLen / shDepth)
+			rBot := int(8.5 * focalLen / botDepth)
+			if rTop < 2 {
+				rTop = 2
+			} else if rTop > 36 {
+				rTop = 36
+			}
+			if rBot < 2 {
+				rBot = 2
+			} else if rBot > 36 {
+				rBot = 36
+			}
+
+			vm.pal4FillCircle(buf, w, h, botSX, botSY+2, rBot/2+2, darkCol)
+			vm.pal4FillCircle(buf, w, h, shSX, shSY, rTop+1, darkCol)
+			vm.pal4FillCircle(buf, w, h, shSX, shSY, rTop, bodyCol)
+
+			shHiR := rTop / 4
+			if shHiR < 1 {
+				shHiR = 1
+			}
+			vm.pal4FillCircle(buf, w, h, shSX-rTop/2, shSY-rTop/2, shHiR, whiteCol)
+
+			baseCapR := rBot / 3
+			if baseCapR < 1 {
+				baseCapR = 1
+			}
+			vm.pal4FillCircle(buf, w, h, botSX, botSY, baseCapR+1, darkCol)
+
+			bxL, bxR := botSX-rBot, botSX+rBot
+			txL, txR := shSX-rTop, shSX+rTop
+			vm.pal4FillTriangle(buf, w, h, bxL, botSY, bxR, botSY, txR, shSY, bodyCol)
+			vm.pal4FillTriangle(buf, w, h, bxL, botSY, txR, shSY, txL, shSY, bodyCol)
+			vm.pal4FillCircle(buf, w, h, botSX, botSY, baseCapR, bodyCol)
+
+			hx1 := txL + (txR-txL)/4
+			hx2 := bxL + (bxR-bxL)/4
+			vm.pal4DrawLine(buf, w, h, hx1, shSY+1, hx2, botSY-1, whiteCol)
+			if rTop >= 6 {
+				vm.pal4DrawLine(buf, w, h, hx1+1, shSY+1, hx2+1, botSY-1, whiteCol)
+			}
+			vm.pal4DrawLine(buf, w, h, txL-1, shSY, bxL-1, botSY, darkCol)
+			vm.pal4DrawLine(buf, w, h, txR+1, shSY, bxR+1, botSY, darkCol)
+			vm.pal4DrawLine(buf, w, h, bxL, botSY+baseCapR, bxR, botSY+baseCapR, darkCol)
+			vm.pal4DrawLine(buf, w, h, txL+2, shSY, txR-2, shSY, darkCol)
+
+			headSX, headSY, headDepth, okHead := projectPt(ax, ay, az+33.5)
+			if !okHead {
+				continue
+			}
+			headR := int(6.5 * focalLen / headDepth)
+			if headR < 3 {
+				headR = 3
+			} else if headR > 26 {
+				headR = 26
+			}
+			vm.pal4FillCircle(buf, w, h, headSX, headSY, headR+1, darkCol)
+			vm.pal4FillCircle(buf, w, h, headSX, headSY, headR, bodyCol)
+			hiR := headR / 3
+			if hiR < 1 {
+				hiR = 1
+			}
+			vm.pal4FillCircle(buf, w, h, headSX-headR/3, headSY-headR/3, hiR, whiteCol)
+
+			eyeLX := ax + float32(math.Sin(float64(theta-0.38)))*5.8
+			eyeLY := ay + float32(math.Cos(float64(theta-0.38)))*5.8
+			eyeRX := ax + float32(math.Sin(float64(theta+0.38)))*5.8
+			eyeRY := ay + float32(math.Cos(float64(theta+0.38)))*5.8
+			eyeZ := az + 34.2
+			eyeR := headR / 4
+			if eyeR < 1 {
+				eyeR = 1
+			}
+			if ex, ey, ed, ok := projectPt(eyeLX, eyeLY, eyeZ); ok && ed < headDepth+1.0 {
+				vm.pal4FillCircle(buf, w, h, ex, ey, eyeR+1, whiteCol)
+				vm.pal4FillCircle(buf, w, h, ex, ey, eyeR, darkCol)
+			}
+			if ex, ey, ed, ok := projectPt(eyeRX, eyeRY, eyeZ); ok && ed < headDepth+1.0 {
+				vm.pal4FillCircle(buf, w, h, ex, ey, eyeR+1, whiteCol)
+				vm.pal4FillCircle(buf, w, h, ex, ey, eyeR, darkCol)
+			}
+			if isSelf != 0 {
+				vm.pal4DrawLine(buf, w, h, headSX-headR/2, headSY+1, headSX+headR/2, headSY+1, darkCol)
+			}
+
+			vm.writeFloat32At(pBase+13*4, float32(headSX))
+			vm.writeFloat32At(pBase+14*4, float32(headSY-headR-10))
+			vm.writeFloat32At(pBase+15*4, 1.0)
+		case 3:
+			sx0, sy0, _, ok0 := projectPt(p[4], p[5], p[6])
+			sx1, sy1, _, ok1 := projectPt(p[7], p[8], p[9])
+			if ok0 && ok1 && fillCol >= 0 {
+				vm.pal4DrawLine(buf, w, h, sx0, sy0, sx1, sy1, byte(fillCol&0x0F))
+			}
+		case 4:
+			sx0, sy0, d0, ok0 := projectPt(p[4], p[5], p[6])
+			if ok0 {
+				worldR := p[7]
+				if worldR <= 0.5 {
+					worldR = 5.0
+				}
+				r := int(worldR * focalLen / d0)
+				if r < 1 {
+					r = 1
+				} else if r > 64 {
+					r = 64
+				}
+				if edgeCol >= 0 {
+					vm.pal4FillCircle(buf, w, h, sx0, sy0, r+1, byte(edgeCol&0x0F))
+				}
+				if fillCol >= 0 {
+					vm.pal4FillCircle(buf, w, h, sx0, sy0, r, byte(fillCol&0x0F))
+				}
+				vm.writeFloat32At(pBase+13*4, float32(sx0))
+				vm.writeFloat32At(pBase+14*4, float32(sy0-r-4))
+				vm.writeFloat32At(pBase+15*4, 1.0)
+			}
+		}
+	}
+
+	return itemCount
 }
 

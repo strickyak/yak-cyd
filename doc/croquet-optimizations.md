@@ -113,11 +113,71 @@ At Detail 1, `renderScene3D()` spent **`39.81 ms` out of `54.09 ms` (`73.6%`)** 
 
 ### Detailed Phase Comparison at Detail 4 (Facing North vs. Walking)
 
-| `renderScene3D()` Phase | Baseline (North) | Optimized (North) | Baseline (Walking) | Optimized (Walking) |
-| :--- | :---: | :---: | :---: | :---: |
-| **`clearUs`** (`pal4_clear` + horizon) | `0.38 ms` | `0.47 ms` | `0.38 ms` | `0.47 ms` |
-| **`collectUs`** (Centroids + OBB frustum cull) | `19.31 ms` | **`14.93 ms`** | `19.35 ms` | **`13.16 – 14.42 ms`** |
-| **`sortUs`** (Insertion sort $\rightarrow$ Shell sort) | `74.85 ms` | **`18.62 ms`** | `118.87 ms` | **`12.74 – 15.91 ms`** |
-| **`rasterUs`** (`projVmUs` + `cppRasterUs`) | `68.58 ms` | **`47.48 ms`** | `59.77 ms` | **`30.83 – 35.99 ms`** |
-| **`blitUs`** (`tft_draw_pal4` SPI transfer) | `39.89 ms` | **`32.21 ms`** | `39.89 ms` | **`32.13 ms`** |
-| **Total `renderScene3D()`** | **`203.01 ms`** | **`113.71 ms`** | **`238.26 ms`** | **`89.76 – 99.01 ms`** |
+| `renderScene3D()` Phase | Baseline (North) | LGolf-Opt (North) | **`pal4_render_3d` (North)** | Baseline (Walking) | LGolf-Opt (Walking) | **`pal4_render_3d` (Walking)** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`setupUs`** (VM camera + avatar update) | *(in `collectUs`)* | *(in `collectUs`)* | **`0.43 ms`** *(876 steps)* | *(in `collectUs`)* | *(in `collectUs`)* | **`0.43 ms`** *(876 steps)* |
+| **`clearUs`** (`pal4_clear` + horizon) | `0.38 ms` | `0.47 ms` | *(in `render3dUs`)* | `0.38 ms` | `0.47 ms` | *(in `render3dUs`)* |
+| **`collectUs`** (Centroids + OBB frustum cull) | `19.31 ms` | `14.93 ms` | *(in `render3dUs`)* | `19.35 ms` | `13.16 – 14.42 ms` | *(in `render3dUs`)* |
+| **`sortUs`** (Insertion sort $\rightarrow$ Shell sort) | `74.85 ms` | `18.62 ms` | *(in `render3dUs`)* | `118.87 ms` | `12.74 – 15.91 ms` | *(in `render3dUs`)* |
+| **`rasterUs`** (`projVmUs` + `cppRasterUs`) | `68.58 ms` | `47.48 ms` | *(in `render3dUs`)* | `59.77 ms` | `30.83 – 35.99 ms` | *(in `render3dUs`)* |
+| **`render3dUs`** (Entire C++ 3D pipeline!) | — | — | **`5.48 ms`** | — | — | **`3.93 – 5.40 ms`** |
+| **`blitUs`** (`tft_draw_pal4` SPI transfer) | `39.89 ms` | `32.21 ms` | **`32.55 ms`** | `39.89 ms` | `32.13 ms` | **`32.55 ms`** |
+| **Total `renderScene3D()`** | **`203.01 ms`** | **`113.71 ms`** | **`38.46 ms`** | **`238.26 ms`** | **`89.76 – 99.01 ms`** | **`36.98 – 38.56 ms`** |
+
+---
+
+## 6. Kernel 3D Scene Renderer (`pal4_render_3d` / `SYS_PAL4_RENDER_3D = 0x55`)
+
+Even after the algorithmic LGolf optimizations in Section 4 (`73,411` VM steps at Detail 4), LCode bytecode interpretation still consumed **`67.2 ms` (`59%` of the frame)** at Detail 4 (`14.93 ms` culling + `18.62 ms` Shell sort + `33.66 ms` 3D vertex projection), while the actual C++ pixel rasterization took only `13.82 ms`.
+
+To eliminate the VM interpretation bottleneck completely for 3D apps, we added a general-purpose 3D scene-graph rendering syscall to Lakatos OS (`src/lakatos/lakatos_png.cpp`, `src/lakatos/lakatos_lcode_vm.cpp`, `pkg/lakat/vm.go`):
+
+```go
+visCount := pal4_render_3d(bufAddr, w, h, camAddr, primsAddr, primCount)
+```
+
+### 6.1 Compact Scene-Graph Memory Layout
+
+Instead of maintaining 20 parallel arrays in LGolf and calling hundreds of per-triangle/line/circle syscalls every frame, an LGolf app populates a flat `float32` array of 64-byte primitives once at startup (updating only dynamic primitives such as moving avatars in place) and passes a 48-byte camera descriptor each frame:
+
+- **`camAddr` (`12 × float32 = 48 bytes`)**:
+  - `[0..2]`: `camX, camY, camZ` (eye position in world space)
+  - `[3]`: `yaw` (radians), `[4]`: `pitch` (screen Y horizon offset), `[5]`: `focalLen` (e.g. `195.0`)
+  - `[6]`: `horizonY` (`< 0` skips sky/ground clear), `[7]`: `skyTopCol`, `[8]`: `skyHorizCol`, `[9]`: `groundCol`
+  - `[10]`: `detailLevel` (renders primitives with `minDetail <= detailLevel`), `[11]`: `flags`
+- **`primsAddr` (`primCount × 16 × float32 = 64 bytes/primitive`)**:
+  - `[0]`: `type` (`0` = Quad, `1` = Triangle, `2` = Avatar/Billboard, `3` = 3D Line, `4` = 3D Sphere)
+  - `[1]`: `minDetail`, `[2]`: `fillCol` (`0..15`, `< 0` for none), `[3]`: `edgeCol` (`0..15`, `< 0` for none)
+  - `[4..15]`: Up to 4 vertices `(x0,y0,z0 .. x3,y3,z3)`. For `Avatar` (`2`) and `Sphere` (`4`), the kernel writes the projected 2D screen anchor `(outSX, outSY, outVis)` back into words `[13..15]` so the app can draw 2D text overlays (like remote player callsigns) after `tft_draw_pal4`.
+
+### 6.2 What `lakatosPal4Render3D` Executes in Native C++
+
+In a single syscall (`lakatosPal4Render3D` in `src/lakatos/lakatos_png.cpp`), the ESP32 executes:
+1. **Sky/Horizon/Ground `pal4` Fast Clear** (`memset` 2 pixels/byte).
+2. **Detail Filtering + Camera-Space OBB Frustum & Ground Culling** using native hardware single-precision FPU (`sinf`/`cosf`/`fabsf`).
+3. **3-Pass Shell Sort (`gaps = 13, 4, 1`)** in a stack/heap item buffer (`kMaxRender3DItems = 256`).
+4. **Back-to-Front Perspective Projection, Near-Plane Clipping (`ry >= 5.0`), & Direct `pal4` Scanline Rasterization** (`lakatosPal4FillTriangle`, `lakatosPal4DrawLine`, `lakatosPal4FillCircle`) with zero cross-VM syscall boundary overhead and hot L1 data cache residency.
+
+### 6.3 Flash Budget & App Code Size Impact
+
+- **Kernel Flash Cost**: `lakatosPal4Render3D` added only **`~2,260 bytes`** of Xtensa code. To ensure `.pio/build/lakatos/firmware.bin` (including ESP32 64 KB MMU alignment padding) fits comfortably inside the `1,507,328`-byte `app0` OTA partition, we added `-USMOOTH_FONT` to `[env:lakatos]` in `platformio.ini` (stripping unused `TFT_eSPI` VLW smooth-font routines), freeing **`6,016 bytes`** and bringing `firmware.bin` to **`1,502,512 bytes`** (`97.9%` flash usage).
+- **App Binary Reduction**: Moving the 3D pipeline into Lakatos OS shrank `apps/croquet/croquet.lgolf` by **355 lines of code** (`760` $\rightarrow$ `405` lines) and reduced `build/apps/croquet.lapp` from **`15,824 bytes` to `11,268 bytes` (`-28.8%`)**.
+
+### 6.4 Three-Way On-Device ESP32 Benchmark Comparison (`/dev/ttyUSB0`)
+
+| View / Detail Level | 1. Baseline | 2. LGolf-Opt | 3. **`pal4_render_3d` (C++ Kernel 3D)** | Total Speedup vs. Baseline | `render3dUs` (Entire 3D Pipeline) | Final App FPS |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Detail 1 (Floor + Horizon, 13 vis)** | `54.09 ms` *(13,106 steps)* | `46.82 ms` *(12,305 steps)* | **`35.09 ms`** *(**876 steps**)* | **1.54×** | **`1.73 ms`** | **17 $\rightarrow$ 25–26 FPS** |
+| **Detail 2 (+ 3D House, 42 vis)** | `87.36 ms` *(43,749 steps)* | `73.56 ms` *(36,780 steps)* | **`36.58 ms`** *(**876 steps**)* | **2.39×** | **`3.60 ms`** | **10 $\rightarrow$ 25 FPS** |
+| **Detail 3 (+1 Tree/Mtn, 50 vis)** | `99.94 ms` *(55,678 steps)* | `80.30 ms` *(42,883 steps)* | **`37.04 ms`** *(**876 steps**)* | **2.70×** | **`4.07 ms`** | **9 $\rightarrow$ 24–25 FPS** |
+| **Detail 4 — Facing North (86 vis)** | `203.01 ms` *(157,240 steps)* | `113.71 ms` *(73,411 steps)* | **`38.46 ms`** *(**876 steps**)* | **5.28×** | **`5.48 ms`** | **4 $\rightarrow$ 23–25 FPS** |
+| **Detail 4 — Walking Courtyard** | `238.26 ms` *(173,658 steps)* | `89.76 – 99.01 ms` | **`36.98 – 38.56 ms`** *(**876 steps**)* | **6.18× – 6.44×** | **`3.93 – 5.40 ms`** | **3 $\rightarrow$ 24–25 FPS** |
+| **Detail 4 — Facing West (68 vis)** | `225.73 ms` *(173,658 steps)* | `97.03 ms` | **`36.16 ms`** *(**876 steps**)* | **6.24×** | **`3.79 ms`** | **3–4 $\rightarrow$ 25 FPS** |
+| **Detail 4 — Facing East (45 vis)** | `204.50 ms` *(158,100 steps)* | `79.73 ms` | **`35.88 ms`** *(**876 steps**)* | **5.70×** | **`2.83 ms`** | **4 $\rightarrow$ 25 FPS** |
+
+### Key Takeaways from `pal4_render_3d`
+
+1. **198× Reduction in LCode Bytecode Execution**: VM step count per frame is now a constant **`876 steps` (`0.43 ms`)** regardless of scene complexity (down from `173,658` steps at Detail 4).
+2. **Entire 3D Pipeline in `1.73 ms – 5.48 ms`**: On the ESP32's 240 MHz Xtensa LX6 with hardware single-precision FPU, clearing the buffer, culling 119 3D primitives, Shell-sorting 86 visible items, projecting all 3D vertices, and rasterizing all triangles, edges, and avatars takes just **`5.48 ms`** at maximum Detail 4 — **faster than the old `cppRasterUs` (`13.82 ms`) alone** because eliminating 238 individual VM-to-C++ syscall boundary transitions keeps the 34.5 KB `pal4` framebuffer hot in cache.
+3. **Detail 4 Runs at Almost the Same Frame Rate as Detail 1 (`~24–25 FPS`)**: Frame time is now bounded almost entirely by the `32.55 ms` 40 MHz SPI display transfer (`tft_draw_pal4`), meaning increasing detail from **Detail 1 (`13` items)** to **Detail 4 (`119` items)** adds only **`+3.37 ms`** (`35.09 ms` $\rightarrow$ `38.46 ms`) instead of `+184 ms`!
+
