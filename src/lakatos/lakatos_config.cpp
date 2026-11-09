@@ -494,6 +494,8 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
   lakatosWaitTouchRelease();
 
   bool wasDown = false;
+  uint32_t lastDownMs = 0;
+  uint32_t lastPressMs = 0;
   uint32_t lastRel = millis();
 
   while (true) {
@@ -508,14 +510,24 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
     uint32_t now = millis();
 
     if (t.touched) {
-      if (!wasDown && (now - lastRel > 90)) {
+      lastDownMs = now;
+      if (!wasDown && (uint32_t)(now - lastRel) >= 95u &&
+          (lastPressMs == 0 || (uint32_t)(now - lastPressMs) >= 180u)) {
         wasDown = true;
+        lastPressMs = now;
         if (t.y <= 25) {
-          if (t.x <= 60) return 0;  // Cancelled
-          if (allowCtrlC && t.x >= 62 && t.x <= 112) return -1;  // ^C
+          if (t.x <= 60) {
+            lakatosWaitTouchRelease();
+            return 0;  // Cancelled
+          }
+          if (allowCtrlC && t.x >= 62 && t.x <= 112) {
+            lakatosWaitTouchRelease();
+            return -1;  // ^C
+          }
           if (t.x >= 232) {
             strncpy(buf, text.c_str(), maxLen - 1);
             buf[maxLen - 1] = '\0';
+            lakatosWaitTouchRelease();
             return 1;
           }
         } else if (t.y >= 26 && t.y <= 60) {
@@ -548,12 +560,15 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
           } else {
             strncpy(buf, text.c_str(), maxLen - 1);
             buf[maxLen - 1] = '\0';
+            lakatosWaitTouchRelease();
             return 1;
           }
         }
       }
+    } else if (digitalRead(XPT2046_IRQ) == LOW && wasDown) {
+      lastDownMs = now;
     } else {
-      if (wasDown) {
+      if (wasDown && (uint32_t)(now - lastDownMs) >= 95u) {
         wasDown = false;
         lastRel = now;
       }

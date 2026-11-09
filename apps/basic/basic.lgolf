@@ -100,6 +100,24 @@ var selectedLine int
 var scrollTop int
 var statusMsg [64]byte
 var statusErr int
+var lastAcceptedClickMs int = -1000
+
+func settleModalTransition() {
+	os_delay_ms(220)
+}
+
+func pollFilteredClick() (bool, int, int) {
+	clicked, tx, ty := os_read_click()
+	if clicked {
+		now := os_millis()
+		if now-lastAcceptedClickMs < 220 {
+			return false, 0, 0
+		}
+		lastAcceptedClickMs = now
+		return true, tx, ty
+	}
+	return false, 0, 0
+}
 var fileNameBuf [32]byte
 var fullPathBuf [64]byte
 var rowDispBuf [80]byte
@@ -613,38 +631,37 @@ func drawTopBar() {
 	tft_fill_rect(0, 0, SCREEN_W, TOP_H, UI_TOP_BG)
 	tft_draw_fast_hline(0, TOP_H-1, SCREEN_W, UI_BORDER)
 
-	// Top-left EXIT + 12x12 X mark
-	drawButton(14, 2, 34, 19, MAROON, RED, WHITE, "EXIT")
+	// Top-left 12x12 NW corner X mark (no [EXIT] button)
 	DrawExitWedge()
 
-	// [RUN] (x = 50..101)
+	// [RUN] (x = 16..73)
 	runBg := UI_BTN_RUN
 	if isRunning != 0 {
 		runBg = 0x05E0
 	}
-	drawButton(50, 2, 51, 19, runBg, GREEN, WHITE, "RUN")
+	drawButton(16, 2, 57, 19, runBg, GREEN, WHITE, "RUN")
 
-	// [STOP] (x = 104..155)
+	// [STOP] (x = 76..133)
 	stopBg := UI_BTN_STOP
 	stopBorder := RED
 	if isRunning != 0 {
 		stopBg = RED
 		stopBorder = YELLOW
 	}
-	drawButton(104, 2, 51, 19, stopBg, stopBorder, WHITE, "STOP")
+	drawButton(76, 2, 57, 19, stopBg, stopBorder, WHITE, "STOP")
 
-	// [EDIT] (x = 158..209)
+	// [EDIT] (x = 136..193)
 	editBg := UI_BTN_EDIT
 	if uiMode == MODE_EDIT {
 		editBg = 0x4228
 	}
-	drawButton(158, 2, 51, 19, editBg, YELLOW, YELLOW, "EDIT")
+	drawButton(136, 2, 57, 19, editBg, YELLOW, YELLOW, "EDIT")
 
-	// [LOAD] (x = 212..263)
-	drawButton(212, 2, 51, 19, UI_BTN_LOAD, CYAN, CYAN, "LOAD")
+	// [LOAD] (x = 196..253)
+	drawButton(196, 2, 57, 19, UI_BTN_LOAD, CYAN, CYAN, "LOAD")
 
-	// [SAVE] (x = 266..317)
-	drawButton(266, 2, 51, 19, UI_BTN_SAVE, MAGENTA, WHITE, "SAVE")
+	// [SAVE] (x = 256..317)
+	drawButton(256, 2, 61, 19, UI_BTN_SAVE, MAGENTA, WHITE, "SAVE")
 }
 
 func drawStatusStrip() {
@@ -833,16 +850,19 @@ func runLineEditorModal(lineIdx int) {
 	}
 	formatLineForEdit(lineIdx, &editWorkBuf[0], MAX_LINE_LEN)
 	drawLineEditorModal()
+	settleModalTransition()
 
 	for {
-		clicked, tx, ty := os_read_click()
+		clicked, tx, ty := pollFilteredClick()
 		if clicked {
 			if ty < 25 {
 				if tx <= 60 {
+					settleModalTransition()
 					return // Cancelled
 				}
 				if tx >= 248 {
 					applyEditedLine(&editWorkBuf[0], oldNum)
+					settleModalTransition()
 					return
 				}
 			} else if ty >= 27 && ty <= 60 {
@@ -860,6 +880,7 @@ func runLineEditorModal(lineIdx int) {
 				} else {
 					// Tap inside line box -> open full stylus keyboard
 					kr := os_prompt_keyboard("EDIT BASIC LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					settleModalTransition()
 					if kr == 1 {
 						applyEditedLine(&editWorkBuf[0], oldNum)
 						return
@@ -878,6 +899,7 @@ func runLineEditorModal(lineIdx int) {
 			} else if ty >= 196 {
 				if tx < 216 {
 					kr := os_prompt_keyboard("EDIT BASIC LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					settleModalTransition()
 					if kr == 1 {
 						applyEditedLine(&editWorkBuf[0], oldNum)
 						return
@@ -885,6 +907,7 @@ func runLineEditorModal(lineIdx int) {
 					drawLineEditorModal()
 				} else {
 					applyEditedLine(&editWorkBuf[0], oldNum)
+					settleModalTransition()
 					return
 				}
 			}
@@ -898,6 +921,7 @@ func runLineEditorModal(lineIdx int) {
 // ============================================================================
 func runSaveDialog() {
 	kr := os_prompt_keyboard("SAVE /sd/basic/FILENAME", &fileNameBuf[0], 31, 0)
+	settleModalTransition()
 	if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
 		saveProgramToSd(&fileNameBuf[0])
 	}
@@ -909,6 +933,7 @@ func runLoadDialog() {
 	if entryCount < 0 {
 		entryCount = 0
 	}
+	settleModalTransition()
 
 	for {
 		tft_fill_screen(UI_MODAL_BG)
@@ -957,7 +982,7 @@ func runLoadDialog() {
 		var tx int
 		var ty int
 		for {
-			clicked, tx, ty = os_read_click()
+			clicked, tx, ty = pollFilteredClick()
 			if clicked {
 				break
 			}
@@ -966,6 +991,7 @@ func runLoadDialog() {
 
 		if ty < 25 {
 			if tx <= 60 {
+				settleModalTransition()
 				return
 			}
 			if tx >= 234 {
@@ -974,10 +1000,12 @@ func runLoadDialog() {
 				scrollTop = 0
 				setCStrLiteral(&fileNameBuf[0], "NEW.BAS", 32)
 				setStatus("Cleared program (NEW)", 0)
+				settleModalTransition()
 				return
 			}
 		} else if ty >= 28 && ty <= 52 {
 			kr := os_prompt_keyboard("LOAD /sd/basic/FILENAME", &fileNameBuf[0], 31, 0)
+			settleModalTransition()
 			if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
 				loadProgramFromSd(&fileNameBuf[0])
 				return
@@ -994,6 +1022,7 @@ func runLoadDialog() {
 						if cur == targetIdx {
 							copyCStr(&fileNameBuf[0], &fsEntries[i*FS_ENTRY_STRIDE], 32)
 							loadProgramFromSd(&fileNameBuf[0])
+							settleModalTransition()
 							return
 						}
 						cur = cur + 1
@@ -1003,12 +1032,15 @@ func runLoadDialog() {
 		} else if ty >= 204 {
 			if tx < 108 {
 				loadBuiltInStarProgram()
+				settleModalTransition()
 				return
 			} else if tx < 212 {
 				loadBuiltInSpiroProgram()
+				settleModalTransition()
 				return
 			} else {
 				loadBuiltInGridProgram()
+				settleModalTransition()
 				return
 			}
 		}
@@ -2143,16 +2175,16 @@ func stepBasicInterpreter() {
 // Top-Bar & Screen Click Dispatch
 // ============================================================================
 func handleTopBarClick(tx int) {
-	if tx < 49 {
+	if tx < 15 {
 		os_exit(0)
 		return
 	}
-	if tx >= 50 && tx <= 101 {
+	if tx >= 16 && tx <= 73 {
 		// [RUN]
 		startBasicRun()
 		return
 	}
-	if tx >= 104 && tx <= 155 {
+	if tx >= 76 && tx <= 133 {
 		// [STOP]
 		if isRunning != 0 {
 			isRunning = 0
@@ -2168,7 +2200,7 @@ func handleTopBarClick(tx int) {
 		}
 		return
 	}
-	if tx >= 158 && tx <= 209 {
+	if tx >= 136 && tx <= 193 {
 		// [EDIT]
 		isRunning = 0
 		if uiMode == MODE_RUN {
@@ -2180,7 +2212,7 @@ func handleTopBarClick(tx int) {
 		}
 		return
 	}
-	if tx >= 212 && tx <= 263 {
+	if tx >= 196 && tx <= 253 {
 		// [LOAD]
 		isRunning = 0
 		uiMode = MODE_EDIT
@@ -2188,7 +2220,7 @@ func handleTopBarClick(tx int) {
 		drawEditorScreen()
 		return
 	}
-	if tx >= 266 {
+	if tx >= 256 {
 		// [SAVE]
 		isRunning = 0
 		uiMode = MODE_EDIT
@@ -2247,7 +2279,7 @@ func main() {
 	drawEditorScreen()
 
 	for {
-		clicked, tx, ty := os_read_click()
+		clicked, tx, ty := pollFilteredClick()
 		if clicked {
 			if ty < TOP_H {
 				handleTopBarClick(tx)

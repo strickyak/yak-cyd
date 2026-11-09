@@ -200,7 +200,7 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | | `tft_draw_jpg(bufAddr, len, x, y[, scale] int) bool` | Decodes and draws a JPEG image from RAM buffer (or slice `(sliceOrPath, x, y[, scale])`) |
 | | `ok, w, h := os_jpg_info(path string)` | Reads the JPEG header via ROM `jd_prepare` and returns `(ok, width, height)` |
 | **Input & IO** | `touched, tx, ty := os_read_touch()` | Continuous canvas/game touch stream (`tx` in `0..319`, `ty` in `0..239`); stays `true` while held/dragged |
-| | `clicked, tx, ty := os_read_click()` | Discrete button/link tap; fires at most once per physical press and requires a 35 ms release before firing again |
+| | `clicked, tx, ty := os_read_click()` | Discrete button/link tap; fires at most once per physical press (`110 ms` continuous release debounce + `250 ms` inter-click cooldown) |
 | | `os_poll_touch(&tx, &ty) bool` | Pointer-based continuous touch polling helper |
 | | `os_poll_click(&tx, &ty) bool` | Pointer-based discrete click polling helper |
 | | `os_prompt_keyboard(title string, bufAddr, maxLen, allowCtrlC int) int` | Opens Lakatos modal stylus keyboard (`1`=Enter, `0`=Cancel, `-1`=`^C`) |
@@ -244,9 +244,9 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 
 ---
 
-## 5. Minimal LGolf App Skeleton
+## 5. Minimal LGolf App Skeleton & Touch Debouncing Best Practices
 
-Every Lakatos app should draw the standard top-left exit wedge (`DrawExitWedge()` from `import "wedge"`) and provide a top-left `[EXIT]` or `[HOME]` button (`tx < 48 && ty < 22`) that calls `os_exit(0)`:
+Every Lakatos app should draw the standard top-left `12×12` exit wedge (`DrawExitWedge()` from `import "wedge"`). Core 0 automatically intercepts taps in the `12×12` NW corner (`x < 12 && y < 12`) to exit the app cleanly:
 
 ```go
 package main
@@ -255,18 +255,11 @@ import "wedge"
 
 func drawHud(score int) {
     tft_fill_rect(0, 0, SCREEN_W, 22, 0x10A2)
-
-    // Standardized top-left [EXIT] button + 12x12 corner X mark
-    tft_fill_round_rect(14, 2, 40, 18, 3, MAROON)
-    tft_draw_round_rect(14, 2, 40, 18, 3, RED)
-    tft_set_text_datum(MC_DATUM)
-    tft_set_text_color(WHITE, MAROON)
-    tft_draw_string("EXIT", 34, 11, 1)
     DrawExitWedge()
 
     tft_set_text_datum(TL_DATUM)
     tft_set_text_color(CYAN, 0x10A2)
-    x := 52
+    x := 18
     x += tft_draw_string("MY GAME  Score: ", x, 3, 2)
     tft_set_text_color(YELLOW, 0x10A2)
     tft_draw_int(score, x, 3, 2)
@@ -282,12 +275,8 @@ func main() {
     tft_fill_circle(px, py, 10, GREEN)
 
     for {
-        touched, tx, ty := os_read_touch()
-        if touched {
-            if ty < 22 && tx < 48 {
-                os_exit(0)
-                return
-            }
+        clicked, tx, ty := os_read_click()
+        if clicked {
             if ty >= 26 {
                 tft_fill_circle(px, py, 10, BLACK)
                 px = tx
@@ -301,6 +290,47 @@ func main() {
     }
 }
 ```
+
+### 5.1 Touch Input & Debouncing Best Practices
+
+The CYD uses an **XPT2046 4-wire resistive touchscreen** where stylus or finger contact frequently exhibits brief Z-pressure dropouts during a hold and contact bounce during lift-off. Follow these rules to prevent accidental double-clicks and modal bleed-through:
+
+1. **Choose `os_read_click()` vs. `os_read_touch()` Deliberately**:
+   - **Use `os_read_click()`** for all discrete UI actions: toolbar buttons, list rows, toggles, and dialog buttons. In [`src/lakatos/lakatos_main.cpp`](../src/lakatos/lakatos_main.cpp), `os_read_click()` (`lakatosReadClick`) enforces:
+     - **`kTouchHoldBridgeMs = 35 ms`**: Bridges momentary Core 0 ADC conversion gaps.
+     - **`kTouchReleaseDebounceMs = 110 ms`**: Requires `XPT2046_IRQ` to remain continuously `HIGH` (no physical contact) for `110 ms` before re-arming for a new click.
+     - **`kClickCooldownMs = 250 ms`**: Enforces a minimum `250 ms` interval between consecutive delivered clicks.
+   - **Use `os_read_touch()`** *only* for continuous dragging or holding (e.g., drawing strokes in `paint`, moving the paddle in `breakout`, or continuous camera rotation in `croquet`). Never wire `os_read_touch()` directly to a state-toggling button without edge detection and release debouncing.
+
+2. **Prevent Modal & Screen-Transition Bleed-Through (`settleModalTransition` + `pollFilteredClick`)**:
+   - `os_read_click()` fires on the **leading edge** (initial touch-down) so buttons feel responsive. However, when a tap opens or closes a modal screen (such as clicking a line in `basic` or `logo` to open the Line Editor Modal, or tapping `[SAVE]` / `[CANCEL]` to return), the new screen draws while the user's finger is **still pressed down**. As the finger lifts off ~150–220 ms later, resistive lift-off bounce can trigger an unintended click on whatever button occupies the same `(x, y)` on the new screen.
+   - Whenever an LGolf app transitions into or out of a modal dialog (including after `os_prompt_keyboard`), insert a `220 ms` settle pause and guard click polling with a `220 ms` timestamp filter (as in [`apps/basic/basic.lgolf`](../apps/basic/basic.lgolf) and [`apps/logo/logo.lgolf`](../apps/logo/logo.lgolf)):
+     ```go
+     var lastAcceptedClickMs int = -1000
+
+     func settleModalTransition() {
+         os_delay_ms(220)
+     }
+
+     func pollFilteredClick() (bool, int, int) {
+         clicked, tx, ty := os_read_click()
+         if clicked {
+             now := os_millis()
+             if now-lastAcceptedClickMs < 220 {
+                 return false, 0, 0
+             }
+             lastAcceptedClickMs = now
+             return true, tx, ty
+         }
+         return false, 0, 0
+     }
+     ```
+
+3. **Native C/C++ Apps (`native.bin`): Use `TouchClickFilter`**:
+   - Because [`LakatosApi`](../include/lakatos_api.h) exposes raw `os->read_touch()`, native C++ apps with discrete UI controls should wrap `os->read_touch()` in [`TouchClickFilter`](../apps/smallertalk/touch_filter.cpp) (used by `smallertalk`), which provides:
+     - A **2-sample spatial cluster gate** (`clusterRadiusPx = 14 px` within `80 ms`) so single-sample resistive spike outliers during finger contact/lift-off are rejected.
+     - **Release dropout hysteresis** (`releaseDebounceMs = 95 ms`) so brief pressure dips while holding do not split one press into two clicks.
+     - **Inter-click cooldown** (`clickCooldownMs = 210 ms`) and **`touchFilterResetAfterModal(filter, nowMs)`** when entering or leaving modal dialogs.
 
 ---
 

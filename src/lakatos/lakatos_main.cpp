@@ -248,8 +248,8 @@ static inline bool isTopLeftExitCorner(int x, int y) {
 static LakatosTouchSample gCore0LiveTouch = {false, 0, 0, 0, 0, 0};
 static volatile uint32_t  gCore0LiveTouchMs = 0;
 static constexpr uint32_t kTouchHoldBridgeMs      = 35u;
-static constexpr uint32_t kTouchReleaseDebounceMs = 90u;
-static constexpr uint32_t kClickCooldownMs        = 220u;
+static constexpr uint32_t kTouchReleaseDebounceMs = 110u;
+static constexpr uint32_t kClickCooldownMs        = 250u;
 static volatile uint32_t  gLastClickDeliveredMs   = 0;
 
 LakatosTouchSample lakatosReadTouch() {
@@ -412,6 +412,10 @@ void lakatosPollTouchLatch() {
         gSpotDeadlineMs = tNow + 250;
       }
     }
+  } else if (gTouchPenDown || gTouchClickConsumed) {
+    // Physical PENIRQ is still LOW on entry even if Z pressure briefly dipped
+    // below threshold during hold or slow lift-off: keep release timer fresh.
+    gLastTouchDownMs = millis();
   }
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 
@@ -457,6 +461,7 @@ void lakatosWaitTouchRelease() {
   gTouchPressConsumed = false;
   gTouchClickConsumed = false;
   gCore0LiveTouch.touched = false;
+  gLastClickDeliveredMs = millis();
   if (gTouchMutex) xSemaphoreGive(gTouchMutex);
 }
 
