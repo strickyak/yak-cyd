@@ -1,0 +1,2266 @@
+package main
+
+import "wedge"
+
+// ============================================================================
+// Lakatos Line-Number BASIC Editor & Interpreter (`apps/basic/basic.lgolf`)
+// ============================================================================
+// - Top Bar (y = 0..23, NO buttons at the bottom):
+//     [EXIT] [RUN] [STOP] [EDIT] [LOAD] [SAVE]
+// - Editor Mode:
+//     * Displays sorted line-numbered BASIC program (e.g., 10 CLS, 20 FOR...)
+//     * Click any existing line to edit it in the Quick-Token + Stylus
+//       Keyboard Line Editor Modal (like SmallerTalk-80).
+//     * Click the trailing [+ Tap to add line ...] row (or tap EDIT) to add
+//       or edit lines; clear a line and save to delete it.
+// - Graphics & Interpreter Mode (320 x 216 viewport at y = 24..239):
+//     * 16-Color Palette (0 = Black, 1 = White, 2..15 = vibrant colors)
+//     * POINT x, y [, color]
+//     * LINE x1, y1, x2, y2 [, color]
+//     * CLS [color], COLOR c, RECT, FRECT, CIRCLE, FCIRCLE
+//     * PRINT, LET, IF..THEN..ELSE, FOR..TO..STEP..NEXT, GOTO, GOSUB..RETURN,
+//       INPUT, SLEEP/PAUSE, REM, END/STOP
+// - File I/O:
+//     * LOAD and SAVE to /sd/basic/FILENAME
+// ============================================================================
+
+const (
+	TOP_H  = 24
+	VIEW_X = 0
+	VIEW_Y = 24
+	VIEW_W = 320
+	VIEW_H = 216
+
+	MODE_EDIT = 0
+	MODE_RUN  = 1
+
+	MAX_LINES    = 128
+	LINE_STRIDE  = 64
+	MAX_LINE_LEN = 63
+
+	MAX_FOR_STACK   = 16
+	MAX_GOSUB_STACK = 32
+	MAX_FS_ENTRIES  = 16
+	FS_ENTRY_STRIDE = 88
+
+	// UI RGB565 Colors
+	UI_TOP_BG     = 0x10A3
+	UI_EDITOR_BG  = 0x0841
+	UI_SEL_BG     = 0x194A
+	UI_STATUS_BG  = 0x10A2
+	UI_MODAL_BG   = 0x0841
+	UI_BORDER     = 0x3186
+	UI_BTN_RUN    = 0x03E0
+	UI_BTN_STOP   = 0x4800
+	UI_BTN_EDIT   = 0x2945
+	UI_BTN_LOAD   = 0x0290
+	UI_BTN_SAVE   = 0x3010
+
+	// Expression Operator Codes
+	OP_LPAREN = 1
+	OP_OR     = 2
+	OP_AND    = 3
+	OP_EQ     = 4
+	OP_NE     = 5
+	OP_LT     = 6
+	OP_GT     = 7
+	OP_LE     = 8
+	OP_GE     = 9
+	OP_ADD    = 10
+	OP_SUB    = 11
+	OP_MUL    = 12
+	OP_DIV    = 13
+	OP_MOD    = 14
+	OP_NEG    = 15
+	OP_NOT    = 16
+
+	OP_FN_SIN  = 30
+	OP_FN_COS  = 31
+	OP_FN_TAN  = 32
+	OP_FN_ATN  = 33
+	OP_FN_SQR  = 34
+	OP_FN_ABS  = 35
+	OP_FN_INT  = 36
+	OP_FN_SGN  = 37
+	OP_FN_RND  = 38
+	OP_FN_ARR  = 39
+)
+
+// 16-Color BASIC Palette (0 = Black, 1 = White, 2..15 = Reasonable Colors)
+var pal16 [16]int
+
+// Program Storage (sorted by lineNum[0..lineCount-1])
+var lineCount int
+var lineNum [128]int
+var lineBody [8192]byte // 128 * 64-byte NUL-terminated statement bodies
+
+// Editor State
+var uiMode int // MODE_EDIT or MODE_RUN
+var selectedLine int
+var scrollTop int
+var statusMsg [64]byte
+var statusErr int
+var fileNameBuf [32]byte
+var fullPathBuf [64]byte
+var rowDispBuf [80]byte
+var editWorkBuf [64]byte
+var numFmtBuf [24]byte
+
+// File I/O & Directory Listing Buffers
+var fileIoBuf [4096]byte
+var fsEntries [1408]byte // 16 * 88-byte LakatosFsEntry structs
+
+// BASIC Interpreter Runtime State
+var isRunning int
+var curLineIdx int
+var curPos int
+var curColor int
+var printX int
+var printY int
+var runtimeErr int
+
+// Variables A..Z and Array A(0..255)
+var vars [26]float32
+var arr [256]float32
+
+// FOR..TO..STEP..NEXT Stack
+var forDepth int
+var forVar [16]int
+var forLimit [16]float32
+var forStep [16]float32
+var forLineIdx [16]int
+var forPos [16]int
+
+// GOSUB..RETURN Stack
+var gosubDepth int
+var gosubLineIdx [32]int
+var gosubPos [32]int
+
+// Shunting-Yard Expression Evaluator Stacks
+var opStack [32]int
+var valStack [32]float32
+
+func initPalette16() {
+	pal16[0] = 0x0000  // 0: Black
+	pal16[1] = 0xFFFF  // 1: White
+	pal16[2] = 0xF800  // 2: Red
+	pal16[3] = 0x07E0  // 3: Green
+	pal16[4] = 0x001F  // 4: Blue
+	pal16[5] = 0x07FF  // 5: Cyan
+	pal16[6] = 0xF81F  // 6: Magenta
+	pal16[7] = 0xFFE0  // 7: Yellow
+	pal16[8] = 0xFDA0  // 8: Orange
+	pal16[9] = 0x8200  // 9: Brown
+	pal16[10] = 0xFE19 // 10: Light Red / Pink
+	pal16[11] = 0x4208 // 11: Dark Grey
+	pal16[12] = 0xD69A // 12: Light Grey
+	pal16[13] = 0xB7E0 // 13: Light Green / Lime
+	pal16[14] = 0x5D9F // 14: Light Blue / Sky
+	pal16[15] = 0x780F // 15: Purple / Violet
+}
+
+func colorToRgb565(c int) int {
+	return pal16[c&15]
+}
+
+// ============================================================================
+// String & Memory Helpers
+// ============================================================================
+func cstrLen(buf *byte, maxLen int) int {
+	var i int
+	for i = 0; i < maxLen; i = i + 1 {
+		if peek1(int(buf)+i) == 0 {
+			return i
+		}
+	}
+	return maxLen
+}
+
+func copyCStrAddr(dstAddr int, srcAddr int, maxLen int) {
+	var i int
+	for i = 0; i < maxLen-1; i = i + 1 {
+		ch := peek1(srcAddr + i)
+		poke1(dstAddr+i, ch)
+		if ch == 0 {
+			return
+		}
+	}
+	poke1(dstAddr+maxLen-1, 0)
+}
+
+func copyCStr(dst *byte, src *byte, maxLen int) {
+	copyCStrAddr(int(dst), int(src), maxLen)
+}
+
+func setCStrLiteral(dst *byte, s string, maxLen int) {
+	n := len(s)
+	if n >= maxLen {
+		n = maxLen - 1
+	}
+	if n > 0 {
+		memcpy(int(dst), int(cstr(s)), n)
+	}
+	poke1(int(dst)+n, 0)
+}
+
+func appendCStr(dst *byte, pos int, src *byte, maxDst int) int {
+	var i int
+	for i = 0; i < 128; i = i + 1 {
+		if pos >= maxDst-1 {
+			break
+		}
+		ch := peek1(int(src) + i)
+		if ch == 0 {
+			break
+		}
+		poke1(int(dst)+pos, ch)
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendLiteral(dst *byte, pos int, s string, maxDst int) int {
+	n := len(s)
+	src := int(cstr(s))
+	var i int
+	for i = 0; i < n; i = i + 1 {
+		if pos >= maxDst-1 {
+			break
+		}
+		poke1(int(dst)+pos, peek1(src+i))
+		pos = pos + 1
+	}
+	poke1(int(dst)+pos, 0)
+	return pos
+}
+
+func appendInt(dst *byte, pos int, val int, maxDst int) int {
+	s := itoa(val)
+	return appendLiteral(dst, pos, s, maxDst)
+}
+
+func toUpperAscii(ch int) int {
+	if ch >= 'a' && ch <= 'z' {
+		return ch - 32
+	}
+	return ch
+}
+
+func isSpace(ch int) int {
+	if ch == ' ' || ch == '\t' || ch == '\r' {
+		return 1
+	}
+	return 0
+}
+
+func isDigit(ch int) int {
+	if ch >= '0' && ch <= '9' {
+		return 1
+	}
+	return 0
+}
+
+func isAlpha(ch int) int {
+	u := toUpperAscii(ch)
+	if u >= 'A' && u <= 'Z' {
+		return 1
+	}
+	return 0
+}
+
+func setStatus(msg string, isErr int) {
+	setCStrLiteral(&statusMsg[0], msg, 64)
+	statusErr = isErr
+}
+
+// ============================================================================
+// Sorted Line-Number Program Storage
+// ============================================================================
+func findLineIndex(num int) int {
+	var i int
+	for i = 0; i < lineCount; i = i + 1 {
+		if lineNum[i] == num {
+			return i
+		}
+	}
+	return -1
+}
+
+func deleteLineAtIndex(idx int) {
+	if idx < 0 || idx >= lineCount {
+		return
+	}
+	var i int
+	for i = idx; i < lineCount-1; i = i + 1 {
+		lineNum[i] = lineNum[i+1]
+		memcpy(int(&lineBody[i*LINE_STRIDE]), int(&lineBody[(i+1)*LINE_STRIDE]), LINE_STRIDE)
+	}
+	lineCount = lineCount - 1
+	if selectedLine >= lineCount && lineCount > 0 {
+		selectedLine = lineCount - 1
+	}
+	if lineCount == 0 {
+		selectedLine = 0
+	}
+}
+
+func upsertLine(num int, bodyAddr int) int {
+	if num <= 0 {
+		return -1
+	}
+	// Trim leading spaces from bodyAddr
+	p := bodyAddr
+	for isSpace(peek1(p)) != 0 {
+		p = p + 1
+	}
+	// If body is empty, delete the line if it exists
+	if peek1(p) == 0 {
+		existing := findLineIndex(num)
+		if existing >= 0 {
+			deleteLineAtIndex(existing)
+		}
+		return -1
+	}
+
+	// Find insertion point or existing line with same number
+	var pos int
+	pos = 0
+	for pos < lineCount && lineNum[pos] < num {
+		pos = pos + 1
+	}
+	if pos < lineCount && lineNum[pos] == num {
+		copyCStrAddr(int(&lineBody[pos*LINE_STRIDE]), p, LINE_STRIDE)
+		return pos
+	}
+	if lineCount >= MAX_LINES {
+		return -1
+	}
+	var i int
+	for i = lineCount; i > pos; i = i - 1 {
+		lineNum[i] = lineNum[i-1]
+		memcpy(int(&lineBody[i*LINE_STRIDE]), int(&lineBody[(i-1)*LINE_STRIDE]), LINE_STRIDE)
+	}
+	lineNum[pos] = num
+	copyCStrAddr(int(&lineBody[pos*LINE_STRIDE]), p, LINE_STRIDE)
+	lineCount = lineCount + 1
+	return pos
+}
+
+// Parses a line of the form "<lineNum> [statement]" and updates program storage.
+// If oldLineNum > 0 and the user changed the line number or cleared the line,
+// removes oldLineNum first.
+func applyEditedLine(buf *byte, oldLineNum int) {
+	p := int(buf)
+	for isSpace(peek1(p)) != 0 {
+		p = p + 1
+	}
+	ch := peek1(p)
+	if ch == 0 {
+		if oldLineNum > 0 {
+			idx := findLineIndex(oldLineNum)
+			if idx >= 0 {
+				deleteLineAtIndex(idx)
+				setStatus("Deleted line", 0)
+			}
+		}
+		return
+	}
+
+	var num int
+	num = 0
+	hasDigits := 0
+	for isDigit(peek1(p)) != 0 {
+		num = num*10 + (peek1(p) - '0')
+		p = p + 1
+		hasDigits = 1
+	}
+	for isSpace(peek1(p)) != 0 {
+		p = p + 1
+	}
+
+	if hasDigits == 0 {
+		// No line number typed: if editing an existing line, keep oldLineNum;
+		// otherwise assign next line number (+10)
+		if oldLineNum > 0 {
+			num = oldLineNum
+		} else if lineCount > 0 {
+			num = ((lineNum[lineCount-1] / 10) + 1) * 10
+		} else {
+			num = 10
+		}
+		p = int(buf)
+		for isSpace(peek1(p)) != 0 {
+			p = p + 1
+		}
+	}
+
+	if oldLineNum > 0 && oldLineNum != num {
+		oldIdx := findLineIndex(oldLineNum)
+		if oldIdx >= 0 {
+			deleteLineAtIndex(oldIdx)
+		}
+	}
+
+	if peek1(p) == 0 {
+		idx := findLineIndex(num)
+		if idx >= 0 {
+			deleteLineAtIndex(idx)
+			setStatus("Deleted line", 0)
+		}
+		return
+	}
+
+	newIdx := upsertLine(num, p)
+	if newIdx >= 0 {
+		selectedLine = newIdx
+		setStatus("Updated line", 0)
+	}
+}
+
+func formatLineForEdit(idx int, dst *byte, maxLen int) {
+	if idx < 0 || idx >= lineCount {
+		nextNum := 10
+		if lineCount > 0 {
+			nextNum = ((lineNum[lineCount-1] / 10) + 1) * 10
+		}
+		pos := appendInt(dst, 0, nextNum, maxLen)
+		pos = appendLiteral(dst, pos, " ", maxLen)
+		return
+	}
+	pos := appendInt(dst, 0, lineNum[idx], maxLen)
+	pos = appendLiteral(dst, pos, " ", maxLen)
+	appendCStr(dst, pos, &lineBody[idx*LINE_STRIDE], maxLen)
+}
+
+func parseProgramFromText(buf *byte, totalLen int) {
+	lineCount = 0
+	selectedLine = 0
+	scrollTop = 0
+
+	pos := 0
+	for pos < totalLen {
+		// Extract one line into editWorkBuf
+		wPos := 0
+		for pos < totalLen {
+			ch := peek1(int(buf) + pos)
+			pos = pos + 1
+			if ch == '\n' {
+				break
+			}
+			if ch != '\r' && wPos < MAX_LINE_LEN {
+				editWorkBuf[wPos] = byte(ch)
+				wPos = wPos + 1
+			}
+		}
+		editWorkBuf[wPos] = 0
+		if wPos > 0 {
+			applyEditedLine(&editWorkBuf[0], 0)
+		}
+	}
+	selectedLine = 0
+	scrollTop = 0
+}
+
+func serializeProgramToText(dst *byte, maxLen int) int {
+	pos := 0
+	var i int
+	for i = 0; i < lineCount; i = i + 1 {
+		pos = appendInt(dst, pos, lineNum[i], maxLen)
+		pos = appendLiteral(dst, pos, " ", maxLen)
+		pos = appendCStr(dst, pos, &lineBody[i*LINE_STRIDE], maxLen)
+		pos = appendLiteral(dst, pos, "\n", maxLen)
+	}
+	return pos
+}
+
+// ============================================================================
+// Built-In Default & Seed Programs for /sd/basic/
+// ============================================================================
+func loadBuiltInStarProgram() {
+	lineCount = 0
+	setCStrLiteral(&fileNameBuf[0], "STAR.BAS", 32)
+	addProgLine(10, "REM 16-COLOR MANDALA STAR")
+	addProgLine(20, "CLS 0")
+	addProgLine(30, "FOR I = 0 TO 200 STEP 8")
+	addProgLine(40, "C = 2 + (I / 8) % 14")
+	addProgLine(50, "LINE 0, I, I * 1.5, 215, C")
+	addProgLine(60, "LINE 319, 215 - I, 319 - I * 1.5, 0, C")
+	addProgLine(70, "LINE 0, 215 - I, I * 1.5, 0, C + 1")
+	addProgLine(80, "LINE 319, I, 319 - I * 1.5, 215, C + 1")
+	addProgLine(90, "NEXT I")
+	addProgLine(100, "FOR A = 0 TO 6.28 STEP 0.08")
+	addProgLine(110, "X = 160 + COS(A) * 70")
+	addProgLine(120, "Y = 108 + SIN(A) * 70")
+	addProgLine(130, "POINT X, Y, 1")
+	addProgLine(140, "NEXT A")
+	selectedLine = 0
+	scrollTop = 0
+	setStatus("Ready: tap line to edit, or RUN", 0)
+}
+
+func loadBuiltInSpiroProgram() {
+	lineCount = 0
+	setCStrLiteral(&fileNameBuf[0], "SPIRO.BAS", 32)
+	addProgLine(10, "REM POLAR SPIROGRAPH")
+	addProgLine(20, "CLS 0")
+	addProgLine(30, "P = 160 : Q = 108")
+	addProgLine(40, "FOR T = 0 TO 12.56 STEP 0.05")
+	addProgLine(50, "R = 88 * SIN(T * 3.5)")
+	addProgLine(60, "X = 160 + R * COS(T)")
+	addProgLine(70, "Y = 108 + R * SIN(T)")
+	addProgLine(80, "C = 2 + INT(T * 2) % 14")
+	addProgLine(90, "LINE P, Q, X, Y, C")
+	addProgLine(100, "POINT X, Y, 1")
+	addProgLine(110, "P = X : Q = Y")
+	addProgLine(120, "NEXT T")
+	selectedLine = 0
+	scrollTop = 0
+}
+
+func loadBuiltInGridProgram() {
+	lineCount = 0
+	setCStrLiteral(&fileNameBuf[0], "RAYS.BAS", 32)
+	addProgLine(10, "REM COLOR RAYS & STARFIELD")
+	addProgLine(20, "CLS 0")
+	addProgLine(30, "FOR K = 1 TO 120")
+	addProgLine(40, "POINT RND(320), RND(216), 1 + RND(15)")
+	addProgLine(50, "NEXT K")
+	addProgLine(60, "FOR X = 0 TO 319 STEP 10")
+	addProgLine(70, "C = 2 + (X / 10) % 14")
+	addProgLine(80, "LINE 160, 20, X, 210, C")
+	addProgLine(90, "NEXT X")
+	selectedLine = 0
+	scrollTop = 0
+}
+
+func addProgLine(num int, body string) {
+	setCStrLiteral(&editWorkBuf[0], body, 64)
+	upsertLine(num, int(&editWorkBuf[0]))
+}
+
+func buildSdBasicPath(fname *byte) int {
+	pos := appendLiteral(&fullPathBuf[0], 0, "/sd/basic/", 64)
+	// If fname already starts with "/", copy it directly
+	if peek1(int(fname)) == '/' {
+		copyCStr(&fullPathBuf[0], fname, 64)
+		return cstrLen(&fullPathBuf[0], 64)
+	}
+	pos = appendCStr(&fullPathBuf[0], pos, fname, 64)
+	return pos
+}
+
+func saveProgramToSd(fname *byte) int {
+	fs_mkdir("/sd/basic", 1)
+	pLen := buildSdBasicPath(fname)
+	bytesLen := serializeProgramToText(&fileIoBuf[0], 4096)
+	ok := fs_write(fullPathBuf[0:pLen], &fileIoBuf[0], bytesLen)
+	if ok != 0 {
+		pos := appendLiteral(&statusMsg[0], 0, "Saved ", 64)
+		pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+		statusErr = 0
+		return 1
+	}
+	setStatus("Error saving to /sd/basic/", 1)
+	return 0
+}
+
+func loadProgramFromSd(fname *byte) int {
+	pLen := buildSdBasicPath(fname)
+	got := fs_read(fullPathBuf[0:pLen], 0, &fileIoBuf[0], 4095)
+	if got <= 0 {
+		pos := appendLiteral(&statusMsg[0], 0, "Not found: ", 64)
+		pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+		statusErr = 1
+		return 0
+	}
+	fileIoBuf[got] = 0
+	parseProgramFromText(&fileIoBuf[0], got)
+	pos := appendLiteral(&statusMsg[0], 0, "Loaded ", 64)
+	pos = appendCStr(&statusMsg[0], pos, &fullPathBuf[0], 64)
+	statusErr = 0
+	return 1
+}
+
+func seedSdBasicDemos() {
+	fs_mkdir("/sd/basic", 1)
+	n := fs_ls("/sd/basic", &fsEntries[0], MAX_FS_ENTRIES)
+	if n <= 0 {
+		loadBuiltInSpiroProgram()
+		saveProgramToSd(&fileNameBuf[0])
+		loadBuiltInGridProgram()
+		saveProgramToSd(&fileNameBuf[0])
+		loadBuiltInStarProgram()
+		saveProgramToSd(&fileNameBuf[0])
+	} else {
+		loadBuiltInStarProgram()
+	}
+}
+
+// ============================================================================
+// UI Drawing: Top Bar (RUN, STOP, EDIT, LOAD, SAVE) & Editor Listing
+// ============================================================================
+func drawButton(x int, y int, w int, h int, bg int, border int, fg int, label string) {
+	tft_fill_round_rect(x, y, w, h, 3, bg)
+	tft_draw_round_rect(x, y, w, h, 3, border)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(fg, bg)
+	tft_draw_string(label, x+w/2, y+h/2, 1)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawTopBar() {
+	tft_fill_rect(0, 0, SCREEN_W, TOP_H, UI_TOP_BG)
+	tft_draw_fast_hline(0, TOP_H-1, SCREEN_W, UI_BORDER)
+
+	// Top-left EXIT + 12x12 X mark
+	drawButton(14, 2, 34, 19, MAROON, RED, WHITE, "EXIT")
+	DrawExitWedge()
+
+	// [RUN] (x = 50..101)
+	runBg := UI_BTN_RUN
+	if isRunning != 0 {
+		runBg = 0x05E0
+	}
+	drawButton(50, 2, 51, 19, runBg, GREEN, WHITE, "RUN")
+
+	// [STOP] (x = 104..155)
+	stopBg := UI_BTN_STOP
+	stopBorder := RED
+	if isRunning != 0 {
+		stopBg = RED
+		stopBorder = YELLOW
+	}
+	drawButton(104, 2, 51, 19, stopBg, stopBorder, WHITE, "STOP")
+
+	// [EDIT] (x = 158..209)
+	editBg := UI_BTN_EDIT
+	if uiMode == MODE_EDIT {
+		editBg = 0x4228
+	}
+	drawButton(158, 2, 51, 19, editBg, YELLOW, YELLOW, "EDIT")
+
+	// [LOAD] (x = 212..263)
+	drawButton(212, 2, 51, 19, UI_BTN_LOAD, CYAN, CYAN, "LOAD")
+
+	// [SAVE] (x = 266..317)
+	drawButton(266, 2, 51, 19, UI_BTN_SAVE, MAGENTA, WHITE, "SAVE")
+}
+
+func drawStatusStrip() {
+	stY := 226
+	bg := UI_STATUS_BG
+	fg := CYAN
+	if statusErr != 0 {
+		bg = 0x4800
+		fg = YELLOW
+	}
+	tft_fill_rect(0, stY, SCREEN_W, 14, bg)
+	tft_draw_fast_hline(0, stY, SCREEN_W, UI_BORDER)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(fg, bg)
+	tft_draw_cstr(&statusMsg[0], 4, stY+3, 1)
+}
+
+func drawEditorScreen() {
+	drawTopBar()
+	tft_fill_rect(0, VIEW_Y, VIEW_W, 202, UI_EDITOR_BG)
+
+	visRows := 16
+	rowH := 12
+	totalRows := lineCount + 1 // +1 for the trailing "[+ Add new line]" row
+	if selectedLine < 0 {
+		selectedLine = 0
+	}
+	if selectedLine >= totalRows {
+		selectedLine = totalRows - 1
+	}
+	if selectedLine < scrollTop {
+		scrollTop = selectedLine
+	} else if selectedLine >= scrollTop+visRows {
+		scrollTop = selectedLine - visRows + 1
+	}
+	if scrollTop < 0 {
+		scrollTop = 0
+	}
+
+	var r int
+	for r = 0; r < visRows; r = r + 1 {
+		idx := scrollTop + r
+		if idx >= totalRows {
+			break
+		}
+		ry := VIEW_Y + 3 + r*rowH
+		sel := 0
+		if idx == selectedLine {
+			sel = 1
+		}
+		rowBg := UI_EDITOR_BG
+		if sel != 0 {
+			rowBg = UI_SEL_BG
+			tft_fill_rect(2, ry-1, 300, rowH, rowBg)
+		}
+
+		if idx < lineCount {
+			// Line number in yellow
+			tft_set_text_color(YELLOW, rowBg)
+			numW := tft_draw_int(lineNum[idx], 5, ry+1, 1)
+			// Statement body in white/cyan
+			bodyFg := 0xDEFB
+			if sel != 0 {
+				bodyFg = WHITE
+			}
+			// Truncate display to fit before scrollbar
+			copyCStr(&rowDispBuf[0], &lineBody[idx*LINE_STRIDE], 44)
+			tft_set_text_color(bodyFg, rowBg)
+			tft_draw_cstr(&rowDispBuf[0], 10+numW, ry+1, 1)
+		} else {
+			// Trailing [+ Tap to add line] prompt
+			nextNum := 10
+			if lineCount > 0 {
+				nextNum = ((lineNum[lineCount-1] / 10) + 1) * 10
+			}
+			tft_set_text_color(GREENYELLOW, rowBg)
+			numW := tft_draw_int(nextNum, 5, ry+1, 1)
+			tft_draw_string("[+ Tap to add line]", 12+numW, ry+1, 1)
+		}
+	}
+
+	// Right-edge scroll gutter (x = 304..319, y = 26..223) for scrolling long listings
+	tft_fill_rect(304, 26, 15, 198, 0x1082)
+	tft_draw_rect(304, 26, 15, 198, UI_BORDER)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(LIGHTGREY, 0x1082)
+	tft_draw_string("^", 311, 40, 1)
+	tft_draw_string("v", 311, 210, 1)
+	tft_set_text_datum(TL_DATUM)
+
+	drawStatusStrip()
+}
+
+// ============================================================================
+// Quick-Token + Stylus Keyboard Line Editor Modal (like SmallerTalk-80)
+// ============================================================================
+func getQuickBasicToken(idx int) string {
+	switch idx {
+	case 0:
+		return "POINT "
+	case 1:
+		return "LINE "
+	case 2:
+		return "CLS "
+	case 3:
+		return "COLOR "
+	case 4:
+		return "FOR "
+	case 5:
+		return " TO "
+	case 6:
+		return " STEP "
+	case 7:
+		return "NEXT "
+	case 8:
+		return "IF "
+	case 9:
+		return " THEN "
+	case 10:
+		return "GOTO "
+	case 11:
+		return "PRINT "
+	case 12:
+		return "SIN("
+	case 13:
+		return "COS("
+	case 14:
+		return "RND("
+	default:
+		return ", "
+	}
+}
+
+func drawLineEditorModal() {
+	tft_fill_screen(UI_MODAL_BG)
+
+	// Top bar
+	tft_fill_rect(0, 0, 320, 24, NAVY)
+	drawButton(2, 2, 56, 20, 0x4800, RED, WHITE, "CANCEL")
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, NAVY)
+	tft_draw_string("EDIT BASIC LINE", 154, 12, 2)
+	tft_set_text_datum(TL_DATUM)
+	drawButton(250, 2, 68, 20, DARKGREEN, GREEN, WHITE, "SAVE/OK")
+
+	// Current line text box (y = 27..59)
+	tft_fill_round_rect(4, 27, 232, 32, 4, BLACK)
+	tft_draw_round_rect(4, 27, 232, 32, 4, CYAN)
+
+	ln := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+	startOff := 0
+	if ln > 35 {
+		startOff = ln - 35
+	}
+	copyCStr(&rowDispBuf[0], &editWorkBuf[startOff], 38)
+	dLen := cstrLen(&rowDispBuf[0], 38)
+	rowDispBuf[dLen] = '_'
+	rowDispBuf[dLen+1] = 0
+	tft_set_text_color(WHITE, BLACK)
+	tft_draw_cstr(&rowDispBuf[0], 10, 39, 1)
+
+	drawButton(240, 27, 38, 32, 0x4800, RED, WHITE, "DEL")
+	drawButton(280, 27, 36, 32, 0x3186, LIGHTGREY, YELLOW, "CLR")
+
+	// 4x4 Quick BASIC Token Grid (y = 64..192)
+	var r int
+	var c int
+	for r = 0; r < 4; r = r + 1 {
+		by := 64 + r*32
+		for c = 0; c < 4; c = c + 1 {
+			bx := 4 + c*78
+			tok := getQuickBasicToken(r*4 + c)
+			drawButton(bx, by, 75, 29, 0x18E3, CYAN, WHITE, tok)
+		}
+	}
+
+	// Bottom controls inside modal: Open Full Stylus Keyboard or Save Line
+	drawButton(4, 198, 210, 36, 0x2945, YELLOW, YELLOW, "OPEN FULL KEYBOARD (ABC/123)")
+	drawButton(218, 198, 98, 36, DARKGREEN, GREEN, WHITE, "SAVE LINE")
+}
+
+func runLineEditorModal(lineIdx int) {
+	oldNum := 0
+	if lineIdx >= 0 && lineIdx < lineCount {
+		oldNum = lineNum[lineIdx]
+	}
+	formatLineForEdit(lineIdx, &editWorkBuf[0], MAX_LINE_LEN)
+	drawLineEditorModal()
+
+	for {
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if ty < 25 {
+				if tx <= 60 {
+					return // Cancelled
+				}
+				if tx >= 248 {
+					applyEditedLine(&editWorkBuf[0], oldNum)
+					return
+				}
+			} else if ty >= 27 && ty <= 60 {
+				if tx >= 238 && tx < 279 {
+					// DEL (backspace)
+					l := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+					if l > 0 {
+						editWorkBuf[l-1] = 0
+						drawLineEditorModal()
+					}
+				} else if tx >= 279 {
+					// CLR (clear line -> saving empty deletes line)
+					editWorkBuf[0] = 0
+					drawLineEditorModal()
+				} else {
+					// Tap inside line box -> open full stylus keyboard
+					kr := os_prompt_keyboard("EDIT BASIC LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					if kr == 1 {
+						applyEditedLine(&editWorkBuf[0], oldNum)
+						return
+					}
+					drawLineEditorModal()
+				}
+			} else if ty >= 64 && ty < 192 {
+				r := (ty - 64) / 32
+				c := (tx - 4) / 78
+				if r >= 0 && r < 4 && c >= 0 && c < 4 {
+					tok := getQuickBasicToken(r*4 + c)
+					curLen := cstrLen(&editWorkBuf[0], MAX_LINE_LEN)
+					appendLiteral(&editWorkBuf[0], curLen, tok, MAX_LINE_LEN)
+					drawLineEditorModal()
+				}
+			} else if ty >= 196 {
+				if tx < 216 {
+					kr := os_prompt_keyboard("EDIT BASIC LINE", &editWorkBuf[0], MAX_LINE_LEN, 0)
+					if kr == 1 {
+						applyEditedLine(&editWorkBuf[0], oldNum)
+						return
+					}
+					drawLineEditorModal()
+				} else {
+					applyEditedLine(&editWorkBuf[0], oldNum)
+					return
+				}
+			}
+		}
+		os_delay_ms(15)
+	}
+}
+
+// ============================================================================
+// LOAD & SAVE Dialogs (/sd/basic/FILENAME)
+// ============================================================================
+func runSaveDialog() {
+	kr := os_prompt_keyboard("SAVE /sd/basic/FILENAME", &fileNameBuf[0], 31, 0)
+	if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
+		saveProgramToSd(&fileNameBuf[0])
+	}
+}
+
+func runLoadDialog() {
+	fs_mkdir("/sd/basic", 1)
+	entryCount := fs_ls("/sd/basic", &fsEntries[0], MAX_FS_ENTRIES)
+	if entryCount < 0 {
+		entryCount = 0
+	}
+
+	for {
+		tft_fill_screen(UI_MODAL_BG)
+		tft_fill_rect(0, 0, 320, 24, NAVY)
+		drawButton(2, 2, 56, 20, 0x4800, RED, WHITE, "CANCEL")
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(CYAN, NAVY)
+		tft_draw_string("LOAD /sd/basic/", 145, 12, 2)
+		tft_set_text_datum(TL_DATUM)
+		drawButton(236, 2, 82, 20, 0x3800, YELLOW, YELLOW, "NEW / CLR")
+
+		// Button to type any arbitrary filename in /sd/basic/FILENAME
+		drawButton(6, 28, 308, 24, 0x2945, YELLOW, YELLOW, "KEYBOARD: TYPE /sd/basic/FILENAME")
+
+		// List files in /sd/basic/ (up to 8 entries in 2 columns)
+		tft_set_text_color(LIGHTGREY, UI_MODAL_BG)
+		tft_draw_string("Files in /sd/basic/ (tap to load):", 8, 56, 1)
+
+		var i int
+		shown := 0
+		for i = 0; i < entryCount && shown < 8; i = i + 1 {
+			entAddr := int(&fsEntries[0]) + i*FS_ENTRY_STRIDE
+			isDir := peek1(entAddr + 80)
+			if isDir == 0 {
+				col := shown % 2
+				row := shown / 2
+				bx := 6 + col*156
+				by := 68 + row*30
+				tft_fill_round_rect(bx, by, 150, 26, 3, 0x18E3)
+				tft_draw_round_rect(bx, by, 150, 26, 3, CYAN)
+				tft_set_text_color(WHITE, 0x18E3)
+				tft_draw_cstr(&fsEntries[i*FS_ENTRY_STRIDE], bx+8, by+9, 1)
+				shown = shown + 1
+			}
+		}
+
+		// Built-in Demo Presets at bottom of Load modal
+		tft_set_text_color(LIGHTGREY, UI_MODAL_BG)
+		tft_draw_string("Built-in Demos:", 8, 192, 1)
+		drawButton(6, 204, 100, 30, 0x18E3, GREEN, WHITE, "STAR.BAS")
+		drawButton(110, 204, 100, 30, 0x18E3, CYAN, WHITE, "SPIRO.BAS")
+		drawButton(214, 204, 100, 30, 0x18E3, MAGENTA, WHITE, "RAYS.BAS")
+
+		// Wait for click
+		var clicked bool
+		var tx int
+		var ty int
+		for {
+			clicked, tx, ty = os_read_click()
+			if clicked {
+				break
+			}
+			os_delay_ms(15)
+		}
+
+		if ty < 25 {
+			if tx <= 60 {
+				return
+			}
+			if tx >= 234 {
+				lineCount = 0
+				selectedLine = 0
+				scrollTop = 0
+				setCStrLiteral(&fileNameBuf[0], "NEW.BAS", 32)
+				setStatus("Cleared program (NEW)", 0)
+				return
+			}
+		} else if ty >= 28 && ty <= 52 {
+			kr := os_prompt_keyboard("LOAD /sd/basic/FILENAME", &fileNameBuf[0], 31, 0)
+			if kr == 1 && peek1(int(&fileNameBuf[0])) != 0 {
+				loadProgramFromSd(&fileNameBuf[0])
+				return
+			}
+		} else if ty >= 68 && ty < 188 {
+			c := (tx - 6) / 156
+			r := (ty - 68) / 30
+			targetIdx := r*2 + c
+			if c >= 0 && c < 2 && r >= 0 && r < 4 {
+				cur := 0
+				for i = 0; i < entryCount; i = i + 1 {
+					entAddr := int(&fsEntries[0]) + i*FS_ENTRY_STRIDE
+					if peek1(entAddr+80) == 0 {
+						if cur == targetIdx {
+							copyCStr(&fileNameBuf[0], &fsEntries[i*FS_ENTRY_STRIDE], 32)
+							loadProgramFromSd(&fileNameBuf[0])
+							return
+						}
+						cur = cur + 1
+					}
+				}
+			}
+		} else if ty >= 204 {
+			if tx < 108 {
+				loadBuiltInStarProgram()
+				return
+			} else if tx < 212 {
+				loadBuiltInSpiroProgram()
+				return
+			} else {
+				loadBuiltInGridProgram()
+				return
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Graphics Viewport Clipping & Primitives (320 x 216 at y = 24..239)
+// ============================================================================
+func clearViewport(colIdx int) {
+	rgb := colorToRgb565(colIdx)
+	tft_fill_rect(VIEW_X, VIEW_Y, VIEW_W, VIEW_H, rgb)
+	printX = 4
+	printY = 4
+}
+
+func plotPoint(x int, y int, colIdx int) {
+	if x < 0 || x >= VIEW_W || y < 0 || y >= VIEW_H {
+		return
+	}
+	rgb := colorToRgb565(colIdx)
+	tft_fill_rect(x, VIEW_Y+y, 1, 1, rgb)
+}
+
+func clipOutcode(x int, y int) int {
+	code := 0
+	if x < 0 {
+		code = code | 1
+	} else if x >= VIEW_W {
+		code = code | 2
+	}
+	if y < 0 {
+		code = code | 4
+	} else if y >= VIEW_H {
+		code = code | 8
+	}
+	return code
+}
+
+// Cohen-Sutherland 2D line clipper to [0..VIEW_W-1] x [0..VIEW_H-1]
+// so BASIC `LINE` commands never overwrite the top bar!
+func drawClippedLine(x0 int, y0 int, x1 int, y1 int, colIdx int) {
+	c0 := clipOutcode(x0, y0)
+	c1 := clipOutcode(x1, y1)
+	for (c0 | c1) != 0 {
+		if (c0 & c1) != 0 {
+			return
+		}
+		co := c0
+		if co == 0 {
+			co = c1
+		}
+		var x int
+		var y int
+		if (co & 8) != 0 {
+			x = x0 + (x1-x0)*(VIEW_H-1-y0)/(y1-y0)
+			y = VIEW_H - 1
+		} else if (co & 4) != 0 {
+			x = x0 + (x1-x0)*(0-y0)/(y1-y0)
+			y = 0
+		} else if (co & 2) != 0 {
+			y = y0 + (y1-y0)*(VIEW_W-1-x0)/(x1-x0)
+			x = VIEW_W - 1
+		} else {
+			y = y0 + (y1-y0)*(0-x0)/(x1-x0)
+			x = 0
+		}
+		if co == c0 {
+			x0 = x
+			y0 = y
+			c0 = clipOutcode(x0, y0)
+		} else {
+			x1 = x
+			y1 = y
+			c1 = clipOutcode(x1, y1)
+		}
+	}
+	rgb := colorToRgb565(colIdx)
+	tft_draw_line(x0, VIEW_Y+y0, x1, VIEW_Y+y1, rgb)
+}
+
+func printTextToCanvas(s *byte) {
+	rgb := colorToRgb565(curColor)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(rgb, BLACK)
+	var i int
+	for i = 0; i < 64; i = i + 1 {
+		ch := peek1(int(s) + i)
+		if ch == 0 {
+			break
+		}
+		if printX > VIEW_W-10 {
+			printX = 4
+			printY = printY + 10
+		}
+		if printY > VIEW_H-10 {
+			printY = 4
+		}
+		tft_draw_char(printX, VIEW_Y+printY, ch, rgb, BLACK, 1)
+		printX = printX + 6
+	}
+}
+
+func printNewline() {
+	printX = 4
+	printY = printY + 10
+	if printY > VIEW_H-10 {
+		printY = 4
+	}
+}
+
+// ============================================================================
+// BASIC Lexer & Shunting-Yard Expression Evaluator
+// ============================================================================
+func curLinePtr() int {
+	return int(&lineBody[curLineIdx*LINE_STRIDE])
+}
+
+func skipSpaces() {
+	base := curLinePtr()
+	for isSpace(peek1(base+curPos)) != 0 {
+		curPos = curPos + 1
+	}
+}
+
+func peekChar() int {
+	skipSpaces()
+	return peek1(curLinePtr() + curPos)
+}
+
+// Checks if keyword `kw` matches case-insensitively at `curPos` and is not
+// followed by an alphanumeric character; if so, advances `curPos` and returns 1.
+func matchKeyword(kw string) int {
+	skipSpaces()
+	base := curLinePtr()
+	kwLen := len(kw)
+	kwPtr := int(cstr(kw))
+	var i int
+	for i = 0; i < kwLen; i = i + 1 {
+		c1 := toUpperAscii(peek1(base + curPos + i))
+		c2 := toUpperAscii(peek1(kwPtr + i))
+		if c1 != c2 {
+			return 0
+		}
+	}
+	nextCh := peek1(base + curPos + kwLen)
+	if isAlpha(nextCh) != 0 || isDigit(nextCh) != 0 {
+		return 0
+	}
+	curPos = curPos + kwLen
+	return 1
+}
+
+// Peeks if keyword `kw` is at `curPos` without consuming it.
+func peekKeyword(kw string) int {
+	saved := curPos
+	ok := matchKeyword(kw)
+	curPos = saved
+	return ok
+}
+
+func opPrecedence(op int) int {
+	if op == OP_OR {
+		return 1
+	}
+	if op == OP_AND {
+		return 2
+	}
+	if op >= OP_EQ && op <= OP_GE {
+		return 3
+	}
+	if op == OP_ADD || op == OP_SUB {
+		return 4
+	}
+	if op == OP_MUL || op == OP_DIV || op == OP_MOD {
+		return 5
+	}
+	if op == OP_NEG || op == OP_NOT {
+		return 6
+	}
+	return 0
+}
+
+func applyOperator(op int, vTop int) int {
+	if op == OP_NEG {
+		if vTop >= 1 {
+			valStack[vTop-1] = -valStack[vTop-1]
+		}
+		return vTop
+	}
+	if op == OP_NOT {
+		if vTop >= 1 {
+			if valStack[vTop-1] == 0.0 {
+				valStack[vTop-1] = 1.0
+			} else {
+				valStack[vTop-1] = 0.0
+			}
+		}
+		return vTop
+	}
+	if op >= OP_FN_SIN && op <= OP_FN_ARR {
+		if vTop < 1 {
+			return vTop
+		}
+		x := valStack[vTop-1]
+		if op == OP_FN_SIN {
+			valStack[vTop-1] = sin(x)
+		} else if op == OP_FN_COS {
+			valStack[vTop-1] = cos(x)
+		} else if op == OP_FN_TAN {
+			cx := cos(x)
+			if cx != 0.0 {
+				valStack[vTop-1] = sin(x) / cx
+			} else {
+				valStack[vTop-1] = 0.0
+			}
+		} else if op == OP_FN_ATN {
+			valStack[vTop-1] = atan2(x, 1.0)
+		} else if op == OP_FN_SQR {
+			if x >= 0.0 {
+				valStack[vTop-1] = sqrt(x)
+			} else {
+				valStack[vTop-1] = 0.0
+			}
+		} else if op == OP_FN_ABS {
+			valStack[vTop-1] = abs(x)
+		} else if op == OP_FN_INT {
+			valStack[vTop-1] = floor(x)
+		} else if op == OP_FN_SGN {
+			if x > 0.0 {
+				valStack[vTop-1] = 1.0
+			} else if x < 0.0 {
+				valStack[vTop-1] = -1.0
+			} else {
+				valStack[vTop-1] = 0.0
+			}
+		} else if op == OP_FN_RND {
+			if x <= 1.0 {
+				valStack[vTop-1] = float32(os_rand(10000)) / 10000.0
+			} else {
+				mx := int(x)
+				if mx < 1 {
+					mx = 1
+				}
+				valStack[vTop-1] = float32(os_rand(uint(mx)))
+			}
+		} else if op == OP_FN_ARR {
+			idx := int(x) & 255
+			valStack[vTop-1] = arr[idx]
+		}
+		return vTop
+	}
+
+	if vTop < 2 {
+		return vTop
+	}
+	a := valStack[vTop-2]
+	b := valStack[vTop-1]
+	var res float32
+	res = 0.0
+	if op == OP_ADD {
+		res = a + b
+	} else if op == OP_SUB {
+		res = a - b
+	} else if op == OP_MUL {
+		res = a * b
+	} else if op == OP_DIV {
+		if b != 0.0 {
+			res = a / b
+		} else {
+			res = 0.0
+		}
+	} else if op == OP_MOD {
+		ib := int(b)
+		if ib != 0 {
+			res = float32(int(a) % ib)
+		}
+	} else if op == OP_EQ {
+		if a == b {
+			res = 1.0
+		}
+	} else if op == OP_NE {
+		if a != b {
+			res = 1.0
+		}
+	} else if op == OP_LT {
+		if a < b {
+			res = 1.0
+		}
+	} else if op == OP_GT {
+		if a > b {
+			res = 1.0
+		}
+	} else if op == OP_LE {
+		if a <= b {
+			res = 1.0
+		}
+	} else if op == OP_GE {
+		if a >= b {
+			res = 1.0
+		}
+	} else if op == OP_AND {
+		if a != 0.0 && b != 0.0 {
+			res = 1.0
+		}
+	} else if op == OP_OR {
+		if a != 0.0 || b != 0.0 {
+			res = 1.0
+		}
+	}
+	valStack[vTop-2] = res
+	return vTop - 1
+}
+
+func parseNumberToken() float32 {
+	base := curLinePtr()
+	var val float32
+	val = 0.0
+	for isDigit(peek1(base+curPos)) != 0 {
+		val = val*10.0 + float32(peek1(base+curPos)-'0')
+		curPos = curPos + 1
+	}
+	if peek1(base+curPos) == '.' {
+		curPos = curPos + 1
+		var frac float32
+		frac = 0.1
+		for isDigit(peek1(base+curPos)) != 0 {
+			val = val + float32(peek1(base+curPos)-'0')*frac
+			frac = frac * 0.1
+			curPos = curPos + 1
+		}
+	}
+	return val
+}
+
+func evalExpr() float32 {
+	oTop := 0
+	vTop := 0
+	parenDepth := 0
+	expectOperand := 1
+	base := curLinePtr()
+
+	for {
+		skipSpaces()
+		ch := peek1(base + curPos)
+		if ch == 0 || ch == ':' || ch == ';' || ch == '\'' {
+			break
+		}
+		if parenDepth == 0 {
+			if ch == ',' || ch == ')' {
+				break
+			}
+			if peekKeyword("THEN") != 0 || peekKeyword("ELSE") != 0 ||
+				peekKeyword("TO") != 0 || peekKeyword("STEP") != 0 {
+				break
+			}
+		}
+
+		if expectOperand != 0 {
+			if ch == '(' {
+				curPos = curPos + 1
+				opStack[oTop] = OP_LPAREN
+				oTop = oTop + 1
+				parenDepth = parenDepth + 1
+			} else if ch == '-' {
+				curPos = curPos + 1
+				opStack[oTop] = OP_NEG
+				oTop = oTop + 1
+			} else if ch == '+' {
+				curPos = curPos + 1
+			} else if matchKeyword("NOT") != 0 {
+				opStack[oTop] = OP_NOT
+				oTop = oTop + 1
+			} else if isDigit(ch) != 0 || ch == '.' {
+				valStack[vTop] = parseNumberToken()
+				vTop = vTop + 1
+				expectOperand = 0
+			} else if isAlpha(ch) != 0 {
+				fnOp := 0
+				if matchKeyword("SIN") != 0 {
+					fnOp = OP_FN_SIN
+				} else if matchKeyword("COS") != 0 {
+					fnOp = OP_FN_COS
+				} else if matchKeyword("TAN") != 0 {
+					fnOp = OP_FN_TAN
+				} else if matchKeyword("ATN") != 0 || matchKeyword("ATAN") != 0 {
+					fnOp = OP_FN_ATN
+				} else if matchKeyword("SQR") != 0 || matchKeyword("SQRT") != 0 {
+					fnOp = OP_FN_SQR
+				} else if matchKeyword("ABS") != 0 {
+					fnOp = OP_FN_ABS
+				} else if matchKeyword("INT") != 0 {
+					fnOp = OP_FN_INT
+				} else if matchKeyword("SGN") != 0 {
+					fnOp = OP_FN_SGN
+				} else if matchKeyword("RND") != 0 {
+					if peekChar() == '(' {
+						fnOp = OP_FN_RND
+					} else {
+						valStack[vTop] = float32(os_rand(10000)) / 10000.0
+						vTop = vTop + 1
+						expectOperand = 0
+					}
+				} else if matchKeyword("MILLIS") != 0 {
+					if peekChar() == '(' {
+						curPos = curPos + 1
+						if peekChar() == ')' {
+							curPos = curPos + 1
+						}
+					}
+					valStack[vTop] = float32(os_millis())
+					vTop = vTop + 1
+					expectOperand = 0
+				} else if matchKeyword("PI") != 0 {
+					valStack[vTop] = 3.14159265
+					vTop = vTop + 1
+					expectOperand = 0
+				} else {
+					// Variable name (A..Z, with optional trailing letters/digits)
+					vIdx := (toUpperAscii(peek1(base+curPos)) - 'A') & 31
+					if vIdx > 25 {
+						vIdx = 0
+					}
+					curPos = curPos + 1
+					for isAlpha(peek1(base+curPos)) != 0 || isDigit(peek1(base+curPos)) != 0 {
+						curPos = curPos + 1
+					}
+					if peekChar() == '(' {
+						fnOp = OP_FN_ARR
+					} else {
+						valStack[vTop] = vars[vIdx]
+						vTop = vTop + 1
+						expectOperand = 0
+					}
+				}
+
+				if fnOp != 0 {
+					opStack[oTop] = fnOp
+					oTop = oTop + 1
+					if peekChar() == '(' {
+						curPos = curPos + 1
+						opStack[oTop] = OP_LPAREN
+						oTop = oTop + 1
+						parenDepth = parenDepth + 1
+					}
+				}
+			} else {
+				break
+			}
+		} else {
+			// Expecting binary operator or ')'
+			if ch == ')' {
+				if parenDepth <= 0 {
+					break
+				}
+				curPos = curPos + 1
+				parenDepth = parenDepth - 1
+				for oTop > 0 && opStack[oTop-1] != OP_LPAREN {
+					oTop = oTop - 1
+					vTop = applyOperator(opStack[oTop], vTop)
+				}
+				if oTop > 0 && opStack[oTop-1] == OP_LPAREN {
+					oTop = oTop - 1
+				}
+				if oTop > 0 && opStack[oTop-1] >= OP_FN_SIN && opStack[oTop-1] <= OP_FN_ARR {
+					oTop = oTop - 1
+					vTop = applyOperator(opStack[oTop], vTop)
+				}
+			} else {
+				op := 0
+				if ch == '+' {
+					op = OP_ADD
+					curPos = curPos + 1
+				} else if ch == '-' {
+					op = OP_SUB
+					curPos = curPos + 1
+				} else if ch == '*' {
+					op = OP_MUL
+					curPos = curPos + 1
+				} else if ch == '/' {
+					op = OP_DIV
+					curPos = curPos + 1
+				} else if ch == '%' || matchKeyword("MOD") != 0 {
+					if ch == '%' {
+						curPos = curPos + 1
+					}
+					op = OP_MOD
+				} else if ch == '=' {
+					curPos = curPos + 1
+					if peek1(base+curPos) == '=' {
+						curPos = curPos + 1
+					}
+					op = OP_EQ
+				} else if ch == '<' {
+					curPos = curPos + 1
+					nch := peek1(base + curPos)
+					if nch == '>' {
+						curPos = curPos + 1
+						op = OP_NE
+					} else if nch == '=' {
+						curPos = curPos + 1
+						op = OP_LE
+					} else {
+						op = OP_LT
+					}
+				} else if ch == '>' {
+					curPos = curPos + 1
+					if peek1(base+curPos) == '=' {
+						curPos = curPos + 1
+						op = OP_GE
+					} else {
+						op = OP_GT
+					}
+				} else if ch == '!' && peek1(base+curPos+1) == '=' {
+					curPos = curPos + 2
+					op = OP_NE
+				} else if matchKeyword("AND") != 0 {
+					op = OP_AND
+				} else if matchKeyword("OR") != 0 {
+					op = OP_OR
+				} else {
+					break
+				}
+
+				prec := opPrecedence(op)
+				for oTop > 0 && opStack[oTop-1] != OP_LPAREN && opPrecedence(opStack[oTop-1]) >= prec {
+					oTop = oTop - 1
+					vTop = applyOperator(opStack[oTop], vTop)
+				}
+				opStack[oTop] = op
+				oTop = oTop + 1
+				expectOperand = 1
+			}
+		}
+	}
+
+	for oTop > 0 {
+		oTop = oTop - 1
+		if opStack[oTop] != OP_LPAREN {
+			vTop = applyOperator(opStack[oTop], vTop)
+		}
+	}
+	if vTop > 0 {
+		return valStack[0]
+	}
+	return 0.0
+}
+
+func expectComma() int {
+	if peekChar() == ',' {
+		curPos = curPos + 1
+		return 1
+	}
+	return 0
+}
+
+// ============================================================================
+// BASIC Statement Execution Engine
+// ============================================================================
+func jumpToLineNumber(targetNum int) int {
+	idx := findLineIndex(targetNum)
+	if idx < 0 {
+		pos := appendLiteral(&statusMsg[0], 0, "ERR: Undefined line ", 64)
+		appendInt(&statusMsg[0], pos, targetNum, 64)
+		statusErr = 1
+		runtimeErr = 1
+		isRunning = 0
+		return 0
+	}
+	curLineIdx = idx
+	curPos = 0
+	return 1
+}
+
+// Executes one statement at (curLineIdx, curPos).
+// Returns 1 if curLineIdx/curPos was explicitly jumped, 0 to continue normally.
+func execOneStatement() int {
+	skipSpaces()
+	base := curLinePtr()
+	ch := peek1(base + curPos)
+	if ch == 0 || ch == '\'' || matchKeyword("REM") != 0 {
+		// Advance to end of line
+		curPos = cstrLen(&lineBody[curLineIdx*LINE_STRIDE], LINE_STRIDE)
+		return 0
+	}
+
+	// 1. POINT x, y [, color] (or PSET / PLOT)
+	if matchKeyword("POINT") != 0 || matchKeyword("PSET") != 0 || matchKeyword("PLOT") != 0 {
+		x := int(evalExpr())
+		expectComma()
+		y := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		plotPoint(x, y, col)
+		return 0
+	}
+
+	// 2. LINE x1, y1, x2, y2 [, color]
+	if matchKeyword("LINE") != 0 {
+		x0 := int(evalExpr())
+		expectComma()
+		y0 := int(evalExpr())
+		expectComma()
+		x1 := int(evalExpr())
+		expectComma()
+		y1 := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		drawClippedLine(x0, y0, x1, y1, col)
+		return 0
+	}
+
+	// 3. CLS [color]
+	if matchKeyword("CLS") != 0 {
+		col := 0
+		nch := peekChar()
+		if nch != 0 && nch != ':' && nch != '\'' {
+			col = int(evalExpr())
+		}
+		clearViewport(col)
+		return 0
+	}
+
+	// 4. COLOR c
+	if matchKeyword("COLOR") != 0 {
+		curColor = int(evalExpr()) & 15
+		return 0
+	}
+
+	// 5. RECT / BOX / FRECT
+	if matchKeyword("RECT") != 0 || matchKeyword("BOX") != 0 {
+		x := int(evalExpr())
+		expectComma()
+		y := int(evalExpr())
+		expectComma()
+		w := int(evalExpr())
+		expectComma()
+		h := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		drawClippedLine(x, y, x+w, y, col)
+		drawClippedLine(x+w, y, x+w, y+h, col)
+		drawClippedLine(x+w, y+h, x, y+h, col)
+		drawClippedLine(x, y+h, x, y, col)
+		return 0
+	}
+	if matchKeyword("FRECT") != 0 {
+		x := int(evalExpr())
+		expectComma()
+		y := int(evalExpr())
+		expectComma()
+		w := int(evalExpr())
+		expectComma()
+		h := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		if x < 0 {
+			w = w + x
+			x = 0
+		}
+		if y < 0 {
+			h = h + y
+			y = 0
+		}
+		if x+w > VIEW_W {
+			w = VIEW_W - x
+		}
+		if y+h > VIEW_H {
+			h = VIEW_H - y
+		}
+		if w > 0 && h > 0 {
+			tft_fill_rect(x, VIEW_Y+y, w, h, colorToRgb565(col))
+		}
+		return 0
+	}
+
+	// 6. CIRCLE / FCIRCLE
+	if matchKeyword("CIRCLE") != 0 {
+		cx := int(evalExpr())
+		expectComma()
+		cy := int(evalExpr())
+		expectComma()
+		r := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		if cy-r >= 0 && cy+r < VIEW_H && cx-r >= 0 && cx+r < VIEW_W {
+			tft_draw_circle(cx, VIEW_Y+cy, r, colorToRgb565(col))
+		}
+		return 0
+	}
+	if matchKeyword("FCIRCLE") != 0 {
+		cx := int(evalExpr())
+		expectComma()
+		cy := int(evalExpr())
+		expectComma()
+		r := int(evalExpr())
+		col := curColor
+		if expectComma() != 0 {
+			col = int(evalExpr())
+		}
+		if cy-r >= 0 && cy+r < VIEW_H && cx-r >= 0 && cx+r < VIEW_W {
+			tft_fill_circle(cx, VIEW_Y+cy, r, colorToRgb565(col))
+		}
+		return 0
+	}
+
+	// 7. PRINT ...
+	if matchKeyword("PRINT") != 0 || ch == '?' {
+		if ch == '?' {
+			curPos = curPos + 1
+		}
+		needNewline := 1
+		for {
+			skipSpaces()
+			pch := peek1(base + curPos)
+			if pch == 0 || pch == ':' || pch == '\'' {
+				break
+			}
+			if pch == ';' {
+				curPos = curPos + 1
+				needNewline = 0
+			} else if pch == ',' {
+				curPos = curPos + 1
+				printX = printX + 24
+				needNewline = 0
+			} else if pch == '"' {
+				curPos = curPos + 1
+				sPos := 0
+				for {
+					sch := peek1(base + curPos)
+					if sch == 0 || sch == '"' {
+						if sch == '"' {
+							curPos = curPos + 1
+						}
+						break
+					}
+					if sPos < 62 {
+						rowDispBuf[sPos] = byte(sch)
+						sPos = sPos + 1
+					}
+					curPos = curPos + 1
+				}
+				rowDispBuf[sPos] = 0
+				printTextToCanvas(&rowDispBuf[0])
+				needNewline = 1
+			} else {
+				v := evalExpr()
+				iv := int(v)
+				if float32(iv) == v {
+					s := itoa(iv)
+					setCStrLiteral(&numFmtBuf[0], s, 24)
+				} else {
+					s := ftoa(v, 2)
+					setCStrLiteral(&numFmtBuf[0], s, 24)
+				}
+				printTextToCanvas(&numFmtBuf[0])
+				needNewline = 1
+			}
+		}
+		if needNewline != 0 {
+			printNewline()
+		}
+		return 0
+	}
+
+	// 8. GOTO expr
+	if matchKeyword("GOTO") != 0 {
+		target := int(evalExpr())
+		if jumpToLineNumber(target) != 0 {
+			return 1
+		}
+		return 0
+	}
+
+	// 9. GOSUB expr / RETURN
+	if matchKeyword("GOSUB") != 0 {
+		target := int(evalExpr())
+		if gosubDepth < MAX_GOSUB_STACK {
+			gosubLineIdx[gosubDepth] = curLineIdx
+			gosubPos[gosubDepth] = curPos
+			gosubDepth = gosubDepth + 1
+		}
+		if jumpToLineNumber(target) != 0 {
+			return 1
+		}
+		return 0
+	}
+	if matchKeyword("RETURN") != 0 {
+		if gosubDepth > 0 {
+			gosubDepth = gosubDepth - 1
+			curLineIdx = gosubLineIdx[gosubDepth]
+			curPos = gosubPos[gosubDepth]
+			return 0
+		}
+		isRunning = 0
+		return 0
+	}
+
+	// 10. IF cond THEN <lineNum | stmt> [ELSE <lineNum | stmt>]
+	if matchKeyword("IF") != 0 {
+		cond := evalExpr()
+		matchKeyword("THEN")
+		skipSpaces()
+		if cond != 0.0 {
+			if isDigit(peek1(base+curPos)) != 0 {
+				target := int(evalExpr())
+				if jumpToLineNumber(target) != 0 {
+					return 1
+				}
+				return 0
+			}
+			// Continue executing statement right after THEN
+			return execOneStatement()
+		} else {
+			// Scan forward on current line for ELSE (outside quotes)
+			inStr := 0
+			for {
+				ech := peek1(base + curPos)
+				if ech == 0 {
+					return 0
+				}
+				if ech == '"' {
+					inStr = 1 - inStr
+					curPos = curPos + 1
+				} else if inStr == 0 && matchKeyword("ELSE") != 0 {
+					skipSpaces()
+					if isDigit(peek1(base+curPos)) != 0 {
+						target := int(evalExpr())
+						if jumpToLineNumber(target) != 0 {
+							return 1
+						}
+						return 0
+					}
+					return execOneStatement()
+				} else {
+					curPos = curPos + 1
+				}
+			}
+		}
+	}
+
+	// 11. FOR var = start TO limit [STEP step]
+	if matchKeyword("FOR") != 0 {
+		skipSpaces()
+		vch := toUpperAscii(peek1(base + curPos))
+		vIdx := (vch - 'A') & 31
+		if vIdx > 25 {
+			vIdx = 0
+		}
+		for isAlpha(peek1(base+curPos)) != 0 || isDigit(peek1(base+curPos)) != 0 {
+			curPos = curPos + 1
+		}
+		skipSpaces()
+		if peek1(base+curPos) == '=' {
+			curPos = curPos + 1
+		}
+		startVal := evalExpr()
+		matchKeyword("TO")
+		limitVal := evalExpr()
+		var stepVal float32
+		stepVal = 1.0
+		if matchKeyword("STEP") != 0 {
+			stepVal = evalExpr()
+		}
+		vars[vIdx] = startVal
+
+		// Reuse existing FOR slot for same variable or push new slot
+		slot := -1
+		var i int
+		for i = 0; i < forDepth; i = i + 1 {
+			if forVar[i] == vIdx {
+				slot = i
+				break
+			}
+		}
+		if slot < 0 {
+			if forDepth < MAX_FOR_STACK {
+				slot = forDepth
+				forDepth = forDepth + 1
+			} else {
+				slot = MAX_FOR_STACK - 1
+			}
+		}
+		forVar[slot] = vIdx
+		forLimit[slot] = limitVal
+		forStep[slot] = stepVal
+		forLineIdx[slot] = curLineIdx
+		forPos[slot] = curPos
+		return 0
+	}
+
+	// 12. NEXT [var]
+	if matchKeyword("NEXT") != 0 {
+		skipSpaces()
+		targetVar := -1
+		if isAlpha(peek1(base+curPos)) != 0 {
+			targetVar = (toUpperAscii(peek1(base+curPos)) - 'A') & 31
+			for isAlpha(peek1(base+curPos)) != 0 || isDigit(peek1(base+curPos)) != 0 {
+				curPos = curPos + 1
+			}
+		}
+		if forDepth <= 0 {
+			return 0
+		}
+		slot := forDepth - 1
+		if targetVar >= 0 {
+			var i int
+			for i = forDepth - 1; i >= 0; i = i - 1 {
+				if forVar[i] == targetVar {
+					slot = i
+					break
+				}
+			}
+		}
+		vIdx := forVar[slot]
+		stepVal := forStep[slot]
+		limitVal := forLimit[slot]
+		nextVal := vars[vIdx] + stepVal
+		vars[vIdx] = nextVal
+
+		keepLooping := 0
+		if stepVal >= 0.0 {
+			if nextVal <= limitVal+0.0001 {
+				keepLooping = 1
+			}
+		} else {
+			if nextVal >= limitVal-0.0001 {
+				keepLooping = 1
+			}
+		}
+		if keepLooping != 0 {
+			curLineIdx = forLineIdx[slot]
+			curPos = forPos[slot]
+			return 0
+		}
+		forDepth = slot
+		return 0
+	}
+
+	// 13. INPUT ["prompt";] var
+	if matchKeyword("INPUT") != 0 {
+		skipSpaces()
+		setCStrLiteral(&rowDispBuf[0], "INPUT VALUE", 64)
+		if peek1(base+curPos) == '"' {
+			curPos = curPos + 1
+			sPos := 0
+			for {
+				sch := peek1(base + curPos)
+				if sch == 0 || sch == '"' {
+					if sch == '"' {
+						curPos = curPos + 1
+					}
+					break
+				}
+				if sPos < 48 {
+					rowDispBuf[sPos] = byte(sch)
+					sPos = sPos + 1
+				}
+				curPos = curPos + 1
+			}
+			rowDispBuf[sPos] = 0
+			skipSpaces()
+			if peek1(base+curPos) == ';' || peek1(base+curPos) == ',' {
+				curPos = curPos + 1
+			}
+		}
+		skipSpaces()
+		vIdx := (toUpperAscii(peek1(base+curPos)) - 'A') & 31
+		if vIdx > 25 {
+			vIdx = 0
+		}
+		for isAlpha(peek1(base+curPos)) != 0 || isDigit(peek1(base+curPos)) != 0 {
+			curPos = curPos + 1
+		}
+		editWorkBuf[0] = 0
+		kr := os_prompt_keyboard("BASIC INPUT", &editWorkBuf[0], 31, 0)
+		drawTopBar()
+		if kr == 1 {
+			// Parse float from editWorkBuf
+			p := 0
+			for isSpace(int(editWorkBuf[p])) != 0 {
+				p = p + 1
+			}
+			sign := 1.0
+			if editWorkBuf[p] == '-' {
+				sign = -1.0
+				p = p + 1
+			}
+			var v float32
+			v = 0.0
+			for isDigit(int(editWorkBuf[p])) != 0 {
+				v = v*10.0 + float32(int(editWorkBuf[p])-'0')
+				p = p + 1
+			}
+			vars[vIdx] = v * sign
+		}
+		return 0
+	}
+
+	// 14. SLEEP / PAUSE / DELAY ms
+	if matchKeyword("SLEEP") != 0 || matchKeyword("PAUSE") != 0 || matchKeyword("DELAY") != 0 {
+		ms := int(evalExpr())
+		if ms > 0 {
+			os_delay_ms(ms)
+		}
+		return 0
+	}
+
+	// 15. END / STOP
+	if matchKeyword("END") != 0 || matchKeyword("STOP") != 0 {
+		isRunning = 0
+		return 0
+	}
+
+	// 16. [LET] var = expr or A(idx) = expr
+	matchKeyword("LET")
+	skipSpaces()
+	if isAlpha(peek1(base+curPos)) != 0 {
+		vIdx := (toUpperAscii(peek1(base+curPos)) - 'A') & 31
+		if vIdx > 25 {
+			vIdx = 0
+		}
+		curPos = curPos + 1
+		for isAlpha(peek1(base+curPos)) != 0 || isDigit(peek1(base+curPos)) != 0 {
+			curPos = curPos + 1
+		}
+		if peekChar() == '(' {
+			curPos = curPos + 1
+			aIdx := int(evalExpr()) & 255
+			if peekChar() == ')' {
+				curPos = curPos + 1
+			}
+			if peekChar() == '=' {
+				curPos = curPos + 1
+			}
+			arr[aIdx] = evalExpr()
+			return 0
+		}
+		if peekChar() == '=' {
+			curPos = curPos + 1
+			vars[vIdx] = evalExpr()
+			return 0
+		}
+	}
+
+	// Unrecognized token: skip to next statement separator ':' or end of line
+	for {
+		uch := peek1(base + curPos)
+		if uch == 0 || uch == ':' {
+			break
+		}
+		curPos = curPos + 1
+	}
+	return 0
+}
+
+func startBasicRun() {
+	if lineCount <= 0 {
+		setStatus("No program lines to RUN", 1)
+		drawEditorScreen()
+		return
+	}
+	uiMode = MODE_RUN
+	isRunning = 1
+	runtimeErr = 0
+	curLineIdx = 0
+	curPos = 0
+	curColor = 1 // 1 = White default
+	forDepth = 0
+	gosubDepth = 0
+
+	var i int
+	for i = 0; i < 26; i = i + 1 {
+		vars[i] = 0.0
+	}
+	for i = 0; i < 256; i = i + 1 {
+		arr[i] = 0.0
+	}
+
+	drawTopBar()
+	clearViewport(0) // Clear viewport to 0 = Black
+}
+
+func stepBasicInterpreter() {
+	// Execute a batch of statements per frame while checking top-bar clicks
+	var step int
+	for step = 0; step < 32; step = step + 1 {
+		if isRunning == 0 {
+			break
+		}
+		if curLineIdx < 0 || curLineIdx >= lineCount {
+			isRunning = 0
+			break
+		}
+
+		jumped := execOneStatement()
+		if isRunning == 0 {
+			break
+		}
+		if jumped == 0 {
+			skipSpaces()
+			base := curLinePtr()
+			ch := peek1(base + curPos)
+			if ch == ':' {
+				curPos = curPos + 1
+			} else if ch == 0 || ch == '\'' {
+				curLineIdx = curLineIdx + 1
+				curPos = 0
+			}
+		}
+	}
+
+	if isRunning == 0 {
+		if runtimeErr == 0 {
+			setStatus("Program finished (tap EDIT or RUN)", 0)
+		}
+		drawTopBar()
+	}
+}
+
+// ============================================================================
+// Top-Bar & Screen Click Dispatch
+// ============================================================================
+func handleTopBarClick(tx int) {
+	if tx < 49 {
+		os_exit(0)
+		return
+	}
+	if tx >= 50 && tx <= 101 {
+		// [RUN]
+		startBasicRun()
+		return
+	}
+	if tx >= 104 && tx <= 155 {
+		// [STOP]
+		if isRunning != 0 {
+			isRunning = 0
+			pos := appendLiteral(&statusMsg[0], 0, "STOP at line ", 64)
+			if curLineIdx >= 0 && curLineIdx < lineCount {
+				appendInt(&statusMsg[0], pos, lineNum[curLineIdx], 64)
+			}
+			statusErr = 1
+			drawTopBar()
+		} else if uiMode == MODE_EDIT {
+			setStatus("Stopped", 0)
+			drawStatusStrip()
+		}
+		return
+	}
+	if tx >= 158 && tx <= 209 {
+		// [EDIT]
+		isRunning = 0
+		if uiMode == MODE_RUN {
+			uiMode = MODE_EDIT
+			drawEditorScreen()
+		} else {
+			runLineEditorModal(selectedLine)
+			drawEditorScreen()
+		}
+		return
+	}
+	if tx >= 212 && tx <= 263 {
+		// [LOAD]
+		isRunning = 0
+		uiMode = MODE_EDIT
+		runLoadDialog()
+		drawEditorScreen()
+		return
+	}
+	if tx >= 266 {
+		// [SAVE]
+		isRunning = 0
+		uiMode = MODE_EDIT
+		runSaveDialog()
+		drawEditorScreen()
+		return
+	}
+}
+
+func handleEditorClick(tx int, ty int) {
+	// Right-edge scroll gutter (x >= 302)
+	if tx >= 302 {
+		if ty < 125 {
+			if scrollTop > 0 {
+				scrollTop = scrollTop - 4
+				if scrollTop < 0 {
+					scrollTop = 0
+				}
+				selectedLine = scrollTop
+			}
+		} else {
+			if scrollTop+8 <= lineCount {
+				scrollTop = scrollTop + 4
+				selectedLine = scrollTop
+			} else if lineCount > 0 {
+				selectedLine = lineCount
+			}
+		}
+		drawEditorScreen()
+		return
+	}
+
+	// Click on a program line in the editor (y = 26..220)
+	if ty >= VIEW_Y && ty < 224 {
+		row := (ty - (VIEW_Y + 2)) / 12
+		if row < 0 {
+			row = 0
+		}
+		idx := scrollTop + row
+		if idx > lineCount {
+			idx = lineCount
+		}
+		selectedLine = idx
+		drawEditorScreen()
+		runLineEditorModal(idx)
+		drawEditorScreen()
+	}
+}
+
+func main() {
+	initPalette16()
+	seedSdBasicDemos()
+
+	uiMode = MODE_EDIT
+	isRunning = 0
+	drawEditorScreen()
+
+	for {
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if ty < TOP_H {
+				handleTopBarClick(tx)
+			} else if uiMode == MODE_EDIT {
+				handleEditorClick(tx, ty)
+			}
+		}
+
+		if isRunning != 0 {
+			stepBasicInterpreter()
+			os_yield()
+		} else {
+			os_delay_ms(15)
+		}
+	}
+}

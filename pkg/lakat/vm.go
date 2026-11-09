@@ -105,6 +105,7 @@ type VM struct {
 	WsConn             net.Conn
 	WsReader           *bufio.Reader
 	WsRecvQueue        []string
+	KeyboardQueue      []string
 	StepHook           func(vm *VM, pc int, op byte)
 }
 
@@ -2059,13 +2060,28 @@ func (vm *VM) execSyscall(sysId byte) error {
 		}
 	case SysPromptKeyboard:
 		_, _ = vm.pop() // allowCtrlC
-		_, _ = vm.pop() // maxLen
-		_, _ = vm.pop() // bufAddr
+		maxLen, _ := vm.pop()
+		bufAddr, _ := vm.pop()
 		_, err := vm.popSliceString()
 		if err != nil {
 			return err
 		}
-		vm.push(0)
+		if len(vm.KeyboardQueue) > 0 && maxLen > 0 {
+			if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
+				return err
+			}
+			inStr := vm.KeyboardQueue[0]
+			vm.KeyboardQueue = vm.KeyboardQueue[1:]
+			b := []byte(inStr)
+			if len(b) >= int(maxLen) {
+				b = b[:maxLen-1]
+			}
+			copy(vm.Memory[bufAddr:int(bufAddr)+len(b)], b)
+			vm.Memory[int(bufAddr)+len(b)] = 0
+			vm.push(1)
+		} else {
+			vm.push(0)
+		}
 	case SysSetRgbLed:
 		_, _ = vm.pop()
 		_, _ = vm.pop()

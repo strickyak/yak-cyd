@@ -2667,6 +2667,18 @@ func (c *Compiler) compilePrimary() (TypeDesc, error) {
 				if isSubSlice {
 					c.next() // '['
 					c.emitLoadVar(v)
+					retType := v.Type
+					if v.Type.Kind == "array" {
+						c.emitPushInt(int64(v.Type.Dim1))
+						c.emitPushInt(int64(v.Type.Dim1))
+						retType = TypeDesc{
+							Kind:       "slice",
+							ScalarType: v.Type.ElemScalar,
+							ByteSize:   12,
+							ElemSize:   v.Type.ElemSize,
+							ElemScalar: v.Type.ElemScalar,
+						}
+					}
 					if _, err := c.compileExpr(); err != nil {
 						return TypeDesc{}, err
 					}
@@ -2681,7 +2693,7 @@ func (c *Compiler) compilePrimary() (TypeDesc, error) {
 					}
 					c.emitPushInt(int64(v.Type.ElemSize))
 					c.emitOp("SLICE_SUB")
-					return v.Type, nil
+					return retType, nil
 				}
 
 				elemType, hasChain, err := c.compileVarLValueChain(v)
