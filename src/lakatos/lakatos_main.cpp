@@ -242,7 +242,8 @@ static LakatosTouchSample readTouchHardwareUnlocked() {
 }
 
 static inline bool isTopLeftExitCorner(int x, int y) {
-  return x >= 0 && x < 12 && y >= 0 && y < 12;
+  int sz = lakatosGetCornerSize();
+  return x >= 0 && x < sz && y >= 0 && y < sz;
 }
 
 static LakatosTouchSample gCore0LiveTouch = {false, 0, 0, 0, 0, 0};
@@ -1669,11 +1670,12 @@ static void handleSerialCommandLine(const String& line) {
 
   if (line == "info") {
     const char* pw = lakatosGetSuperhighwayPassword();
-    Serial.printf("Lakatos OS v%u | ID: %s/%s | Airport: %s | URL: %s | /net PW: %s | Wi-Fi: %s | Heap: %u\r\n",
+    Serial.printf("Lakatos OS v%u | ID: %s/%s | Airport: %s | Corner: %dpx | URL: %s | /net PW: %s | Wi-Fi: %s | Heap: %u\r\n",
                   LAKATOS_API_VERSION,
                   lakatosGetDeviceName(),
                   lakatosGetSerialNumber(),
                   lakatosGetAirportCode(),
+                  lakatosGetCornerSize(),
                   lakatosGetSuperhighwayUrl(),
                   (pw && pw[0]) ? pw : "(NOT SET)",
                   lakatosWifiIsConnected() ? "CONNECTED" : "OFFLINE",
@@ -1826,6 +1828,14 @@ static void handleSerialCommandLine(const String& line) {
       runLakatosStorageScreen();
       refreshActiveScreen();
     }
+  } else if (line == "cornersize" || line.startsWith("cornersize ")) {
+    int sp = line.indexOf(' ');
+    if (sp > 0) {
+      int sz = line.substring(sp + 1).toInt();
+      lakatosSetCornerSize(sz);
+      refreshShellOrMarkDirty();
+    }
+    Serial.printf("Corner Target Size: %d px (range 12..24)\r\n", lakatosGetCornerSize());
   } else if (line == "dev" || line == "spot" ||
              line.startsWith("dev ") || line.startsWith("spot ")) {
     int pfx = line.startsWith("spot") ? 4 : 3;

@@ -243,6 +243,8 @@ enum LCodeSyscall : uint8_t {
   SysPal4FillCirc   = 0x53,
   SysPal4DrawLine   = 0x54,
   SysPal4Render3D   = 0x55,
+  SysGetCornerSize  = 0x56,
+  SysSetCornerSize  = 0x57,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -596,6 +598,14 @@ struct LCodeVM {
         uint32_t en = 0;
         if (!pop(en)) return false;
         lakatosSetCornerExitEnabled(en != 0);
+        return true;
+      }
+      case SysGetCornerSize:
+        return push((uint32_t)lakatosGetCornerSize());
+      case SysSetCornerSize: {
+        uint32_t sz = 0;
+        if (!pop(sz)) return false;
+        lakatosSetCornerSize((int)(int32_t)sz);
         return true;
       }
 

@@ -100,6 +100,7 @@ type VM struct {
 	PrefetchBytes      uint32
 	PrefetchBuf        []byte
 	CornerExitDisabled bool
+	CornerSize         int
 	AppArg             string
 	JoinNativeBin      string
 	WsConn             net.Conn
@@ -129,6 +130,7 @@ func NewVM(lappOrLcod []byte) (*VM, error) {
 		ShUrl:        "http://pizga.net:1908/",
 		Stdout:       os.Stdout,
 		VfsRoot:      "build",
+		CornerSize:   12,
 	}
 	if err := vm.loadModule(payload); err != nil {
 		return nil, err
@@ -138,6 +140,16 @@ func NewVM(lappOrLcod []byte) (*VM, error) {
 
 func align4(n int) int {
 	return (n + 3) & ^3
+}
+
+func (vm *VM) cornerSize() int {
+	if vm.CornerSize < 12 {
+		return 12
+	}
+	if vm.CornerSize > 24 {
+		return 24
+	}
+	return vm.CornerSize
 }
 
 func align8(n int) int {
@@ -1461,6 +1473,21 @@ func (vm *VM) execSyscall(sysId byte) error {
 			return err
 		}
 		vm.CornerExitDisabled = (en == 0)
+	case SysGetCornerSize:
+		vm.push(uint32(vm.cornerSize()))
+	case SysSetCornerSize:
+		sz, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		s := int(int32(sz))
+		if s < 12 {
+			s = 12
+		}
+		if s > 24 {
+			s = 24
+		}
+		vm.CornerSize = s
 
 	case SysGetAirport:
 		vm.pushScratchString(vm.AirportCode)
@@ -2026,7 +2053,8 @@ func (vm *VM) execSyscall(sysId byte) error {
 			vm.CurrentTouch = ev
 		}
 		if vm.CurrentTouch.Touched {
-			if !vm.CornerExitDisabled && vm.CurrentTouch.X >= 0 && vm.CurrentTouch.X < 12 && vm.CurrentTouch.Y >= 0 && vm.CurrentTouch.Y < 12 {
+			cs := vm.cornerSize()
+			if !vm.CornerExitDisabled && vm.CurrentTouch.X >= 0 && vm.CurrentTouch.X < cs && vm.CurrentTouch.Y >= 0 && vm.CurrentTouch.Y < cs {
 				vm.CurrentTouch.Touched = false
 				vm.ExitCode = 0
 				vm.Running = false

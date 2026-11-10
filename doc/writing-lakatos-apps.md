@@ -110,13 +110,21 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
     x += tft_draw_int(freqHz, x, 4, 2)
     x += tft_draw_string(" Hz)", x, 4, 2)
     ```
-- **Built-in `"wedge"` Package & Corner Exit Convention**:
-  - Core 0's background touch scanner automatically intercepts taps in the top-left `12×12` corner (`x < 12 && y < 12`) to exit the running app and return to Lakatos OS (unless disabled via `os_set_corner_exit(0)`).
-  - Import `"wedge"` and call `DrawExitWedge()` to render the standard white `12×12` top-left exit `X` mark, and place your `[EXIT]` or `[HOME]` button in the top-left header bar (`x < 54, y < 22`):
+- **Built-in `"wedge"` Package, NW Exit X & NE Menu Wedge Conventions**:
+  - Both the NW Exit `X` and the NE Menu Wedge use the OS corner control target size `s = os_get_corner_size()` (or `CornerSize()`), which is configurable in NVS (`"cornerSz"`) and on the Lakatos OS **CONFIG** screen from `12` up to `24` pixels (default `12`).
+  - Core 0's background touch scanner automatically intercepts taps in the top-left `s×s` corner (`0 <= x < s && 0 <= y < s`) to exit the running app and return to Lakatos OS (unless disabled via `os_set_corner_exit(0)`).
+  - Import `"wedge"` to draw and detect the standard corner controls and query `CornerSize()` when laying out adjacent top-bar buttons:
+    - `DrawExitWedge()` — renders the white `s×s` `X` mark on a black background in the NW corner `(0..s-1, 0..s-1)`.
+    - `DrawMenuWedge()` — renders the white downward-pointing right-triangle Menu Wedge (hypotenuse across `y=0`, 90° right angle pointing down) on a black background in the NE corner `(320-s..319, 0..s-1)`.
+    - `IsMenuWedge(tx, ty) bool` — returns `true` when `(tx, ty)` is inside the NE Menu Wedge target `(320-s <= tx < 320 && 0 <= ty < s)`.
+    - `IsExitWedge(tx, ty) bool` — returns `true` when `(tx, ty)` is inside the NW Exit `X` target `(0 <= tx < s && 0 <= ty < s)`.
+    - `CornerSize() int` — returns the configured corner target size (`12..24`).
     ```go
     import "wedge"
     // ...
     DrawExitWedge()
+    DrawMenuWedge()
+    s := CornerSize() // 12..24: use to position adjacent top-bar buttons
     ```
 - **Structs, Pointers & Dynamic Heap Allocation (`new`, `make`, `delete`, `malloc`, `free`)**:
   ```go
@@ -164,7 +172,9 @@ GOWORK=off go build -o build/lakat ./cmd/lakat
 | Category | Function Signature | Description |
 | :--- | :--- | :--- |
 | **Lifecycle** | `os_exit(code int)` | Exits the app and returns to Lakatos OS shell |
-| | `os_set_corner_exit(enable int)` | Enables (`1`, default) or disables (`0`) Core 0's automatic top-left `12×12` corner tap app exit |
+| | `os_set_corner_exit(enable int)` | Enables (`1`, default) or disables (`0`) Core 0's automatic top-left `s×s` corner tap app exit |
+| | `os_get_corner_size() int` | Returns the configured corner target size `s` (`12..24` pixels, default `12`) for the NW Exit `X` and NE Menu Wedge |
+| | `os_set_corner_size(size int)` | Sets and persists the corner target size `s` (`12..24` pixels) |
 | | `os_yield()` | Feeds watchdog, polls `@FUSE` serial commands, & updates background tasks |
 | | `os_millis() int` | Milliseconds since boot |
 | | `os_micros() int` | Microseconds since boot |

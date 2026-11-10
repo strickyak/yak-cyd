@@ -631,15 +631,21 @@ func drawTopBar() {
 	tft_fill_rect(0, 0, SCREEN_W, TOP_H, UI_TOP_BG)
 	tft_draw_fast_hline(0, TOP_H-1, SCREEN_W, UI_BORDER)
 
-	// Top-left 12x12 NW corner X mark (no [EXIT] button)
+	// Top-left NW corner X mark (sized by CornerSize(): 12..24)
 	DrawExitWedge()
+	cs := CornerSize()
+	runX := cs + 2
+	if runX < 16 {
+		runX = 16
+	}
+	runW := 73 - runX
 
-	// [RUN] (x = 16..73)
+	// [RUN] (x = runX..73)
 	runBg := UI_BTN_RUN
 	if isRunning != 0 {
 		runBg = 0x05E0
 	}
-	drawButton(16, 2, 57, 19, runBg, GREEN, WHITE, "RUN")
+	drawButton(runX, 2, runW, 19, runBg, GREEN, WHITE, "RUN")
 
 	// [STOP] (x = 76..133)
 	stopBg := UI_BTN_STOP
@@ -2175,11 +2181,12 @@ func stepBasicInterpreter() {
 // Top-Bar & Screen Click Dispatch
 // ============================================================================
 func handleTopBarClick(tx int) {
-	if tx < 15 {
+	cs := CornerSize()
+	if tx < cs {
 		os_exit(0)
 		return
 	}
-	if tx >= 16 && tx <= 73 {
+	if tx >= cs && tx <= 73 {
 		// [RUN]
 		startBasicRun()
 		return

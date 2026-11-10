@@ -92,6 +92,8 @@ bool        lakatosGetDeveloperMode();
 void        lakatosSetDeveloperMode(bool en);
 bool        lakatosGetTouchSpotEnabled();
 void        lakatosSetTouchSpotEnabled(bool en);
+int         lakatosGetCornerSize();
+void        lakatosSetCornerSize(int sz);
 void        lakatosDevLogf(const char* fmt, ...);
 void        lakatosPollSerialFuse();
 bool        lakatosFormatLocalTime(char* buf, size_t len, const char* fmt);

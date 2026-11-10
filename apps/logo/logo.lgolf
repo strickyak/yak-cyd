@@ -759,15 +759,21 @@ func drawTopBar() {
 	tft_fill_rect(0, 0, SCREEN_W, TOP_H, UI_TOP_BG)
 	tft_draw_fast_hline(0, TOP_H-1, SCREEN_W, UI_BORDER)
 
-	// Top-left 12x12 NW corner X mark (no [EXIT] button)
+	// Top-left NW corner X mark (sized by CornerSize(): 12..24)
 	DrawExitWedge()
+	cs := CornerSize()
+	runX := cs + 2
+	if runX < 16 {
+		runX = 16
+	}
+	runW := 73 - runX
 
-	// [RUN] (x = 16..73)
+	// [RUN] (x = runX..73)
 	runBg := UI_BTN_RUN
 	if isRunning != 0 {
 		runBg = 0x05E0
 	}
-	drawButton(16, 2, 57, 19, runBg, GREEN, WHITE, "RUN")
+	drawButton(runX, 2, runW, 19, runBg, GREEN, WHITE, "RUN")
 
 	// [STOP] (x = 76..133)
 	stopBg := UI_BTN_STOP
@@ -2215,9 +2221,10 @@ func main() {
 		if clicked {
 			if ty < TOP_H {
 				// Top Bar Buttons: NW corner X, RUN, STOP, EDIT, LOAD, SAVE
-				if tx < 15 {
+				cs := CornerSize()
+				if tx < cs {
 					os_exit(0)
-				} else if tx >= 16 && tx <= 73 {
+				} else if tx >= cs && tx <= 73 {
 					// [RUN]
 					startLogoRun()
 				} else if tx >= 76 && tx <= 133 {

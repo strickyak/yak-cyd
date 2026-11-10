@@ -2,19 +2,25 @@
 // Remembers up to 500 .jpg basenames (<= 8 bytes each without the .jpg extension),
 // shuffles them using the ESP32 hardware TRNG (os_rand), and displays each image
 // centered on the 320x240 screen for 10 seconds using Core 0 background prefetching.
+//
+// Ambient Mode Rule:
+//   If the app has been running for over 60 seconds and has received no touch clicks
+//   in the last 60 seconds, neither the NW Exit X nor the NE Menu Wedge is shown
+//   until there is a touch click again.
 package main
 
 import "wedge"
 
 const (
-	BUF_MAX      = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
-	MAX_SCAN     = 700   // 700 * 88 = 61,600 B fits inside 64 KB imgBuf during scanCatalog()
-	MAX_IMAGES   = 500   // Up to 500 .jpg basenames remembered
-	NAME_STRIDE  = 8     // Up to 8 bytes per basename (without ".jpg")
-	ENTRY_SIZE   = 88    // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
-	ENTRY_ISDIR  = 80
-	DISPLAY_MS   = 10000
-	POLL_STEP_MS = 40
+	BUF_MAX         = 65536 // 64 KB reusable Core 0 prefetch & decode buffer
+	MAX_SCAN        = 700   // 700 * 88 = 61,600 B fits inside 64 KB imgBuf during scanCatalog()
+	MAX_IMAGES      = 500   // Up to 500 .jpg basenames remembered
+	NAME_STRIDE     = 8     // Up to 8 bytes per basename (without ".jpg")
+	ENTRY_SIZE      = 88    // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
+	ENTRY_ISDIR     = 80
+	DISPLAY_MS      = 10000
+	POLL_STEP_MS    = 40
+	AMBIENT_HIDE_MS = 60000 // Hide Exit X and Menu Wedge after 60s running & 60s without touch clicks
 )
 
 var (
@@ -24,6 +30,11 @@ var (
 
 	pathBuf     [32]byte // "/net/pix/" (9) + basename (<=8) + ".jpg" (4) + NUL
 	prefetchIdx int
+
+	appStartMs       int = 0
+	lastTouchClickMs int = 0
+	lastSlideClickMs int = 0
+	wedgesVisible    int = 0
 )
 
 func toLowerByte(c int) int {
@@ -63,12 +74,111 @@ func exitCleanly() {
 	os_exit(0)
 }
 
-var lastSlideClickMs int = 0
+func isAmbientQuiet(now int) bool {
+	if (now - appStartMs) < AMBIENT_HIDE_MS {
+		return false
+	}
+	if lastTouchClickMs != 0 && (now - lastTouchClickMs) < AMBIENT_HIDE_MS {
+		return false
+	}
+	return true
+}
+
+func drawGalleryWedges() {
+	DrawExitWedge()
+	DrawMenuWedge()
+	wedgesVisible = 1
+}
+
+func hideGalleryWedges() {
+	s := CornerSize()
+	tft_fill_rect(0, 0, s, s, BLACK)
+	tft_fill_rect(320-s, 0, s, s, BLACK)
+	wedgesVisible = 0
+}
+
+func updateGalleryWedgesForNow(now int) {
+	if isAmbientQuiet(now) {
+		if wedgesVisible != 0 {
+			hideGalleryWedges()
+		}
+	} else {
+		if wedgesVisible == 0 {
+			drawGalleryWedges()
+		}
+	}
+}
+
+func runGalleryMenu() int {
+	drawGalleryWedges()
+	s := CornerSize()
+	menuY := s
+	if menuY < 24 {
+		menuY = 24
+	}
+	tft_fill_round_rect(204, menuY, 114, 119, 5, 0x10A2)
+	tft_draw_round_rect(204, menuY, 114, 119, 5, CYAN)
+
+	tft_set_text_datum(MC_DATUM)
+	for i := 0; i < 4; i++ {
+		iy := menuY + 3 + i*29
+		tft_fill_round_rect(208, iy, 106, 25, 4, 0x18E3)
+		tft_draw_round_rect(208, iy, 106, 25, 4, CYAN)
+		tft_set_text_color(WHITE, 0x18E3)
+		if i == 0 {
+			tft_draw_string("Next Photo", 261, iy+12, 2)
+		} else if i == 1 {
+			tft_draw_string("Prev Photo", 261, iy+12, 2)
+		} else if i == 2 {
+			tft_draw_string("Shuffle", 261, iy+12, 2)
+		} else {
+			tft_draw_string("Exit", 261, iy+12, 2)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				exitCleanly()
+				return 99
+			}
+		}
+		clicked, cx, cy := os_read_click()
+		if clicked {
+			now := os_millis()
+			lastSlideClickMs = now
+			lastTouchClickMs = now
+			if cx >= 204 && cx <= 318 && cy >= menuY+2 && cy < menuY+118 {
+				itemIdx := (cy - (menuY + 3)) / 29
+				if itemIdx == 0 {
+					return 1
+				}
+				if itemIdx == 1 {
+					return -1
+				}
+				if itemIdx == 2 {
+					shuffleCatalog()
+					return 1
+				}
+				if itemIdx == 3 {
+					exitCleanly()
+					return 99
+				}
+			}
+			// Tapped Menu Wedge or outside dropdown -> close menu and redraw current slide
+			return 2
+		}
+		os_delay_ms(POLL_STEP_MS)
+	}
+}
 
 // pollUserAction returns:
-//   99 = exit (serial 'q'/'Q'/^C; top-left 12x12 X mark is handled by Core 0)
+//   99 = exit (serial 'q'/'Q'/^C; top-left Exit X is handled by Core 0)
+//    2 = redraw current picture (after closing dropdown menu)
 //    1 = next picture (click on right half: x >= 160)
-//   -1 = previous picture (click on left half: x < 160, outside 12x12 corner)
+//   -1 = previous picture (click on left half: x < 160, outside Exit X corner)
 //    0 = no action
 func pollUserAction() int {
 	if os_serial_available() > 0 {
@@ -78,13 +188,20 @@ func pollUserAction() int {
 			return 99
 		}
 	}
-	clicked, cx, _ := os_read_click()
+	clicked, cx, cy := os_read_click()
 	if clicked {
 		now := os_millis()
 		if lastSlideClickMs != 0 && (now-lastSlideClickMs) < 250 {
 			return 0
 		}
 		lastSlideClickMs = now
+		lastTouchClickMs = now
+		if wedgesVisible == 0 {
+			drawGalleryWedges()
+		}
+		if IsMenuWedge(cx, cy) {
+			return runGalleryMenu()
+		}
 		if cx >= 160 {
 			return 1
 		}
@@ -97,10 +214,14 @@ func checkHomeExit() bool {
 	return pollUserAction() == 99
 }
 
-// waitSlideAction waits up to durationMs while polling for HOME exit or left/right navigation clicks.
+// waitSlideAction waits up to durationMs while polling for HOME exit, menu wedge, or left/right navigation clicks.
 func waitSlideAction(durationMs int) int {
 	startMs := os_millis()
 	for (os_millis() - startMs) < durationMs {
+		now := os_millis()
+		if wedgesVisible != 0 && isAmbientQuiet(now) {
+			hideGalleryWedges()
+		}
 		act := pollUserAction()
 		if act != 0 {
 			return act
@@ -149,7 +270,11 @@ func buildNetJpgPath(idx int) string {
 
 func showStatusMessage(line1 string, line2 string) {
 	tft_fill_screen(BLACK)
-	DrawExitWedge()
+	if !isAmbientQuiet(os_millis()) {
+		drawGalleryWedges()
+	} else {
+		wedgesVisible = 0
+	}
 	tft_set_text_color(CYAN, BLACK)
 	tft_draw_string(line1, 40, 100, 2)
 	tft_set_text_color(LIGHTGREY, BLACK)
@@ -256,7 +381,11 @@ func displaySlide(idx int) bool {
 	}
 
 	if drawn {
-		DrawExitWedge()
+		if !isAmbientQuiet(os_millis()) {
+			drawGalleryWedges()
+		} else {
+			wedgesVisible = 0
+		}
 	}
 
 	// Immediately start Core 0 background prefetch for the NEXT slide during the 10s wait
@@ -272,8 +401,10 @@ func displaySlide(idx int) bool {
 }
 
 func main() {
+	appStartMs = os_millis()
+	lastTouchClickMs = 0
 	tft_fill_screen(BLACK)
-	DrawExitWedge()
+	drawGalleryWedges()
 	tft_set_text_color(CYAN, BLACK)
 	tft_draw_string("Loading /net/pix/ ...", 64, 110, 2)
 
@@ -289,6 +420,10 @@ func main() {
 					act := waitSlideAction(DISPLAY_MS)
 					if act == 99 {
 						return
+					}
+					if act == 2 {
+						// Menu closed without advancing -> redraw current slide
+						continue
 					}
 					if act == -1 {
 						idx = idx - 1

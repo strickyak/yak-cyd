@@ -409,10 +409,33 @@ type Compiler struct {
 var BuiltinLibraries = map[string]string{
 	"wedge": `package wedge
 
+func CornerSize() int {
+	return os_get_corner_size()
+}
+
 func DrawExitWedge() {
-	tft_fill_rect(0, 0, 12, 12, BLACK)
-	tft_draw_line(0, 0, 11, 11, WHITE)
-	tft_draw_line(11, 0, 0, 11, WHITE)
+	s := os_get_corner_size()
+	tft_fill_rect(0, 0, s, s, BLACK)
+	tft_draw_line(0, 0, s-1, s-1, WHITE)
+	tft_draw_line(s-1, 0, 0, s-1, WHITE)
+}
+
+func DrawMenuWedge() {
+	s := os_get_corner_size()
+	tft_fill_rect(320-s, 0, s, s, BLACK)
+	for y := 0; y*2 < s; y = y + 1 {
+		tft_draw_fast_hline(320-s+y, y, s-2*y, WHITE)
+	}
+}
+
+func IsMenuWedge(tx int, ty int) bool {
+	s := os_get_corner_size()
+	return tx >= 320-s && tx < 320 && ty >= 0 && ty < s
+}
+
+func IsExitWedge(tx int, ty int) bool {
+	s := os_get_corner_size()
+	return tx >= 0 && tx < s && ty >= 0 && ty < s
 }
 `,
 }
@@ -3323,6 +3346,12 @@ func (c *Compiler) compileCall(name string, line int) (TypeDesc, error) {
 		return TypeDesc{Kind: "scalar", ScalarType: "uint", ByteSize: 4, ElemSize: 4}, nil
 	case "os_set_corner_exit", "set_corner_exit":
 		c.emitOp("SYSCALL", "SYS_SET_CORNER_EXIT")
+		return VoidType, nil
+	case "os_get_corner_size", "get_corner_size", "os_corner_size":
+		c.emitOp("SYSCALL", "SYS_GET_CORNER_SIZE")
+		return ScalarInt, nil
+	case "os_set_corner_size", "set_corner_size":
+		c.emitOp("SYSCALL", "SYS_SET_CORNER_SIZE")
 		return VoidType, nil
 
 	// Identity, Airport & Time

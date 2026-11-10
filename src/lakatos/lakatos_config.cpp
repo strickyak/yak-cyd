@@ -134,6 +134,7 @@ static char   gSerialNo[32]    = "";
 static char   gShUrl[96]       = "http://pizga.net:1908/";
 static char   gShPass[64]      = "";  // Never stored in source code; loaded from NVS
 static bool   gTouchSpotEnabled = false;
+static int    gCornerSize      = 12;
 
 static void applyAirportCode(const char* code) {
   char up[4] = {'S', 'F', 'O', '\0'};
@@ -186,6 +187,7 @@ static void saveConfigToNvs() {
   prefs.begin("cyd_cfg", false);
   prefs.putBool("autoB", gAutoBright);
   prefs.putInt("manB", gManualBrightPct);
+  prefs.putInt("cornerSz", gCornerSize);
   prefs.putString("iata", gAirportCode);
   prefs.putString("devName", gDeviceName);
   prefs.putString("serialNo", gSerialNo);
@@ -201,6 +203,7 @@ void initLakatosConfig() {
   prefs.begin("cyd_cfg", true);
   gAutoBright = prefs.getBool("autoB", true);
   gManualBrightPct = constrain((int)prefs.getInt("manB", 85), 5, 100);
+  gCornerSize = constrain((int)prefs.getInt("cornerSz", 12), 12, 24);
   String savedIata = prefs.getString("iata", "SFO");
   String savedDev  = prefs.getString("devName", "test");
   String savedSer  = prefs.getString("serialNo", "");
@@ -362,6 +365,16 @@ bool lakatosGetTouchSpotEnabled() {
 
 void lakatosSetTouchSpotEnabled(bool en) {
   lakatosSetDeveloperMode(en);
+}
+
+int lakatosGetCornerSize() {
+  return constrain(gCornerSize, 12, 24);
+}
+
+void lakatosSetCornerSize(int sz) {
+  gCornerSize = constrain(sz, 12, 24);
+  saveConfigToNvs();
+  gConfigNeedsRedraw = true;
 }
 
 bool lakatosWifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
@@ -1248,7 +1261,16 @@ static void drawConfigScreen() {
   tft.drawString("HOME", 31, 12, 2);
 
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.drawString("CONFIG", 160, 12, 2);
+  tft.drawString("CONFIG", 140, 12, 2);
+
+  // [CORNER: 12..24] button in top-right header (x: 222..317, y: 2..22)
+  char cornerLbl[20];
+  snprintf(cornerLbl, sizeof(cornerLbl), "CORNER: %dpx", gCornerSize);
+  tft.fillRoundRect(222, 2, 95, 20, 4, 0x2945);
+  tft.drawRoundRect(222, 2, 95, 20, 4, TFT_CYAN);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x2945);
+  tft.drawString(cornerLbl, 269, 12, 1);
 
   // Row 1 (y: 28..66): Brightness Slider + [AUTO] toggle
   tft.fillRoundRect(4, 28, 312, 38, 5, 0x1082);
@@ -1404,7 +1426,13 @@ void runLakatosConfigScreen(bool startInCalibration) {
           lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
           lakatosSetInConfigScreen(false);
           return;  // HOME -> Exit Config back to YakFace Home page
-        } else if (t.y <= 25 && t.x >= 90 && t.x <= 230) {
+        } else if (t.y <= 25 && t.x >= 220) {
+          int nextSz = gCornerSize + 2;
+          if (nextSz > 24) nextSz = 12;
+          lakatosSetCornerSize(nextSz);
+          lakatosDevLogf("Button: CONFIG -> CORNER SIZE=%d (%d,%d)", gCornerSize, t.x, t.y);
+          drawConfigScreen();
+        } else if (t.y <= 25 && t.x >= 90 && t.x < 220) {
           secretTitleTaps++;
           if (secretTitleTaps >= 8 && !gCanBeDeveloper) {
             gCanBeDeveloper = true;

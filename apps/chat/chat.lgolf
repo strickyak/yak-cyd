@@ -330,16 +330,21 @@ func drawHeaderBar() {
 	tft_draw_fast_hline(0, 23, 320, UI_BORDER)
 
 	DrawExitWedge()
+	cs := CornerSize()
+	titleX := cs + 4
+	if titleX < 18 {
+		titleX = 18
+	}
 
 	tft_set_text_datum(0) // TL_DATUM
 	tft_set_text_color(UI_CYAN, UI_HEADER_BG)
-	tft_draw_string("CHAT", 18, 4, 2)
+	tft_draw_string("CHAT", titleX, 4, 2)
 
-	// Nickname pill button [ @myId ] at x = 58..162, y = 3..20
-	tft_fill_round_rect(58, 3, 104, 17, 3, UI_BTN_BG)
-	tft_draw_round_rect(58, 3, 104, 17, 3, UI_BORDER)
+	// Nickname pill button [ @myId ] at x = 66..164, y = 3..20
+	tft_fill_round_rect(66, 3, 98, 17, 3, UI_BTN_BG)
+	tft_draw_round_rect(66, 3, 98, 17, 3, UI_BORDER)
 	tft_set_text_color(UI_GOLD, UI_BTN_BG)
-	nx := 63
+	nx := 71
 	nx = nx + tft_draw_string("@", nx, 4, 2)
 	tft_draw_cstr(&myIdBuf[0], nx, 4, 2)
 
@@ -733,14 +738,14 @@ func main() {
 
 		clicked, tx, ty := pollFilteredClick()
 		if clicked {
-			// Top-left exit wedge (0..15, 0..23)
-			if tx < 16 && ty < 24 {
+			// Top-left exit wedge
+			if IsExitWedge(tx, ty) {
 				ws_close()
 				return
 			}
 			// Header bar interactions
 			if ty < 24 {
-				if tx >= 58 && tx <= 162 {
+				if tx >= 64 && tx <= 165 {
 					promptAndChangeNickname()
 				} else if tx >= 166 && tx <= 258 {
 					connectChatWs(nowMs)

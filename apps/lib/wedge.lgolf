@@ -1,10 +1,35 @@
-// Top-left 12x12 exit X mark library for Lakatos OS apps.
-// Core 0 intercepts any touch in the top-left 12x12 corner (0 <= x < 12, 0 <= y < 12)
-// to exit the running app and return to the Home menu.
+// Standard NW Exit X and NE Menu Wedge controls for Lakatos OS apps.
+// Both controls use the OS corner target size configuration parameter (12..24 px, default 12).
+// - NW corner (0 <= x < s, 0 <= y < s): Exit X mark, intercepted by Core 0 to close the app.
+// - NE corner (320-s <= x < 320, 0 <= y < s): Downward-pointing Menu Wedge (hypotenuse across top,
+//   90-degree right angle pointing down), handled by the app via IsMenuWedge(tx, ty).
 package wedge
 
+func CornerSize() int {
+	return os_get_corner_size()
+}
+
 func DrawExitWedge() {
-	tft_fill_rect(0, 0, 12, 12, BLACK)
-	tft_draw_line(0, 0, 11, 11, WHITE)
-	tft_draw_line(11, 0, 0, 11, WHITE)
+	s := os_get_corner_size()
+	tft_fill_rect(0, 0, s, s, BLACK)
+	tft_draw_line(0, 0, s-1, s-1, WHITE)
+	tft_draw_line(s-1, 0, 0, s-1, WHITE)
+}
+
+func DrawMenuWedge() {
+	s := os_get_corner_size()
+	tft_fill_rect(320-s, 0, s, s, BLACK)
+	for y := 0; y*2 < s; y = y + 1 {
+		tft_draw_fast_hline(320-s+y, y, s-2*y, WHITE)
+	}
+}
+
+func IsMenuWedge(tx int, ty int) bool {
+	s := os_get_corner_size()
+	return tx >= 320-s && tx < 320 && ty >= 0 && ty < s
+}
+
+func IsExitWedge(tx int, ty int) bool {
+	s := os_get_corner_size()
+	return tx >= 0 && tx < s && ty >= 0 && ty < s
 }

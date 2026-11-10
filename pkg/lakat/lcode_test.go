@@ -1080,3 +1080,143 @@ func TestChatWebSocketMultiUser(t *testing.T) {
 	}
 }
 
+func TestWedgeMenuAndCornerSizeConfig(t *testing.T) {
+	src := `package main
+import "wedge"
+
+func main() {
+	// Default corner size = 12
+	if CornerSize() != 12 {
+		panic("expected default CornerSize 12")
+	}
+	DrawExitWedge()
+	DrawMenuWedge()
+	if !IsMenuWedge(308, 0) || !IsMenuWedge(319, 11) || IsMenuWedge(307, 0) || IsMenuWedge(319, 12) {
+		panic("IsMenuWedge failed for size 12")
+	}
+	if !IsExitWedge(0, 0) || !IsExitWedge(11, 11) || IsExitWedge(12, 0) {
+		panic("IsExitWedge failed for size 12")
+	}
+
+	// Switch corner size to 24
+	os_set_corner_size(24)
+	if os_get_corner_size() != 24 || CornerSize() != 24 {
+		panic("expected CornerSize 24")
+	}
+	tft_fill_screen(BLACK)
+	DrawExitWedge()
+	DrawMenuWedge()
+	if !IsMenuWedge(296, 0) || !IsMenuWedge(319, 23) || IsMenuWedge(295, 0) || IsMenuWedge(319, 24) {
+		panic("IsMenuWedge failed for size 24")
+	}
+}
+`
+	lapp, asmText, err := CompileToLapp("wedge-test", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	// Verify 24x24 Exit X in NW corner: (0,0), (23,23), (23,0), (0,23) are WHITE
+	if vm.Screen[0][0] != 0xFFFF || vm.Screen[23][23] != 0xFFFF || vm.Screen[0][23] != 0xFFFF || vm.Screen[23][0] != 0xFFFF {
+		t.Fatalf("24x24 Exit X not drawn properly")
+	}
+	// Verify 24x24 downward-pointing Menu Wedge in NE corner (x = 296..319):
+	// Hypotenuse across top row y=0 (x=296..319 all WHITE), right angle pointing down at y=11 (x=307..308 WHITE, 306 BLACK)
+	if vm.Screen[0][296] != 0xFFFF || vm.Screen[0][319] != 0xFFFF || vm.Screen[0][295] != 0x0000 {
+		t.Fatalf("24x24 Menu Wedge top hypotenuse not drawn properly: (296,0)=0x%04X (319,0)=0x%04X", vm.Screen[0][296], vm.Screen[0][319])
+	}
+	if vm.Screen[11][307] != 0xFFFF || vm.Screen[11][308] != 0xFFFF || vm.Screen[11][306] != 0x0000 || vm.Screen[12][307] != 0x0000 {
+		t.Fatalf("24x24 Menu Wedge downward tip not drawn properly at y=11")
+	}
+}
+
+func TestGalleryAmbientModeHidesAndRestoresWedges(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/gallery/gallery.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(gallery.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("Gallery Viewer", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	tmpDir := t.TempDir()
+	pixDir := filepath.Join(tmpDir, "net", "pix")
+	if err := os.MkdirAll(pixDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Create a valid 16x16 dark blue JPEG image in /net/pix/pic1.jpg
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	var jpgBuf bytes.Buffer
+	if err := jpeg.Encode(&jpgBuf, img, nil); err != nil {
+		t.Fatalf("jpeg.Encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pixDir, "pic1.jpg"), jpgBuf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(pic1.jpg): %v", err)
+	}
+
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 4000000
+
+	sawInitialWedges := false
+	sawHiddenInAmbient := false
+	sawRestoredAfterClick := false
+	injectedWakeClick := false
+	injectedExit := false
+
+	vm.StepHook = func(v *VM, pc int, op byte) {
+		// 1. Before 60s: both NW Exit X (0,0) and NE Menu Wedge (319,0) are visible
+		if v.VirtualMs >= 2000 && v.VirtualMs < 50000 && !sawInitialWedges {
+			if v.Screen[0][0] == 0xFFFF && v.Screen[0][319] == 0xFFFF {
+				sawInitialWedges = true
+			}
+		}
+		// 2. After 60s with no touch clicks: both NW Exit X and NE Menu Wedge are hidden
+		if v.VirtualMs >= 62000 && !sawHiddenInAmbient {
+			if v.Screen[0][0] == 0x0000 && v.Screen[0][319] == 0x0000 {
+				sawHiddenInAmbient = true
+				if !injectedWakeClick {
+					injectedWakeClick = true
+					// Inject a touch click at (200, 120) to wake wedges from ambient mode
+					v.TouchQueue = append(v.TouchQueue, TouchEvent{Touched: true, X: 200, Y: 120})
+				}
+			}
+		}
+		// 3. After the touch click: both NW Exit X and NE Menu Wedge reappear
+		if sawHiddenInAmbient && injectedWakeClick && !sawRestoredAfterClick {
+			if v.Screen[0][0] == 0xFFFF && v.Screen[0][319] == 0xFFFF {
+				sawRestoredAfterClick = true
+				if !injectedExit {
+					injectedExit = true
+					v.SerialIn = append(v.SerialIn, 'q')
+				}
+			}
+		}
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if !sawInitialWedges {
+		t.Fatalf("expected gallery to show both Exit X and Menu Wedge during first 60s")
+	}
+	if !sawHiddenInAmbient {
+		t.Fatalf("expected gallery to hide both Exit X and Menu Wedge after 60s with no touch clicks")
+	}
+	if !sawRestoredAfterClick {
+		t.Fatalf("expected gallery to re-show both Exit X and Menu Wedge after a touch click")
+	}
+}
+
+

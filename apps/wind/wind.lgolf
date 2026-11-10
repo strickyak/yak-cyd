@@ -947,14 +947,15 @@ func drawStaticScene() {
 	tft_set_text_color(CYAN, COL_HEADER)
 	tft_draw_string("WIND", 58, 12, 2)
 
-	// Clickable Scale Selector button on top bar (x = 104..316, y = 3..21)
-	tft_fill_round_rect(104, 3, 212, 18, 3, COL_BTN_BG)
-	tft_draw_round_rect(104, 3, 212, 18, 3, COL_BTN_BORDER)
+	// Clickable Scale Selector button on top bar + standard NE Menu Wedge
+	cs := CornerSize()
+	scaleW := 320 - cs - 108
+	tft_fill_round_rect(104, 3, scaleW, 18, 3, COL_BTN_BG)
+	tft_draw_round_rect(104, 3, scaleW, 18, 3, COL_BTN_BORDER)
 	tft_set_text_datum(MC_DATUM)
 	tft_set_text_color(YELLOW, COL_BTN_BG)
-	tft_draw_string(scaleTitleStr(scaleMode), 204, 12, 1)
-	// Dropdown indicator triangle on right edge of scale button
-	tft_fill_triangle(303, 9, 311, 9, 307, 15, CYAN)
+	tft_draw_string(scaleTitleStr(scaleMode), 104+scaleW/2, 12, 1)
+	DrawMenuWedge()
 
 	// Wooden chime suspension cross-beam
 	tft_fill_round_rect(6, 43, 308, 6, 2, COL_WOOD)
@@ -1062,8 +1063,8 @@ func main() {
 					}
 				}
 			} else {
-				// Top scale label button (x >= 100, y <= 28) -> open scale popup menu
-				if tx >= 100 && ty <= 28 {
+				// NE Menu Wedge or top scale label button -> open scale popup menu
+				if IsMenuWedge(tx, ty) || (tx >= 100 && ty <= 28) {
 					if touchWasDown == 0 {
 						touchWasDown = 1
 						menuOpen = 1

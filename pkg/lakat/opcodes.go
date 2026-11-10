@@ -267,8 +267,10 @@ const (
 	SysPal4Clear    = byte(0x51) // (bufAddr w h topRows topCol botCol -- )
 	SysPal4FillTri  = byte(0x52) // (bufAddr w h x0 y0 x1 y1 x2 y2 col -- )
 	SysPal4FillCirc = byte(0x53) // (bufAddr w h cx cy r col -- )
-	SysPal4DrawLine = byte(0x54) // (bufAddr w h x0 y0 x1 y1 col -- )
-	SysPal4Render3D = byte(0x55) // (bufAddr w h camAddr primsAddr primCount -- visCount)
+	SysPal4DrawLine   = byte(0x54) // (bufAddr w h x0 y0 x1 y1 col -- )
+	SysPal4Render3D   = byte(0x55) // (bufAddr w h camAddr primsAddr primCount -- visCount)
+	SysGetCornerSize  = byte(0x56) // ( -- size)
+	SysSetCornerSize  = byte(0x57) // (size -- )
 )
 
 type ArgType string
@@ -487,6 +489,8 @@ var SyscallByName = map[string]byte{
 	"SYS_PAL4_FILL_CIRC":      SysPal4FillCirc,
 	"SYS_PAL4_DRAW_LINE":      SysPal4DrawLine,
 	"SYS_PAL4_RENDER_3D":      SysPal4Render3D,
+	"SYS_GET_CORNER_SIZE":     SysGetCornerSize,
+	"SYS_SET_CORNER_SIZE":     SysSetCornerSize,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,
