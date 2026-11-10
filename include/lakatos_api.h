@@ -224,6 +224,9 @@ typedef struct LakatosApi {
   int32_t  (*http_stream_read)(void* buf, size_t max_len);
   void     (*http_stream_close)(void);
   int32_t  (*http_stream_write)(const void* buf, size_t len);
+
+  // --- Corner UI Target Configuration (NW Exit X & NE Menu Wedge: 12..24 px) ---
+  int      (*get_corner_size)(void);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);
@@ -231,6 +234,46 @@ typedef void (*lakatos_app_entry_t)(const LakatosApi* os);
 // Helper for apps to retrieve the LakatosApi pointer from the fixed RAM slot (0x3FFC8000)
 static inline const LakatosApi* lakatos_os(void) {
   return *(const LakatosApi* const*)(uintptr_t)LAKATOS_APP_DRAM_BASE;
+}
+
+// Helper for native apps to query the configured corner target size (8..24 px)
+static inline int lakatos_corner_size(const LakatosApi* os) {
+  if (os &&
+      os->struct_size >= offsetof(LakatosApi, get_corner_size) + sizeof(os->get_corner_size) &&
+      os->get_corner_size) {
+    int sz = os->get_corner_size();
+    if (sz >= 8 && sz <= 24) return sz;
+  }
+  return 12;
+}
+
+// Helper for native apps to draw the standard NW corner Exit X mark
+static inline void lakatos_draw_exit_wedge(const LakatosApi* os) {
+  int sz = lakatos_corner_size(os);
+  os->tft_fill_rect(0, 0, sz, sz, LAKATOS_BLACK);
+  os->tft_draw_line(0, 0, sz - 1, sz - 1, LAKATOS_WHITE);
+  os->tft_draw_line(sz - 1, 0, 0, sz - 1, LAKATOS_WHITE);
+}
+
+// Helper for native apps to hit-test the NW corner Exit X mark
+static inline bool lakatos_is_exit_wedge(const LakatosApi* os, int x, int y) {
+  int sz = lakatos_corner_size(os);
+  return x >= 0 && x < sz && y >= 0 && y < sz;
+}
+
+// Helper for native apps to draw the standard NE corner downward-pointing Menu Wedge
+static inline void lakatos_draw_menu_wedge(const LakatosApi* os) {
+  int sz = lakatos_corner_size(os);
+  os->tft_fill_rect(LAKATOS_SCREEN_W - sz, 0, sz, sz, LAKATOS_BLACK);
+  for (int y = 0; y * 2 < sz; y++) {
+    os->tft_draw_fast_h_line(LAKATOS_SCREEN_W - sz + y, y, sz - 2 * y, LAKATOS_WHITE);
+  }
+}
+
+// Helper for native apps to hit-test the NE corner Menu Wedge
+static inline bool lakatos_is_menu_wedge(const LakatosApi* os, int x, int y) {
+  int sz = lakatos_corner_size(os);
+  return x >= LAKATOS_SCREEN_W - sz && x < LAKATOS_SCREEN_W && y >= 0 && y < sz;
 }
 
 // Helper for multi-headed native binaries (native.bin) to retrieve the global

@@ -879,23 +879,20 @@ static void drawStatusBadge() {
 }
 
 static void drawHeaderBar() {
+  int cs = lakatos_corner_size(gOs);
   gOs->tft_fill_rect(0, 0, 320, 22, kColHeader);
   gOs->tft_draw_fast_h_line(0, 22, 320, kColGtGold);
 
-  // EXIT Button (top left)
-  gOs->tft_fill_round_rect(4, 2, 44, 18, 4, RGB565(135, 30, 42));
-  gOs->tft_draw_round_rect(4, 2, 44, 18, 4, RGB565(225, 90, 105));
-  gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
-  gOs->tft_set_text_color(kColText, RGB565(135, 30, 42));
-  gOs->tft_draw_string("EXIT", 26, 11, 1);
+  // Standard NW Exit X mark (sized via Lakatos corner size)
+  lakatos_draw_exit_wedge(gOs);
 
   // App Title + KiwiSDR Host
   gOs->tft_set_text_datum(LAKATOS_ML_DATUM);
   gOs->tft_set_text_color(kColGtGoldBright, kColHeader);
-  gOs->tft_draw_string("HAM SDR", 54, 11, 2);
+  gOs->tft_draw_string("HAM SDR", cs + 6, 11, 2);
 
   gOs->tft_set_text_color(kColAccent, kColHeader);
-  gOs->tft_draw_string(gKiwiHost, 126, 11, 1);
+  gOs->tft_draw_string(gKiwiHost, cs + 78, 11, 1);
 
   drawStatusBadge();
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
@@ -1400,7 +1397,7 @@ void app_main(const LakatosApi* os) {
         lastBtnClickMs = now;
         // 1. Top Header Bar (y <= 24)
         if (ts.y <= 24) {
-          if (ts.x <= 54) {
+          if (lakatos_is_exit_wedge(os, ts.x, ts.y)) {
             break; // EXIT
           } else if (ts.x < 250) {
             // Edit KiwiSDR Host:Port

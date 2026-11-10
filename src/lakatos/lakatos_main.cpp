@@ -913,20 +913,19 @@ static void drawHomeHeaderBar() {
   } else {
     snprintf(clkStr, sizeof(clkStr), "%s --:--", lakatosGetAirportCode());
   }
+  int sz = lakatosGetCornerSize();
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_LIGHTGREY, 0x10A2);
-  tft.drawString(clkStr, 236, 11, 1);
+  tft.drawString(clkStr, 320 - sz - 18, 11, 1);
 
   bool wifiOk = lakatosWifiIsConnected();
-  tft.fillCircle(246, 11, 4, wifiOk ? TFT_GREEN : TFT_RED);
+  tft.fillCircle(320 - sz - 8, 11, 4, wifiOk ? TFT_GREEN : TFT_RED);
 
-  // [MENU] dropdown button at top-right
-  uint16_t menuBg = gHomeMenuOpen ? TFT_DARKCYAN : 0x2945;
-  tft.fillRoundRect(256, 2, 60, 19, 4, menuBg);
-  tft.drawRoundRect(256, 2, 60, 19, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(gHomeMenuOpen ? TFT_WHITE : TFT_CYAN, menuBg);
-  tft.drawString("MENU", 286, 11, 2);
+  // Standard NE Menu Wedge at top-right (replaces old [MENU]/[Config] button)
+  tft.fillRect(320 - sz, 0, sz, sz, TFT_BLACK);
+  for (int y = 0; y * 2 < sz; y++) {
+    tft.drawFastHLine(320 - sz + y, y, sz - 2 * y, TFT_WHITE);
+  }
 
   gLastClockDrawMs = millis();
   gLastWifiState = wifiOk;
@@ -1835,7 +1834,7 @@ static void handleSerialCommandLine(const String& line) {
       lakatosSetCornerSize(sz);
       refreshShellOrMarkDirty();
     }
-    Serial.printf("Corner Target Size: %d px (range 12..24)\r\n", lakatosGetCornerSize());
+    Serial.printf("Corner Target Size: %d px (stops: 8, 12, 16, 20, 24)\r\n", lakatosGetCornerSize());
   } else if (line == "dev" || line == "spot" ||
              line.startsWith("dev ") || line.startsWith("spot ")) {
     int pfx = line.startsWith("spot") ? 4 : 3;
@@ -1973,8 +1972,9 @@ void loop() {
       return;
     }
 
-    // 1. Top-right [MENU] button
-    if (ty < 24 && tx >= 250) {
+    // 1. Top-right NE Menu Wedge
+    int cornerSz = lakatosGetCornerSize();
+    if (ty < cornerSz && tx >= 320 - cornerSz) {
       lakatosDevLogf("Button: MENU (%d,%d)", tx, ty);
       gHomeMenuOpen = true;
       drawHomeHeaderBar();

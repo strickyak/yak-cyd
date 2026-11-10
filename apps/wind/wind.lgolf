@@ -935,26 +935,22 @@ func drawStaticScene() {
 	tft_fill_rect(0, 0, 320, 24, COL_HEADER)
 	tft_draw_fast_hline(0, 24, 320, COL_BTN_BORDER)
 
-	// Top-left [EXIT] button (next to 12x12 corner exit X mark)
-	tft_fill_round_rect(14, 3, 40, 18, 3, MAROON)
-	tft_draw_round_rect(14, 3, 40, 18, 3, PINK)
-	tft_set_text_datum(MC_DATUM)
-	tft_set_text_color(WHITE, MAROON)
-	tft_draw_string("EXIT", 34, 12, 1)
+	// Standard NW Exit X mark
+	cs := CornerSize()
 	DrawExitWedge()
 
 	tft_set_text_datum(ML_DATUM)
 	tft_set_text_color(CYAN, COL_HEADER)
-	tft_draw_string("WIND", 58, 12, 2)
+	tft_draw_string("WIND", cs+6, 12, 2)
 
 	// Clickable Scale Selector button on top bar + standard NE Menu Wedge
-	cs := CornerSize()
-	scaleW := 320 - cs - 108
-	tft_fill_round_rect(104, 3, scaleW, 18, 3, COL_BTN_BG)
-	tft_draw_round_rect(104, 3, scaleW, 18, 3, COL_BTN_BORDER)
+	scaleX := cs + 52
+	scaleW := 320 - cs - scaleX - 4
+	tft_fill_round_rect(scaleX, 3, scaleW, 18, 3, COL_BTN_BG)
+	tft_draw_round_rect(scaleX, 3, scaleW, 18, 3, COL_BTN_BORDER)
 	tft_set_text_datum(MC_DATUM)
 	tft_set_text_color(YELLOW, COL_BTN_BG)
-	tft_draw_string(scaleTitleStr(scaleMode), 104+scaleW/2, 12, 1)
+	tft_draw_string(scaleTitleStr(scaleMode), scaleX+scaleW/2, 12, 1)
 	DrawMenuWedge()
 
 	// Wooden chime suspension cross-beam
@@ -1029,8 +1025,8 @@ func main() {
 		// Poll touch input
 		touched, tx, ty := os_read_touch()
 		if touched != 0 {
-			// Top-left [EXIT] button always active
-			if tx <= 56 && ty <= 28 {
+			// Top-left NW Exit X mark
+			if IsExitWedge(tx, ty) {
 				audio_stop()
 				return
 			}
@@ -1064,7 +1060,7 @@ func main() {
 				}
 			} else {
 				// NE Menu Wedge or top scale label button -> open scale popup menu
-				if IsMenuWedge(tx, ty) || (tx >= 100 && ty <= 28) {
+				if IsMenuWedge(tx, ty) || (tx >= CornerSize()+52 && ty <= 28) {
 					if touchWasDown == 0 {
 						touchWasDown = 1
 						menuOpen = 1

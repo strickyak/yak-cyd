@@ -172,17 +172,14 @@ static void drawVolumeControls(const LakatosApi* os, int volIdx) {
 static void drawHeader(const LakatosApi* os, int activeNote, int volIdx) {
   os->tft_fill_rect(0, 0, 320, kHeaderH, 0x10A2);
 
-  // [HOME] button (top-left)
-  os->tft_fill_round_rect(2, 4, 48, 24, 4, 0x8000);
-  os->tft_draw_round_rect(2, 4, 48, 24, 4, LAKATOS_WHITE);
-  os->tft_set_text_datum(LAKATOS_MC_DATUM);
-  os->tft_set_text_color(LAKATOS_WHITE, 0x8000);
-  os->tft_draw_string("HOME", 26, 16, 2);
+  // Standard NW Exit X mark (top-left, sized via Lakatos corner size)
+  int cs = lakatos_corner_size(os);
+  lakatos_draw_exit_wedge(os);
 
   // Title
   os->tft_set_text_datum(LAKATOS_ML_DATUM);
   os->tft_set_text_color(LAKATOS_CYAN, 0x10A2);
-  os->tft_draw_string("PIANO", 54, 16, 2);
+  os->tft_draw_string("PIANO", cs + 6, 16, 2);
   os->tft_set_text_datum(LAKATOS_TL_DATUM);
 
   drawNoteStatus(os, activeNote);
@@ -402,11 +399,11 @@ extern "C" void app_main(const LakatosApi* os) {
     if (ts.touched) {
       lastValidTouchMs = nowMs;
 
-      // Check top header buttons ([HOME], [-], [+])
+      // Check top header buttons (NW Exit X, [-], [+])
       if (ts.y < kHeaderH) {
         if (!headerBtnHeld) {
           headerBtnHeld = true;
-          if (ts.x <= 52) {
+          if (lakatos_is_exit_wedge(os, ts.x, ts.y)) {
             speakerSilence();
             os->set_rgb_led(false, false, false, 0);
             os->exit(0);

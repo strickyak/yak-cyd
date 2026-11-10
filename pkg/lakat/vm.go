@@ -143,7 +143,7 @@ func align4(n int) int {
 }
 
 func (vm *VM) cornerSize() int {
-	if vm.CornerSize < 12 {
+	if vm.CornerSize < 8 {
 		return 12
 	}
 	if vm.CornerSize > 24 {
@@ -1481,8 +1481,8 @@ func (vm *VM) execSyscall(sysId byte) error {
 			return err
 		}
 		s := int(int32(sz))
-		if s < 12 {
-			s = 12
+		if s < 8 {
+			s = 8
 		}
 		if s > 24 {
 			s = 24

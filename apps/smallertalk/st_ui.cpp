@@ -964,18 +964,20 @@ static void renderTopSystemBar(StUiManager* ui) {
   os->tft_fill_rect(0, 0, 320, 22, 0x10A2);
   os->tft_draw_fast_h_line(0, 21, 320, LAKATOS_CYAN);
 
-  // [HOME] button (`x = 2..44`)
-  drawButton(os, 2, 2, 42, 18, 0x4800, LAKATOS_WHITE, LAKATOS_WHITE, "HOME", 1);
+  // Standard NW Exit X mark (sized via Lakatos corner size)
+  int cs = lakatos_corner_size(os);
+  lakatos_draw_exit_wedge(os);
 
-  // Window Switcher Tabs (`x = 46..238`)
+  // Window Switcher Tabs (`x = tabX0..238`)
+  int tabX0   = cs + 4;
   int maxTabs = (ui->winCount > 4) ? 4 : ui->winCount;
   int startZ  = ui->winCount - maxTabs;
-  int tabW    = 47;
+  int tabW    = (238 - tabX0) / 4 - 1;
   for (int i = 0; i < maxTabs; i++) {
     uint8_t wIdx = ui->zOrder[startZ + i];
     StWindow& w = ui->windows[wIdx];
     bool isFront = (startZ + i == ui->winCount - 1);
-    int tx = 46 + i * (tabW + 1);
+    int tx = tabX0 + i * (tabW + 1);
     drawButton(os, tx, 2, tabW, 18,
                isFront ? LAKATOS_DARKCYAN : 0x18E3,
                isFront ? LAKATOS_YELLOW   : 0x4A69,
@@ -1040,6 +1042,7 @@ void stUiRender(StUiManager* ui) {
   if (ui->newMenuOpen) {
     renderNewWindowMenu(ui);
   }
+  lakatos_draw_exit_wedge(os);
   ui->needsRedraw = false;
 }
 
@@ -1525,13 +1528,13 @@ void stUiHandleTouch(StUiManager* ui, const FilteredTouchEvent& ev) {
     return;
   }
 
-  // 2. Top System & Window Switcher Bar (`ty < 22`)
+  // 2. Top System & Window Switcher Bar (`ty < 22` or NW corner)
+  if (lakatos_is_exit_wedge(ui->os, tx, ty)) {
+    ui->shouldExit = true;
+    if (ui->os && ui->os->exit) ui->os->exit(0);
+    return;
+  }
   if (ty < 22) {
-    if (tx <= 45) {
-      ui->shouldExit = true;
-      if (ui->os && ui->os->exit) ui->os->exit(0);
-      return;
-    }
     if (tx >= 240 && tx < 281) {
       ui->newMenuOpen = !ui->newMenuOpen;
       ui->needsRedraw = true;
@@ -1543,13 +1546,17 @@ void stUiHandleTouch(StUiManager* ui, const FilteredTouchEvent& ev) {
       ui->needsRedraw = true;
       return;
     }
-    // Window switcher tabs (`x = 46..238`)
+    // Window switcher tabs (`x = tabX0..238`)
+    int tabX0   = lakatos_corner_size(ui->os) + 4;
+    int tabStep = (238 - tabX0) / 4;
     int maxTabs = (ui->winCount > 4) ? 4 : ui->winCount;
     int startZ  = ui->winCount - maxTabs;
-    int tabIdx  = (tx - 46) / 48;
-    if (tabIdx >= 0 && tabIdx < maxTabs) {
-      uint8_t targetWin = ui->zOrder[startZ + tabIdx];
-      bringWindowToFront(ui, targetWin);
+    if (tx >= tabX0 && tabStep > 0) {
+      int tabIdx = (tx - tabX0) / tabStep;
+      if (tabIdx >= 0 && tabIdx < maxTabs) {
+        uint8_t targetWin = ui->zOrder[startZ + tabIdx];
+        bringWindowToFront(ui, targetWin);
+      }
     }
     return;
   }

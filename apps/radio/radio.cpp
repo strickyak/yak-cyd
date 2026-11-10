@@ -599,15 +599,12 @@ static void drawStatusBadge() {
 }
 
 static void drawHeaderBar() {
+  int cs = lakatos_corner_size(gOs);
   gOs->tft_fill_rect(0, 0, 320, 22, kColHeader);
   gOs->tft_draw_fast_h_line(0, 22, 320, kColGtGold);
 
-  // EXIT Button on Top Left
-  gOs->tft_fill_round_rect(4, 2, 44, 18, 4, RGB565(135, 30, 42));
-  gOs->tft_draw_round_rect(4, 2, 44, 18, 4, RGB565(225, 90, 105));
-  gOs->tft_set_text_datum(LAKATOS_MC_DATUM);
-  gOs->tft_set_text_color(kColText, RGB565(135, 30, 42));
-  gOs->tft_draw_string("EXIT", 26, 11, 1);
+  // Standard NW Exit X mark on Top Left (sized via Lakatos corner size)
+  lakatos_draw_exit_wedge(gOs);
 
   // Station Name in Top Bar
   const char* stName = (gPresetIdx >= 0 && gPresetIdx < kNumPresets)
@@ -615,7 +612,7 @@ static void drawHeaderBar() {
                            : "Custom Stream";
   gOs->tft_set_text_datum(LAKATOS_ML_DATUM);
   gOs->tft_set_text_color(kColGtGoldBright, kColHeader);
-  gOs->tft_draw_string(stName, 56, 11, 2);
+  gOs->tft_draw_string(stName, cs + 6, 11, 2);
 
   drawStatusBadge();
   gOs->tft_set_text_datum(LAKATOS_TL_DATUM);
@@ -943,8 +940,8 @@ void app_main(const LakatosApi* os) {
         prevTouch      = true;
         draggingSlider = false;
         lastBtnClickMs = now;
-        // EXIT button (top left)
-        if (ts.y <= 24 && ts.x <= 54) {
+        // NW Exit X (top left)
+        if (lakatos_is_exit_wedge(os, ts.x, ts.y)) {
           break;
         }
         // Bottom 2x4 button grid (y = 181..238)

@@ -196,6 +196,20 @@ static void saveConfigToNvs() {
   prefs.end();
 }
 
+static int snapCornerSize(int sz) {
+  static const int kStops[5] = {8, 12, 16, 20, 24};
+  int best = kStops[0];
+  int bestDist = abs(sz - best);
+  for (int i = 1; i < 5; i++) {
+    int d = abs(sz - kStops[i]);
+    if (d < bestDist) {
+      bestDist = d;
+      best = kStops[i];
+    }
+  }
+  return best;
+}
+
 void initLakatosConfig() {
   pinMode(LDR_PIN, INPUT);
   pinMode(TFT_BL_PIN, OUTPUT);
@@ -203,7 +217,7 @@ void initLakatosConfig() {
   prefs.begin("cyd_cfg", true);
   gAutoBright = prefs.getBool("autoB", true);
   gManualBrightPct = constrain((int)prefs.getInt("manB", 85), 5, 100);
-  gCornerSize = constrain((int)prefs.getInt("cornerSz", 12), 12, 24);
+  gCornerSize = snapCornerSize((int)prefs.getInt("cornerSz", 12));
   String savedIata = prefs.getString("iata", "SFO");
   String savedDev  = prefs.getString("devName", "test");
   String savedSer  = prefs.getString("serialNo", "");
@@ -368,11 +382,11 @@ void lakatosSetTouchSpotEnabled(bool en) {
 }
 
 int lakatosGetCornerSize() {
-  return constrain(gCornerSize, 12, 24);
+  return constrain(gCornerSize, 8, 24);
 }
 
 void lakatosSetCornerSize(int sz) {
-  gCornerSize = constrain(sz, 12, 24);
+  gCornerSize = snapCornerSize(sz);
   saveConfigToNvs();
   gConfigNeedsRedraw = true;
 }
@@ -1249,141 +1263,183 @@ void runLakatosAboutScreen() {
 // ---------------------------------------------------------------------------
 static void drawConfigScreen() {
   const bool isDev = gTouchSpotEnabled;
+  const int  cs    = lakatosGetCornerSize();
   LakatosTftGuard tftLock;
   tft.fillScreen(0x0841);
   tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
 
-  // [ HOME ] (top-left -> goes back to Home page)
-  tft.fillRoundRect(2, 2, 58, 20, 4, 0x2945);
-  tft.drawRoundRect(2, 2, 58, 20, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString("HOME", 31, 12, 2);
+  // Top-left NW Exit X (changes size with gCornerSize)
+  tft.fillRect(0, 0, cs, cs, TFT_BLACK);
+  tft.drawLine(0, 0, cs - 1, cs - 1, TFT_WHITE);
+  tft.drawLine(cs - 1, 0, 0, cs - 1, TFT_WHITE);
 
+  tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.drawString("CONFIG", 140, 12, 2);
+  tft.drawString("CONFIG", 160, 12, 2);
 
-  // [CORNER: 12..24] button in top-right header (x: 222..317, y: 2..22)
-  char cornerLbl[20];
-  snprintf(cornerLbl, sizeof(cornerLbl), "CORNER: %dpx", gCornerSize);
-  tft.fillRoundRect(222, 2, 95, 20, 4, 0x2945);
-  tft.drawRoundRect(222, 2, 95, 20, 4, TFT_CYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, 0x2945);
-  tft.drawString(cornerLbl, 269, 12, 1);
+  // Top-right NE Corner Preview Square (shows how big the corner target is)
+  tft.fillRect(LAKATOS_SCREEN_W - cs, 0, cs, cs, TFT_BLACK);
+  tft.drawRect(LAKATOS_SCREEN_W - cs, 0, cs, cs, TFT_WHITE);
 
-  // Row 1 (y: 28..66): Brightness Slider + [AUTO] toggle
-  tft.fillRoundRect(4, 28, 312, 38, 5, 0x1082);
-  tft.drawRoundRect(4, 28, 312, 38, 5, 0x39E7);
+  // Row 1 (y: 26..56): Brightness Slider + [AUTO] toggle
+  tft.fillRoundRect(4, 26, 312, 30, 5, 0x1082);
+  tft.drawRoundRect(4, 26, 312, 30, 5, 0x39E7);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, 0x1082);
-  tft.drawString("BRIGHT:", 10, 47, 1);
+  tft.drawString("BRIGHT:", 10, 41, 1);
 
-  // Slider track (x: 58..232, y: 41..53)
+  // Brightness slider track (x: 58..232, y: 35..47)
   int trackX = 58, trackW = 174;
-  tft.fillRoundRect(trackX, 41, trackW, 12, 4, TFT_BLACK);
+  tft.fillRoundRect(trackX, 35, trackW, 12, 4, TFT_BLACK);
   int fillW = (trackW * gCurrentBrightPct) / 100;
-  tft.fillRoundRect(trackX, 41, fillW, 12, 4, gAutoBright ? TFT_CYAN : TFT_ORANGE);
-  tft.drawRoundRect(trackX, 41, trackW, 12, 4, TFT_WHITE);
+  tft.fillRoundRect(trackX, 35, fillW, 12, 4, gAutoBright ? TFT_CYAN : TFT_ORANGE);
+  tft.drawRoundRect(trackX, 35, trackW, 12, 4, TFT_WHITE);
 
-  // [x] Auto checkbox (x: 240..310, y: 33..61)
+  // [x] Auto checkbox (x: 240..310, y: 29..53)
   uint16_t autoBg = gAutoBright ? 0x1A26 : 0x18E3;
   uint16_t autoBorder = gAutoBright ? TFT_GREEN : TFT_LIGHTGREY;
-  tft.fillRoundRect(240, 33, 70, 28, 4, autoBg);
-  tft.drawRoundRect(240, 33, 70, 28, 4, autoBorder);
-  // Checkbox square at (246, 40, 14, 14)
-  tft.fillRect(246, 40, 14, 14, gAutoBright ? TFT_DARKGREEN : TFT_BLACK);
-  tft.drawRect(246, 40, 14, 14, TFT_WHITE);
+  tft.fillRoundRect(240, 29, 70, 24, 4, autoBg);
+  tft.drawRoundRect(240, 29, 70, 24, 4, autoBorder);
+  // Checkbox square at (246, 34, 14, 14)
+  tft.fillRect(246, 34, 14, 14, gAutoBright ? TFT_DARKGREEN : TFT_BLACK);
+  tft.drawRect(246, 34, 14, 14, TFT_WHITE);
   if (gAutoBright) {
-    tft.drawLine(248, 47, 251, 51, TFT_YELLOW);
-    tft.drawLine(251, 51, 257, 42, TFT_YELLOW);
-    tft.drawLine(248, 48, 251, 52, TFT_YELLOW);
-    tft.drawLine(251, 52, 257, 43, TFT_YELLOW);
+    tft.drawLine(248, 41, 251, 45, TFT_YELLOW);
+    tft.drawLine(251, 45, 257, 36, TFT_YELLOW);
+    tft.drawLine(248, 42, 251, 46, TFT_YELLOW);
+    tft.drawLine(251, 46, 257, 37, TFT_YELLOW);
   }
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(gAutoBright ? TFT_YELLOW : TFT_LIGHTGREY, autoBg);
-  tft.drawString("Auto", 265, 47, 1);
+  tft.drawString("Auto", 265, 41, 1);
 
-  // Row 2 (y: 70..118): [DEV NAME] (x: 4..157) & [SERIAL #] (x: 163..316)
-  tft.fillRoundRect(4, 70, 153, 46, 5, 0x18E3);
-  tft.drawRoundRect(4, 70, 153, 46, 5, TFT_CYAN);
+  // Row 2 (y: 59..89): Corner Size Slider with stops at 8, 12, 16, 20, 24
+  tft.fillRoundRect(4, 59, 312, 30, 5, 0x1082);
+  tft.drawRoundRect(4, 59, 312, 30, 5, 0x39E7);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, 0x1082);
+  tft.drawString("CORNER:", 10, 74, 1);
+
+  static const int kStops[5] = {8, 12, 16, 20, 24};
+  const int cTrackX0 = 68;
+  const int cStepX   = 40;  // Stops at x = 68, 108, 148, 188, 228
+  const int cTrackW  = cStepX * 4;
+  tft.fillRoundRect(cTrackX0, 66, cTrackW, 6, 3, TFT_BLACK);
+  int activeStopIdx = (cs - 8) / 4;
+  if (activeStopIdx < 0) activeStopIdx = 0;
+  if (activeStopIdx > 4) activeStopIdx = 4;
+  if (activeStopIdx > 0) {
+    tft.fillRoundRect(cTrackX0, 66, activeStopIdx * cStepX, 6, 3, TFT_CYAN);
+  }
+  tft.drawRoundRect(cTrackX0, 66, cTrackW, 6, 3, TFT_WHITE);
+
+  tft.setTextDatum(TC_DATUM);
+  for (int i = 0; i < 5; i++) {
+    int sx = cTrackX0 + i * cStepX;
+    bool sel = (kStops[i] == cs);
+    tft.drawFastVLine(sx, 63, 12, sel ? TFT_YELLOW : TFT_LIGHTGREY);
+    if (sel) {
+      tft.fillCircle(sx, 69, 5, TFT_YELLOW);
+      tft.drawCircle(sx, 69, 5, TFT_WHITE);
+    } else {
+      tft.fillCircle(sx, 69, 3, 0x2945);
+      tft.drawCircle(sx, 69, 3, TFT_CYAN);
+    }
+    char sbuf[8];
+    snprintf(sbuf, sizeof(sbuf), "%d", kStops[i]);
+    tft.setTextColor(sel ? TFT_YELLOW : TFT_LIGHTGREY, 0x1082);
+    tft.drawString(sbuf, sx, 77, 1);
+  }
+
+  // Value badge on right of Corner Size row (x: 246..310, y: 62..86)
+  tft.fillRoundRect(246, 62, 64, 24, 4, 0x18E3);
+  tft.drawRoundRect(246, 62, 64, 24, 4, TFT_CYAN);
+  char cornerLbl[16];
+  snprintf(cornerLbl, sizeof(cornerLbl), "%d px", cs);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x18E3);
+  tft.drawString(cornerLbl, 278, 74, 2);
+
+  // Row 3 (y: 92..133): [DEV NAME] (x: 4..157) & [SERIAL #] (x: 163..316)
+  tft.fillRoundRect(4, 92, 153, 41, 5, 0x18E3);
+  tft.drawRoundRect(4, 92, 153, 41, 5, TFT_CYAN);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, 0x18E3);
-  tft.drawString("DEVICE NAME:", 10, 75, 1);
+  tft.drawString("DEVICE NAME:", 10, 96, 1);
   tft.setTextColor(TFT_WHITE, 0x18E3);
-  tft.drawString(gDeviceName, 10, 90, 2);
+  tft.drawString(gDeviceName, 10, 109, 2);
 
   uint16_t serBg = isDev ? 0x18E3 : 0x0841;
   if (isDev) {
-    tft.fillRoundRect(163, 70, 153, 46, 5, serBg);
-    tft.drawRoundRect(163, 70, 153, 46, 5, TFT_CYAN);
+    tft.fillRoundRect(163, 92, 153, 41, 5, serBg);
+    tft.drawRoundRect(163, 92, 153, 41, 5, TFT_CYAN);
   }
   tft.setTextColor(isDev ? TFT_CYAN : TFT_LIGHTGREY, serBg);
-  tft.drawString("SERIAL NUMBER:", 169, 75, 1);
+  tft.drawString("SERIAL NUMBER:", 169, 96, 1);
   tft.setTextColor(TFT_WHITE, serBg);
-  tft.drawString(gSerialNo, 169, 90, 2);
+  tft.drawString(gSerialNo, 169, 109, 2);
 
-  // Row 3 (y: 120..168): [/net URL] (x: 4..198) & [/net PASS] (x: 204..316)
-  tft.fillRoundRect(4, 120, 194, 46, 5, 0x18E3);
-  tft.drawRoundRect(4, 120, 194, 46, 5, TFT_MAGENTA);
+  // Row 4 (y: 136..177): [/net URL] (x: 4..198) & [/net PASS] (x: 204..316)
+  tft.fillRoundRect(4, 136, 194, 41, 5, 0x18E3);
+  tft.drawRoundRect(4, 136, 194, 41, 5, TFT_MAGENTA);
   tft.setTextColor(TFT_MAGENTA, 0x18E3);
-  tft.drawString("/net SERVER URL:", 10, 125, 1);
+  tft.drawString("/net SERVER URL:", 10, 140, 1);
   tft.setTextColor(TFT_WHITE, 0x18E3);
   String shortUrl = String(gShUrl);
   if (shortUrl.length() > 28) shortUrl = shortUrl.substring(0, 28);
-  tft.drawString(shortUrl, 10, 142, 1);
+  tft.drawString(shortUrl, 10, 155, 1);
 
-  tft.fillRoundRect(204, 120, 112, 46, 5, 0x18E3);
-  tft.drawRoundRect(204, 120, 112, 46, 5, TFT_MAGENTA);
+  tft.fillRoundRect(204, 136, 112, 41, 5, 0x18E3);
+  tft.drawRoundRect(204, 136, 112, 41, 5, TFT_MAGENTA);
   tft.setTextColor(TFT_MAGENTA, 0x18E3);
-  tft.drawString("/net PASSWORD:", 210, 125, 1);
+  tft.drawString("/net PASSWORD:", 210, 140, 1);
   tft.setTextColor(gShPass[0] ? TFT_GREEN : TFT_ORANGE, 0x18E3);
   String shortPass = gShPass[0] ? String(gShPass) : String("(NOT SET)");
   if (shortPass.length() > 17) shortPass = shortPass.substring(0, 17);
-  tft.drawString(shortPass, 210, 142, 1);
+  tft.drawString(shortPass, 210, 155, 1);
 
-  // Row 4 (y: 172..234): [AIRPORT] (x: 4..104), [WI-FI] (x: 109..210), [TOUCH CAL] (x: 215..316)
-  tft.fillRoundRect(4, 172, 100, 62, 6, 0x18E3);
-  tft.drawRoundRect(4, 172, 100, 62, 6, TFT_YELLOW);
+  // Row 5 (y: 180..236): [AIRPORT] (x: 4..104), [WI-FI] (x: 109..210), [DEV/CALIBRATE] (x: 215..316)
+  tft.fillRoundRect(4, 180, 100, 56, 6, 0x18E3);
+  tft.drawRoundRect(4, 180, 100, 56, 6, TFT_YELLOW);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_YELLOW, 0x18E3);
-  tft.drawString("AIRPORT", 54, 186, 1);
+  tft.drawString("AIRPORT", 54, 192, 1);
   tft.setTextColor(TFT_WHITE, 0x18E3);
-  tft.drawString(gAirportCode, 54, 210, 4);
+  tft.drawString(gAirportCode, 54, 215, 4);
 
-  tft.fillRoundRect(109, 172, 101, 62, 6, 0x18E3);
-  tft.drawRoundRect(109, 172, 101, 62, 6, TFT_GREEN);
+  tft.fillRoundRect(109, 180, 101, 56, 6, 0x18E3);
+  tft.drawRoundRect(109, 180, 101, 56, 6, TFT_GREEN);
   tft.setTextColor(TFT_GREEN, 0x18E3);
-  tft.drawString("WI-FI SETUP", 159, 190, 1);
+  tft.drawString("WI-FI SETUP", 159, 195, 1);
   tft.setTextColor(TFT_WHITE, 0x18E3);
-  tft.drawString((WiFi.status() == WL_CONNECTED) ? "ONLINE" : "CONFIGURE", 159, 212, 2);
+  tft.drawString((WiFi.status() == WL_CONNECTED) ? "ONLINE" : "CONFIGURE", 159, 216, 2);
 
-  // Right column (x: 215..316): [x] DEVELOPER checkbox (y: 172..201, only if unlocked) + [CALIBRATE] (y: 205..234)
+  // Right column (x: 215..316): [x] DEVELOPER checkbox (y: 180..206) + [CALIBRATE] (y: 210..236)
   if (gCanBeDeveloper || isDev) {
     uint16_t spotBg = isDev ? 0x1A26 : 0x18E3;
     uint16_t spotBorder = isDev ? TFT_GREEN : TFT_LIGHTGREY;
-    tft.fillRoundRect(215, 172, 101, 29, 5, spotBg);
-    tft.drawRoundRect(215, 172, 101, 29, 5, spotBorder);
-    // Checkbox square at (221, 179, 14, 14)
-    tft.fillRect(221, 179, 14, 14, isDev ? TFT_DARKGREEN : TFT_BLACK);
-    tft.drawRect(221, 179, 14, 14, TFT_WHITE);
+    tft.fillRoundRect(215, 180, 101, 26, 5, spotBg);
+    tft.drawRoundRect(215, 180, 101, 26, 5, spotBorder);
+    // Checkbox square at (221, 186, 14, 14)
+    tft.fillRect(221, 186, 14, 14, isDev ? TFT_DARKGREEN : TFT_BLACK);
+    tft.drawRect(221, 186, 14, 14, TFT_WHITE);
     if (isDev) {
       // Draw checkmark
-      tft.drawLine(223, 186, 226, 190, TFT_YELLOW);
-      tft.drawLine(226, 190, 232, 181, TFT_YELLOW);
-      tft.drawLine(223, 187, 226, 191, TFT_YELLOW);
-      tft.drawLine(226, 191, 232, 182, TFT_YELLOW);
+      tft.drawLine(223, 193, 226, 197, TFT_YELLOW);
+      tft.drawLine(226, 197, 232, 188, TFT_YELLOW);
+      tft.drawLine(223, 194, 226, 198, TFT_YELLOW);
+      tft.drawLine(226, 198, 232, 189, TFT_YELLOW);
     }
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(isDev ? TFT_YELLOW : TFT_LIGHTGREY, spotBg);
-    tft.drawString("DEVELOPER", 240, 186, 1);
+    tft.drawString("DEVELOPER", 240, 193, 1);
   }
 
-  tft.fillRoundRect(215, 205, 101, 29, 5, 0x18E3);
-  tft.drawRoundRect(215, 205, 101, 29, 5, TFT_ORANGE);
+  tft.fillRoundRect(215, 210, 101, 26, 5, 0x18E3);
+  tft.drawRoundRect(215, 210, 101, 26, 5, TFT_ORANGE);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_ORANGE, 0x18E3);
-  tft.drawString("CALIBRATE", 265, 219, 2);
+  tft.drawString("CALIBRATE", 265, 223, 2);
 }
 
 void runLakatosConfigScreen(bool startInCalibration) {
@@ -1412,33 +1468,39 @@ void runLakatosConfigScreen(bool startInCalibration) {
     uint32_t now = millis();
 
     if (t.touched) {
-      // Allow live dragging on the brightness slider
-      if (t.y >= 28 && t.y <= 66 && t.x >= 54 && t.x <= 236) {
+      // Allow live dragging on the brightness slider (Row 1: y = 26..56, x = 54..236)
+      if (t.y >= 26 && t.y <= 56 && t.x >= 54 && t.x <= 236) {
         gAutoBright = false;
         int pct = ((t.x - 58) * 100) / 174;
         gManualBrightPct = constrain(pct, 5, 100);
         applyBacklightPercent(gManualBrightPct);
         saveConfigToNvs();
         drawConfigScreen();
+      } else if (t.y >= 59 && t.y <= 89 && t.x >= 54 && t.x <= 242) {
+        // Allow live dragging/tapping on the 5-stop Corner Size slider (8, 12, 16, 20, 24)
+        int stopIdx = (t.x - 68 + 20) / 40;
+        stopIdx = constrain(stopIdx, 0, 4);
+        int nextSz = 8 + stopIdx * 4;
+        if (nextSz != gCornerSize) {
+          lakatosSetCornerSize(nextSz);
+          lakatosConsumeConfigRedraw();
+          lakatosDevLogf("Slider: CONFIG -> CORNER SIZE=%d (%d,%d)", gCornerSize, t.x, t.y);
+          drawConfigScreen();
+        }
       } else if (!wasDown && (now - lastRel > 50)) {
         wasDown = true;
-        if (t.y <= 25 && t.x <= 62) {
-          lakatosDevLogf("Button: CONFIG -> HOME (%d,%d)", t.x, t.y);
+        int cs = lakatosGetCornerSize();
+        if (t.x < cs && t.y < cs) {
+          lakatosDevLogf("Button: CONFIG -> EXIT X (%d,%d)", t.x, t.y);
           lakatosSetInConfigScreen(false);
-          return;  // HOME -> Exit Config back to YakFace Home page
-        } else if (t.y <= 25 && t.x >= 220) {
-          int nextSz = gCornerSize + 2;
-          if (nextSz > 24) nextSz = 12;
-          lakatosSetCornerSize(nextSz);
-          lakatosDevLogf("Button: CONFIG -> CORNER SIZE=%d (%d,%d)", gCornerSize, t.x, t.y);
-          drawConfigScreen();
-        } else if (t.y <= 25 && t.x >= 90 && t.x < 220) {
+          return;  // Top-left X -> Exit Config back to YakFace Home page
+        } else if (t.y <= 24 && t.x >= 90 && t.x <= 230) {
           secretTitleTaps++;
           if (secretTitleTaps >= 8 && !gCanBeDeveloper) {
             gCanBeDeveloper = true;
             drawConfigScreen();
           }
-        } else if (t.y >= 28 && t.y <= 66 && t.x >= 238) {
+        } else if (t.y >= 26 && t.y <= 56 && t.x >= 238) {
           gAutoBright = !gAutoBright;
           lakatosDevLogf("Button: CONFIG -> AUTO BRIGHT=%s (%d,%d)", gAutoBright ? "ON" : "OFF", t.x, t.y);
           if (gAutoBright) {
@@ -1448,7 +1510,15 @@ void runLakatosConfigScreen(bool startInCalibration) {
           }
           saveConfigToNvs();
           drawConfigScreen();
-        } else if (t.y >= 70 && t.y <= 116) {
+        } else if (t.y >= 59 && t.y <= 89 && t.x >= 244) {
+          // Tapping the "XX px" badge on the right cycles stops 8 -> 12 -> 16 -> 20 -> 24 -> 8
+          int nextSz = gCornerSize + 4;
+          if (nextSz > 24) nextSz = 8;
+          lakatosSetCornerSize(nextSz);
+          lakatosConsumeConfigRedraw();
+          lakatosDevLogf("Button: CONFIG -> CORNER SIZE=%d (%d,%d)", gCornerSize, t.x, t.y);
+          drawConfigScreen();
+        } else if (t.y >= 92 && t.y <= 133) {
           if (t.x < 160) {
             lakatosDevLogf("Button: CONFIG -> DEVICE NAME (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("DEVICE NAME", gDeviceName, sizeof(gDeviceName), false) == 1) {
@@ -1462,7 +1532,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
             }
             drawConfigScreen();
           }
-        } else if (t.y >= 120 && t.y <= 166) {
+        } else if (t.y >= 136 && t.y <= 177) {
           if (t.x < 200) {
             lakatosDevLogf("Button: CONFIG -> /net URL (%d,%d)", t.x, t.y);
             if (lakatosPromptKeyboard("SUPERHIGHWAY URL", gShUrl, sizeof(gShUrl), false) == 1) {
@@ -1478,7 +1548,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
             }
           }
           drawConfigScreen();
-        } else if (t.y >= 172) {
+        } else if (t.y >= 180) {
           if (t.x <= 106) {
             lakatosDevLogf("Button: CONFIG -> AIRPORT (%d,%d)", t.x, t.y);
             if (runAirportSelectorModal()) {
@@ -1493,7 +1563,7 @@ void runLakatosConfigScreen(bool startInCalibration) {
               return;
             }
             drawConfigScreen();
-          } else if (t.y < 203) {
+          } else if (t.y < 208) {
             if (gCanBeDeveloper || lakatosGetDeveloperMode()) {
               bool nextDev = !lakatosGetDeveloperMode();
               gCanBeDeveloper = true;

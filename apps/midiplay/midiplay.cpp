@@ -1252,12 +1252,9 @@ static void drawTopHeader() {
   const LakatosApi* os = gState.os;
   os->tft_fill_rect(0, 0, 320, 28, 0x10A2);
 
-  // [EXIT] button
-  os->tft_fill_round_rect(2, 2, 46, 24, 4, 0x8000);
-  os->tft_draw_round_rect(2, 2, 46, 24, 4, LAKATOS_WHITE);
-  os->tft_set_text_datum(LAKATOS_MC_DATUM);
-  os->tft_set_text_color(LAKATOS_WHITE, 0x8000);
-  os->tft_draw_string("EXIT", 25, 14, 2);
+  // Standard NW Exit X mark (sized via Lakatos corner size)
+  int cs = lakatos_corner_size(os);
+  lakatos_draw_exit_wedge(os);
 
   // Song title / filename
   os->tft_set_text_datum(LAKATOS_ML_DATUM);
@@ -1266,9 +1263,9 @@ static void drawTopHeader() {
     char tbuf[24];
     strncpy(tbuf, gState.songTitle, 20);
     tbuf[20] = '\0';
-    os->tft_draw_string(tbuf, 52, 14, 2);
+    os->tft_draw_string(tbuf, cs + 6, 14, 2);
   } else {
-    os->tft_draw_string("MIDI SYNTH", 52, 14, 2);
+    os->tft_draw_string("MIDI SYNTH", cs + 6, 14, 2);
   }
 
   // [FILES] / [SYNTH] view toggle button
@@ -1647,7 +1644,7 @@ extern "C" void app_main(const LakatosApi* os) {
 
         // 1. Top Header Bar (y < 28)
         if (ty < 28) {
-          if (tx <= 50) {
+          if (lakatos_is_exit_wedge(os, tx, ty)) {
             freeCurrentMidiResources();
             os->audio_stop();
             os->set_rgb_led(false, false, false, 0);
