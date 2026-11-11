@@ -80,11 +80,17 @@ func Assemble(source string) ([]byte, error) {
 
 // AssembleLapp translates LCode assembly (.lasm) and wraps it in a 128-byte .lapp container.
 func AssembleLapp(source string, title string) ([]byte, error) {
+	return AssembleLappWithReq(source, title, 0)
+}
+
+// AssembleLappWithReq translates LCode assembly (.lasm) and wraps it in a 128-byte .lapp container
+// with the specified required kernel version_sec.
+func AssembleLappWithReq(source string, title string, reqKernelSec int64) ([]byte, error) {
 	lcod, err := Assemble(source)
 	if err != nil {
 		return nil, err
 	}
-	return WrapLapp(lcod, title), nil
+	return WrapLappWithReq(lcod, title, reqKernelSec), nil
 }
 
 func (a *Assembler) Assemble(source string) ([]byte, error) {

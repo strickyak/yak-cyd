@@ -1280,5 +1280,61 @@ func TestGalleryConfigPersistence(t *testing.T) {
 	}
 }
 
+func TestAppHeaderRequiredKernelVersion(t *testing.T) {
+	src := `package main
+func main() {
+	os_exit(42)
+}
+`
+	// 1. Default REQ = 0
+	lapp0, _, err := CompileToLapp("test-app", src)
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v", err)
+	}
+	if got := LappReqKernelSec(lapp0); got != 0 {
+		t.Fatalf("expected req=0, got %d", got)
+	}
+
+	// 2. Explicit REQ = 1234567890
+	const reqVer int64 = 1234567890
+	lappReq, _, err := CompileToLappWithReq("test-app", reqVer, src)
+	if err != nil {
+		t.Fatalf("CompileToLappWithReq: %v", err)
+	}
+	if got := LappReqKernelSec(lappReq); got != reqVer {
+		t.Fatalf("expected req=%d, got %d", reqVer, got)
+	}
+
+	// 3. Running with older kernel fails with NEEDS_KERNEL
+	vmOld, err := NewVM(lappReq)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vmOld.KernelVersionSec = reqVer - 1
+	if _, err := vmOld.Run(); err == nil || !strings.Contains(err.Error(), "NEEDS_KERNEL:1234567890") {
+		t.Fatalf("expected NEEDS_KERNEL:1234567890 error, got %v", err)
+	}
+
+	// 4. Running with equal or newer kernel succeeds
+	vmNew, err := NewVM(lappReq)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vmNew.KernelVersionSec = reqVer
+	code, err := vmNew.Run()
+	if err != nil || code != 42 {
+		t.Fatalf("expected exit 42 with nil err, got code=%d err=%v", code, err)
+	}
+
+	metaTxt, err := FormatMeta("test-app.lapp", lappReq)
+	if err != nil {
+		t.Fatalf("FormatMeta: %v", err)
+	}
+	if !strings.Contains(metaTxt, `"test-app"`) || !strings.Contains(metaTxt, "1234567890") || !strings.Contains(metaTxt, "[OK]") {
+		t.Fatalf("unexpected FormatMeta output:\n%s", metaTxt)
+	}
+}
+
+
 
 

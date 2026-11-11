@@ -22,6 +22,7 @@ Commands:
   compile   Compile LGolf (.lgolf) source files into an LCode .lapp binary (or .lasm with -S)
   asm       Assemble an LCode (.lasm) assembly file into an LCode .lapp binary
   dis       Disassemble an LCode .lapp or LCOD binary into .lasm assembly
+  meta      Print Lakatos header metadata for one or more .lapp, .bin, or .krn files
   run       Run an LCode .lapp binary in the headless 320x240 RGB565 emulator
   upload    Upload a .lapp binary to the Lakatos Superhighway HTTP server
   push      Upload a file from the Linux PC to a destination in the Lakatos VFS (/flash, /sd, /net)
@@ -86,6 +87,7 @@ func cmdCompile(args []string) {
 	fs := flag.NewFlagSet("compile", flag.ExitOnError)
 	outPath := fs.String("o", "", "Output .lapp (or .lasm with -S) file path")
 	title := fs.String("title", "", "Application title embedded in Lakatos .lapp header")
+	reqVer := fs.Int64("req", 0, "Required minimum Lakatos kernel version timestamp (0 = any)")
 	emitAsm := fs.Bool("S", false, "Emit LCode assembly (.lasm) instead of binary .lapp")
 	seedHeader := fs.String("seed-header", "", "Optional C header output path for embedding in firmware")
 	seedVar := fs.String("seed-var", "kSeedLifeLapp", "C array identifier for -seed-header")
@@ -134,7 +136,7 @@ func cmdCompile(args []string) {
 		return
 	}
 
-	lappBytes, _, err := lakat.CompileToLapp(appTitle, sources...)
+	lappBytes, _, err := lakat.CompileToLappWithReq(appTitle, *reqVer, sources...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat compile error: %v\n", err)
 		os.Exit(1)
@@ -161,14 +163,15 @@ func cmdCompile(args []string) {
 		}
 	}
 
-	fmt.Printf("Compiled %s -> %s (%d bytes total, title=%q)\n",
-		strings.Join(files, " "), *outPath, len(lappBytes), appTitle)
+	fmt.Printf("Compiled %s -> %s (%d bytes total, title=%q, req=%d)\n",
+		strings.Join(files, " "), *outPath, len(lappBytes), appTitle, *reqVer)
 }
 
 func cmdAsm(args []string) {
 	fs := flag.NewFlagSet("asm", flag.ExitOnError)
 	outPath := fs.String("o", "", "Output .lapp file path")
 	title := fs.String("title", "", "Application title embedded in Lakatos .lapp header")
+	reqVer := fs.Int64("req", 0, "Required minimum Lakatos kernel version timestamp (0 = any)")
 	fs.Parse(args)
 
 	if fs.NArg() != 1 {
@@ -186,7 +189,7 @@ func cmdAsm(args []string) {
 		base := filepath.Base(inFile)
 		appTitle = strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	lappBytes, err := lakat.AssembleLapp(string(b), appTitle)
+	lappBytes, err := lakat.AssembleLappWithReq(string(b), appTitle, *reqVer)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lakat asm error: %v\n", err)
 		os.Exit(1)
@@ -203,7 +206,7 @@ func cmdAsm(args []string) {
 		fmt.Fprintf(os.Stderr, "lakat asm: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Assembled %s -> %s (%d bytes)\n", inFile, *outPath, len(lappBytes))
+	fmt.Printf("Assembled %s -> %s (%d bytes, req=%d)\n", inFile, *outPath, len(lappBytes), *reqVer)
 }
 
 func cmdDis(args []string) {
@@ -224,6 +227,37 @@ func cmdDis(args []string) {
 		os.Exit(1)
 	}
 	fmt.Print(txt)
+}
+
+func cmdMeta(args []string) {
+	fs := flag.NewFlagSet("meta", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "lakat meta: expected at least one .lapp, .bin, or .krn file")
+		os.Exit(1)
+	}
+	exitCode := 0
+	for i, p := range fs.Args() {
+		if i > 0 {
+			fmt.Println()
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lakat meta: %v\n", err)
+			exitCode = 1
+			continue
+		}
+		txt, err := lakat.FormatMeta(p, b)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lakat meta: %v\n", err)
+			exitCode = 1
+			continue
+		}
+		fmt.Print(txt)
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func cmdRun(args []string) {
@@ -369,6 +403,8 @@ func main() {
 		cmdAsm(os.Args[2:])
 	case "dis":
 		cmdDis(os.Args[2:])
+	case "meta":
+		cmdMeta(os.Args[2:])
 	case "run":
 		cmdRun(os.Args[2:])
 	case "upload":

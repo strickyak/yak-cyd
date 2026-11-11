@@ -121,9 +121,10 @@ typedef struct LakatosAppHeader {
   uint32_t bss_size;         // Size of .bss in bytes (zeroed before entry)
   uint32_t total_file_size;  // Total size of the .lapp file in bytes
   uint8_t  sha256[32];       // SHA-256 of bytes [128 .. total_file_size)
-  char     name[32];         // Null-terminated application title
-  uint32_t flags;            // Reserved flags (0)
-  uint32_t reserved;         // Reserved padding to 128 bytes (0)
+  char     name[24];         // Null-terminated application title (bytes 88..111)
+  int64_t  req_kernel_sec;   // Minimum required kernel version_sec (0 = any kernel; bytes 112..119)
+  uint32_t flags;            // LAKATOS_APP_FLAG_* (bytes 120..123)
+  uint32_t reserved;         // Reserved padding to 128 bytes (0; bytes 124..127)
 } LakatosAppHeader;
 
 #ifdef __cplusplus

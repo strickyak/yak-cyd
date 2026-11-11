@@ -24,8 +24,9 @@ func Disassemble(data []byte) (string, error) {
 	codeSize := int(binary.LittleEndian.Uint32(payload[20:24]))
 
 	var out strings.Builder
-	fmt.Fprintf(&out, "; LCode Disassembly (Title: %q, Payload: %d bytes, Code: %d bytes)\n\n",
-		title, len(payload), codeSize)
+	reqVer := LappReqKernelSec(data)
+	fmt.Fprintf(&out, "; LCode Disassembly (Title: %q, ReqKernel: %d, Payload: %d bytes, Code: %d bytes)\n\n",
+		title, reqVer, len(payload), codeSize)
 
 	offset := LCodeHeaderSz
 	for i := 0; i < globalsCount; i++ {

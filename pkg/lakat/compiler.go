@@ -473,11 +473,17 @@ func CompileToAsm(sources ...string) (string, error) {
 
 // CompileToLapp compiles LGolf source code directly into a signed 128-byte .lapp binary.
 func CompileToLapp(title string, sources ...string) ([]byte, string, error) {
+	return CompileToLappWithReq(title, 0, sources...)
+}
+
+// CompileToLappWithReq compiles LGolf source code directly into a signed 128-byte .lapp binary
+// with the specified required kernel version_sec.
+func CompileToLappWithReq(title string, reqKernelSec int64, sources ...string) ([]byte, string, error) {
 	asm, err := CompileToAsm(sources...)
 	if err != nil {
 		return nil, "", err
 	}
-	lapp, err := AssembleLapp(asm, title)
+	lapp, err := AssembleLappWithReq(asm, title, reqKernelSec)
 	if err != nil {
 		return nil, asm, err
 	}

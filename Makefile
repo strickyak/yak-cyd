@@ -1,6 +1,7 @@
 PIO ?= .venv/bin/python -m platformio
 PYTHON ?= python3
 LAKAT ?= ./build/lakat
+REQ ?= $(shell date +%s)
 
 MKLITTLEFS ?= $(HOME)/.platformio/packages/tool-mklittlefs/mklittlefs
 BOOT_APP0 ?= $(HOME)/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin
@@ -35,34 +36,34 @@ lakat:
 
 apps: lakat
 	mkdir -p build/apps
-	$(LAKAT) compile -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
-	$(LAKAT) compile -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
-	$(LAKAT) compile -title "Breakout" -o build/apps/breakout.lapp apps/breakout/breakout.lgolf
-	$(LAKAT) compile -title "Space Invaders" -o build/apps/invaders.lapp apps/invaders/invaders.lgolf
-	$(LAKAT) compile -title "Mandelbrot" -o build/apps/mandelbrot.lapp apps/mandelbrot/mandelbrot.lgolf
-	$(LAKAT) compile -title "NOAA Weather" -o build/apps/weather.lapp apps/weather/weather.lgolf
-	$(LAKAT) compile -title "Tetris" -o build/apps/tetris.lapp apps/tetris/tetris.lgolf
-	$(LAKAT) compile -title "Galaga" -o build/apps/galaga.lapp apps/galaga/galaga.lgolf
-	$(LAKAT) compile -title "Defender" -o build/apps/defender.lapp apps/defender/defender.lgolf
-	$(LAKAT) compile -title "Bouncing Ball" -o build/apps/bounce.lapp apps/bounce/bounce.lgolf
-	$(LAKAT) compile -title "Rubik's Cube" -o build/apps/rubik.lapp apps/rubik/rubik.lgolf
-	$(LAKAT) compile -title "Ising Spin" -o build/apps/ising.lapp apps/ising/ising.lgolf
-	$(LAKAT) compile -title "15-Puzzle" -o build/apps/puzzle15.lapp apps/puzzle15/puzzle15.lgolf
-	$(LAKAT) compile -title "Dendrite DLA" -o build/apps/dendrite.lapp apps/dendrite/dendrite.lgolf
-	$(LAKAT) compile -title "Paint" -o build/apps/paint.lapp apps/paint/paint.lgolf
-	$(LAKAT) compile -title "Piano" -o build/apps/piano.lapp apps/piano/piano.lgolf
-	$(LAKAT) compile -title "MOD Tracker" -o build/apps/modtrack.lapp apps/modtrack/modtrack.lgolf
-	$(LAKAT) compile -title "MIDI Player" -o build/apps/midiplay.lapp apps/midiplay/midiplay.lgolf
-	$(LAKAT) compile -title "Radio" -o build/apps/radio.lapp apps/radio/radio.lgolf
-	$(LAKAT) compile -title "Ham SDR" -o build/apps/ham.lapp apps/ham/ham.lgolf
-	$(LAKAT) compile -title "SmallerTalk-80" -o build/apps/smallertalk.lapp apps/smallertalk/smallertalk.lgolf
-	$(LAKAT) compile -title "Wind Chimes" -o build/apps/wind.lapp apps/wind/wind.lgolf
-	$(LAKAT) compile -title "3D Dice Roller" -o build/apps/dice-3d.lapp apps/dice-3d/dice-3d.lgolf
-	$(LAKAT) compile -title "Croquet 3D World" -o build/apps/croquet.lapp apps/croquet/croquet.lgolf
-	$(LAKAT) compile -title "basic" -o build/apps/basic.lapp apps/basic/basic.lgolf
-	$(LAKAT) compile -title "logo" -o build/apps/logo.lapp apps/logo/logo.lgolf
-	$(LAKAT) compile -title "chat" -o build/apps/chat.lapp apps/chat/chat.lgolf
-	$(PYTHON) tools/build_lapp.py
+	$(LAKAT) compile -req $(REQ) -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Breakout" -o build/apps/breakout.lapp apps/breakout/breakout.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Space Invaders" -o build/apps/invaders.lapp apps/invaders/invaders.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Mandelbrot" -o build/apps/mandelbrot.lapp apps/mandelbrot/mandelbrot.lgolf
+	$(LAKAT) compile -req $(REQ) -title "NOAA Weather" -o build/apps/weather.lapp apps/weather/weather.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Tetris" -o build/apps/tetris.lapp apps/tetris/tetris.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Galaga" -o build/apps/galaga.lapp apps/galaga/galaga.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Defender" -o build/apps/defender.lapp apps/defender/defender.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Bouncing Ball" -o build/apps/bounce.lapp apps/bounce/bounce.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Rubik's Cube" -o build/apps/rubik.lapp apps/rubik/rubik.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Ising Spin" -o build/apps/ising.lapp apps/ising/ising.lgolf
+	$(LAKAT) compile -req $(REQ) -title "15-Puzzle" -o build/apps/puzzle15.lapp apps/puzzle15/puzzle15.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Dendrite DLA" -o build/apps/dendrite.lapp apps/dendrite/dendrite.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Paint" -o build/apps/paint.lapp apps/paint/paint.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Piano" -o build/apps/piano.lapp apps/piano/piano.lgolf
+	$(LAKAT) compile -req $(REQ) -title "MOD Tracker" -o build/apps/modtrack.lapp apps/modtrack/modtrack.lgolf
+	$(LAKAT) compile -req $(REQ) -title "MIDI Player" -o build/apps/midiplay.lapp apps/midiplay/midiplay.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Radio" -o build/apps/radio.lapp apps/radio/radio.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Ham SDR" -o build/apps/ham.lapp apps/ham/ham.lgolf
+	$(LAKAT) compile -req $(REQ) -title "SmallerTalk-80" -o build/apps/smallertalk.lapp apps/smallertalk/smallertalk.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Wind Chimes" -o build/apps/wind.lapp apps/wind/wind.lgolf
+	$(LAKAT) compile -req $(REQ) -title "3D Dice Roller" -o build/apps/dice-3d.lapp apps/dice-3d/dice-3d.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Croquet 3D World" -o build/apps/croquet.lapp apps/croquet/croquet.lgolf
+	$(LAKAT) compile -req $(REQ) -title "basic" -o build/apps/basic.lapp apps/basic/basic.lgolf
+	$(LAKAT) compile -req $(REQ) -title "logo" -o build/apps/logo.lapp apps/logo/logo.lgolf
+	$(LAKAT) compile -req $(REQ) -title "chat" -o build/apps/chat.lapp apps/chat/chat.lgolf
+	$(PYTHON) tools/build_lapp.py --req $(REQ)
 
 lakatos: apps
 	$(PYTHON) tools/gen_version.py

@@ -538,31 +538,50 @@ func init() {
 // WrapLapp packages a raw LCOD bytecode module into a 128-byte Lakatos .lapp container
 // with SHA-256 integrity hash and LAKATOS_APP_FLAG_LCODE set.
 func WrapLapp(lcodPayload []byte, appTitle string) []byte {
+	return WrapLappWithReq(lcodPayload, appTitle, 0)
+}
+
+// WrapLappWithReq packages a raw LCOD bytecode module into a 128-byte Lakatos .lapp container
+// with SHA-256 integrity hash, required kernel version_sec (reqKernelSec), and LAKATOS_APP_FLAG_LCODE set.
+func WrapLappWithReq(lcodPayload []byte, appTitle string, reqKernelSec int64) []byte {
 	totalSize := uint32(LakatosAppHeaderSize + len(lcodPayload))
 	sum := sha256.Sum256(lcodPayload)
 
 	hdr := make([]byte, LakatosAppHeaderSize)
-	binary.LittleEndian.PutUint32(hdr[0:4], LakatosAppMagic)       // magic "LAKA"
-	binary.LittleEndian.PutUint32(hdr[4:8], LakatosHeaderVersion)  // header_version = 1
-	binary.LittleEndian.PutUint32(hdr[8:12], LakatosAbiVersion)    // abi_version = 1
-	binary.LittleEndian.PutUint32(hdr[12:16], 0)                   // entry_addr (0 for LCode VM)
-	binary.LittleEndian.PutUint32(hdr[16:20], LakatosAppHeaderSize) // text_offset = 128
+	binary.LittleEndian.PutUint32(hdr[0:4], LakatosAppMagic)            // magic "LAKA"
+	binary.LittleEndian.PutUint32(hdr[4:8], LakatosHeaderVersion)       // header_version = 1
+	binary.LittleEndian.PutUint32(hdr[8:12], LakatosAbiVersion)         // abi_version = 1
+	binary.LittleEndian.PutUint32(hdr[12:16], 0)                        // entry_addr (0 for LCode VM)
+	binary.LittleEndian.PutUint32(hdr[16:20], LakatosAppHeaderSize)     // text_offset = 128
 	binary.LittleEndian.PutUint32(hdr[20:24], uint32(len(lcodPayload))) // text_size = payload len
-	binary.LittleEndian.PutUint32(hdr[52:56], totalSize)           // total_file_size
-	copy(hdr[56:88], sum[:])                                       // sha256[32]
+	binary.LittleEndian.PutUint32(hdr[52:56], totalSize)                // total_file_size
+	copy(hdr[56:88], sum[:])                                            // sha256[32]
 
 	titleBytes := []byte(appTitle)
-	if len(titleBytes) > 31 {
-		titleBytes = titleBytes[:31]
+	if len(titleBytes) > 23 {
+		titleBytes = titleBytes[:23]
 	}
-	copy(hdr[88:120], titleBytes)
-	binary.LittleEndian.PutUint32(hdr[120:124], LakatosAppFlagLCode) // flags = LAKATOS_APP_FLAG_LCODE (1)
-	binary.LittleEndian.PutUint32(hdr[124:128], 0)                   // reserved
+	copy(hdr[88:112], titleBytes)                                          // name[24]
+	binary.LittleEndian.PutUint64(hdr[112:120], uint64(reqKernelSec))      // req_kernel_sec (int64)
+	binary.LittleEndian.PutUint32(hdr[120:124], LakatosAppFlagLCode)       // flags = LAKATOS_APP_FLAG_LCODE (1)
+	binary.LittleEndian.PutUint32(hdr[124:128], 0)                         // reserved
 
 	out := make([]byte, 0, int(totalSize))
 	out = append(out, hdr...)
 	out = append(out, lcodPayload...)
 	return out
+}
+
+// LappReqKernelSec extracts the 8-byte required kernel version_sec from a 128-byte .lapp header.
+// Returns 0 if data is a raw LCOD payload or has no minimum kernel version requirement.
+func LappReqKernelSec(data []byte) int64 {
+	if len(data) < LakatosAppHeaderSize {
+		return 0
+	}
+	if binary.LittleEndian.Uint32(data[0:4]) != LakatosAppMagic {
+		return 0
+	}
+	return int64(binary.LittleEndian.Uint64(data[112:120]))
 }
 
 // UnwrapLapp accepts either a .lapp container (starting with "LAKA") or a raw "LCOD" payload,
@@ -591,7 +610,7 @@ func UnwrapLapp(data []byte) (payload []byte, title string, err error) {
 	if !bytes.Equal(sum[:], data[56:88]) {
 		return nil, "", fmt.Errorf(".lapp SHA-256 verification failed")
 	}
-	rawTitle := data[88:120]
+	rawTitle := data[88:112]
 	if idx := bytes.IndexByte(rawTitle, 0); idx >= 0 {
 		rawTitle = rawTitle[:idx]
 	}

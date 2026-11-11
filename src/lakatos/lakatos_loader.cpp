@@ -1109,6 +1109,12 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
     if (outErrMsg) *outErrMsg = "Invalid .lapp size";
     return false;
   }
+  if (hdr.req_kernel_sec > 0 && lakatosGetKernelVersionSec() < hdr.req_kernel_sec) {
+    char reqBuf[48];
+    snprintf(reqBuf, sizeof(reqBuf), "NEEDS_KERNEL:%lld", (long long)hdr.req_kernel_sec);
+    if (outErrMsg) *outErrMsg = reqBuf;
+    return false;
+  }
 
   // -------------------------------------------------------------------------
   // Fast RAM-Only Path for LCode Bytecode Apps (Zero Flash Wear!)
@@ -1193,6 +1199,13 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
     }
   }
 
+  if (hdr.req_kernel_sec > 0 && lakatosGetKernelVersionSec() < hdr.req_kernel_sec) {
+    lakatosEndAppSession();
+    char reqBuf[48];
+    snprintf(reqBuf, sizeof(reqBuf), "NEEDS_KERNEL:%lld", (long long)hdr.req_kernel_sec);
+    if (outErrMsg) *outErrMsg = reqBuf;
+    return false;
+  }
   if (hdr.total_file_size > gAppSlotPart->size) {
     if (outErrMsg) *outErrMsg = "Invalid .lapp size";
     return false;

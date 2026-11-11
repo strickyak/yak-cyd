@@ -6,6 +6,7 @@ using xtensa-esp32-elf-g++ and ld/lakatos_app.ld, producing:
   - build/apps/native.elf
   - build/apps/native.bin (128-byte LakatosAppHeader + .text + .rodata + .data)
 """
+import argparse
 import hashlib
 import os
 import struct
@@ -264,7 +265,7 @@ def dump_section(elf_path, sec_name):
             os.remove(tmp_path)
 
 
-def build_native_bin(heads, extra_libs=None):
+def build_native_bin(heads, extra_libs=None, req_kernel_sec=0):
     os.makedirs(BUILD_DIR, exist_ok=True)
     elf_path = os.path.join(BUILD_DIR, "native.elf")
     bin_path = os.path.join(BUILD_DIR, "native.bin")
@@ -370,10 +371,10 @@ def build_native_bin(heads, extra_libs=None):
     sha256_digest = hashlib.sha256(payload).digest()
 
     title = "native.bin"
-    name_bytes = title.encode("utf-8")[:31].ljust(32, b"\x00")
+    name_bytes = title.encode("utf-8")[:23].ljust(24, b"\x00")
 
     header = struct.pack(
-        "<14I32s32s2I",
+        "<14I32s24sq2I",
         LAKATOS_APP_MAGIC,
         LAKATOS_HEADER_VERSION,
         LAKATOS_ABI_VERSION,
@@ -390,6 +391,7 @@ def build_native_bin(heads, extra_libs=None):
         total_file_size,
         sha256_digest,
         name_bytes,
+        int(req_kernel_sec),
         0,
         0,
     )
@@ -401,7 +403,7 @@ def build_native_bin(heads, extra_libs=None):
 
     head_list = ", ".join(h[0] for h in heads)
     print(
-        f"[Lakatos Native Pack] Built {bin_path} ({total_file_size} bytes) [{head_list}]\n"
+        f"[Lakatos Native Pack] Built {bin_path} ({total_file_size} bytes, req={req_kernel_sec}) [{head_list}]\n"
         f"  entry  = 0x{entry_addr:08X}\n"
         f"  .text  = 0x{text_start:08X} ({text_size} B, file+0x{text_offset:X})\n"
         f"  .rodata= 0x{rodata_start:08X} ({rodata_size} B, file+0x{rodata_offset:X})\n"
@@ -412,6 +414,15 @@ def build_native_bin(heads, extra_libs=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Build native.bin multi-headed Lakatos binary")
+    parser.add_argument(
+        "--req",
+        type=int,
+        default=int(os.environ.get("REQ", "0") or 0),
+        help="Required minimum Lakatos kernel version timestamp (0 = any)",
+    )
+    args = parser.parse_args()
+
     esp32_libs_dir = os.path.expanduser(
         "~/.platformio/packages/framework-arduinoespressif32-esp32-libs"
     )
@@ -442,7 +453,7 @@ def main():
         ("ham", os.path.join(REPO_DIR, "apps", "ham", "ham.cpp"), []),
         ("smallertalk", st_srcs, [f"-I{st_dir}"]),
     ]
-    build_native_bin(heads, [helix_lib])
+    build_native_bin(heads, [helix_lib], req_kernel_sec=args.req)
 
 
 if __name__ == "__main__":

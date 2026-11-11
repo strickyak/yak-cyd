@@ -101,6 +101,8 @@ type VM struct {
 	PrefetchBuf        []byte
 	CornerExitDisabled bool
 	CornerSize         int
+	ReqKernelSec       int64
+	KernelVersionSec   int64
 	AppArg             string
 	JoinNativeBin      string
 	WsConn             net.Conn
@@ -117,6 +119,7 @@ func NewVM(lappOrLcod []byte) (*VM, error) {
 	}
 	vm := &VM{
 		AppTitle:     title,
+		ReqKernelSec: LappReqKernelSec(lappOrLcod),
 		Memory:       make([]byte, LakatosDefaultArenaLen),
 		Stack:        make([]uint32, 0, 1024),
 		CallStack:    make([]CallFrame, 0, 128),
@@ -440,6 +443,9 @@ func (vm *VM) readCStr(addr uint32) (string, error) {
 // Main Execution Loop
 // ---------------------------------------------------------------------------
 func (vm *VM) Run() (int, error) {
+	if vm.KernelVersionSec > 0 && vm.ReqKernelSec > vm.KernelVersionSec {
+		return 1, fmt.Errorf("NEEDS_KERNEL:%d (running %d)", vm.ReqKernelSec, vm.KernelVersionSec)
+	}
 	if vm.EntryFuncIndex < 0 || vm.EntryFuncIndex >= len(vm.Functions) {
 		return -1, fmt.Errorf("invalid entry function index %d", vm.EntryFuncIndex)
 	}
