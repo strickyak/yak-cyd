@@ -29,6 +29,7 @@ var (
 
 	pathBuf     [32]byte // "/net/pix/" (9) + basename (<=8) + ".jpg" (4) + NUL
 	cfgBuf      [16]byte // "/flash/etc/gallery.cfg" ASCII seconds buffer
+	retryMsgBuf [36]byte // "Retrying in X seconds..." countdown buffer
 	prefetchIdx int
 
 	slideStopIdx int = 1  // Default stop index 1 -> 12 seconds per photo
@@ -519,7 +520,58 @@ func buildNetJpgPath(idx int) string {
 	return make_slice(&pathBuf[0], 32, pos)
 }
 
-func showStatusMessage(line1 string, line2 string) {
+func formatRetryLine(sec int) string {
+	retryMsgBuf[0] = 'R'
+	retryMsgBuf[1] = 'e'
+	retryMsgBuf[2] = 't'
+	retryMsgBuf[3] = 'r'
+	retryMsgBuf[4] = 'y'
+	retryMsgBuf[5] = 'i'
+	retryMsgBuf[6] = 'n'
+	retryMsgBuf[7] = 'g'
+	retryMsgBuf[8] = ' '
+	retryMsgBuf[9] = 'i'
+	retryMsgBuf[10] = 'n'
+	retryMsgBuf[11] = ' '
+	pos := 12
+
+	v := sec
+	if v < 1 {
+		v = 1
+	}
+	var rev [12]byte
+	rLen := 0
+	for v > 0 && rLen < 10 {
+		rev[rLen] = byte('0' + (v % 10))
+		v = v / 10
+		rLen++
+	}
+	for i := rLen - 1; i >= 0; i-- {
+		retryMsgBuf[pos] = rev[i]
+		pos++
+	}
+
+	retryMsgBuf[pos] = ' '
+	retryMsgBuf[pos+1] = 's'
+	retryMsgBuf[pos+2] = 'e'
+	retryMsgBuf[pos+3] = 'c'
+	retryMsgBuf[pos+4] = 'o'
+	retryMsgBuf[pos+5] = 'n'
+	retryMsgBuf[pos+6] = 'd'
+	pos += 7
+	if sec != 1 {
+		retryMsgBuf[pos] = 's'
+		pos++
+	}
+	retryMsgBuf[pos] = '.'
+	retryMsgBuf[pos+1] = '.'
+	retryMsgBuf[pos+2] = '.'
+	pos += 3
+	retryMsgBuf[pos] = 0
+	return make_slice(&retryMsgBuf[0], 36, pos)
+}
+
+func waitRetryCountdown(totalSec int) bool {
 	tft_fill_screen(BLACK)
 	if !isAmbientQuiet(os_millis()) {
 		drawGalleryWedges()
@@ -527,9 +579,30 @@ func showStatusMessage(line1 string, line2 string) {
 		wedgesVisible = 0
 	}
 	tft_set_text_color(CYAN, BLACK)
-	tft_draw_string(line1, 40, 100, 2)
-	tft_set_text_color(LIGHTGREY, BLACK)
-	tft_draw_string(line2, 40, 124, 2)
+	tft_draw_string("No images in /net/pix/", 40, 100, 2)
+
+	rem := totalSec
+	for rem > 0 {
+		tft_fill_rect(40, 122, 260, 20, BLACK)
+		tft_set_text_color(LIGHTGREY, BLACK)
+		tft_draw_string(formatRetryLine(rem), 40, 124, 2)
+		act := waitSlideAction(1000)
+		if act == 99 {
+			return true
+		}
+		if act == 2 {
+			tft_fill_screen(BLACK)
+			if !isAmbientQuiet(os_millis()) {
+				drawGalleryWedges()
+			} else {
+				wedgesVisible = 0
+			}
+			tft_set_text_color(CYAN, BLACK)
+			tft_draw_string("No images in /net/pix/", 40, 100, 2)
+		}
+		rem = rem - 1
+	}
+	return false
 }
 
 func startPrefetch(idx int) {
@@ -660,6 +733,7 @@ func main() {
 	tft_set_text_color(CYAN, BLACK)
 	tft_draw_string("Loading /net/pix/ ...", 64, 110, 2)
 
+	retrySec := 3
 	for {
 		count := scanCatalog()
 
@@ -669,6 +743,7 @@ func main() {
 			for failures < count {
 				if displaySlide(idx) {
 					failures = 0
+					retrySec = 3
 					act := waitSlideAction(slideSec * 1000)
 					if act == 99 {
 						return
@@ -701,9 +776,18 @@ func main() {
 			}
 		}
 
-		showStatusMessage("No images in /net/pix/", "Retrying in 3 seconds...")
-		if waitWithHomePoll(3000) {
+		if waitRetryCountdown(retrySec) {
 			return
 		}
+		retrySec = retrySec + 1
+
+		tft_fill_screen(BLACK)
+		if !isAmbientQuiet(os_millis()) {
+			drawGalleryWedges()
+		} else {
+			wedgesVisible = 0
+		}
+		tft_set_text_color(CYAN, BLACK)
+		tft_draw_string("Loading /net/pix/ ...", 64, 110, 2)
 	}
 }
