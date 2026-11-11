@@ -133,133 +133,23 @@ static void drawTruncatedText(const LakatosApi* os, const char* str, int x, int 
 }
 
 // ---------------------------------------------------------------------------
-// Quick-Token + Stylus Keyboard Line Editor Modal
+// Direct Stylus Keyboard Line Editor
 // ---------------------------------------------------------------------------
-static const char* const kQuickTokens[16] = {
-  ":= ", "^ ", "[:x | ", "] ",
-  "self ", "super ", "true", "false",
-  "ifTrue: [", "whileTrue: [", "to: 10 do: [", "; ",
-  "Transcript show: ", "'hello'", "#sym", "."
-};
-
-static void drawLineEditorModal(const LakatosApi* os, const char* title, const char* lineBuf) {
-  os->tft_fill_screen(0x0841);
-  // Top bar
-  os->tft_fill_rect(0, 0, 320, 24, LAKATOS_NAVY);
-  drawButton(os, 2, 2, 56, 20, 0x4800, LAKATOS_RED, LAKATOS_WHITE, "CANCEL", 1);
-  os->tft_set_text_datum(LAKATOS_MC_DATUM);
-  os->tft_set_text_color(LAKATOS_YELLOW, LAKATOS_NAVY);
-  os->tft_draw_string(title ? title : "EDIT SMALLTALK LINE", 150, 12, 2);
-  os->tft_set_text_datum(LAKATOS_TL_DATUM);
-  drawButton(os, 250, 2, 68, 20, LAKATOS_DARKGREEN, LAKATOS_GREEN, LAKATOS_WHITE, "SAVE/OK", 1);
-
-  // Current line box (y = 27..59)
-  os->tft_fill_round_rect(4, 27, 232, 32, 4, LAKATOS_BLACK);
-  os->tft_draw_round_rect(4, 27, 232, 32, 4, LAKATOS_CYAN);
-  size_t len = strlen(lineBuf);
-  const char* disp = (len > 36) ? (lineBuf + len - 36) : lineBuf;
-  char shown[48];
-  snprintf(shown, sizeof(shown), "%s_", disp);
-  drawTruncatedText(os, shown, 10, 39, 38, LAKATOS_WHITE, LAKATOS_BLACK, 1);
-
-  drawButton(os, 240, 27, 38, 32, 0x4800, LAKATOS_RED, LAKATOS_WHITE, "DEL", 1);
-  drawButton(os, 280, 27, 36, 32, 0x3186, LAKATOS_LIGHTGREY, LAKATOS_YELLOW, "CLR", 1);
-
-  // Quick Smalltalk Token Grid (4 rows x 4 cols, y = 64..192)
-  for (int r = 0; r < 4; r++) {
-    int by = 64 + r * 32;
-    for (int c = 0; c < 4; c++) {
-      int bx = 4 + c * 78;
-      drawButton(os, bx, by, 75, 29, 0x18E3, LAKATOS_CYAN, LAKATOS_WHITE,
-                 kQuickTokens[r * 4 + c], 1);
-    }
-  }
-
-  // Bottom bar (y = 198..236)
-  drawButton(os, 4, 198, 210, 36, 0x2945, LAKATOS_YELLOW, LAKATOS_YELLOW,
-             "OPEN FULL KEYBOARD (ABC/123)", 1);
-  drawButton(os, 218, 198, 98, 36, LAKATOS_DARKGREEN, LAKATOS_GREEN, LAKATOS_WHITE,
-             "SAVE LINE", 2);
-}
-
 static bool runLineEditorModal(StUiManager* ui, const char* title, char* ioLine, size_t maxLen) {
   const LakatosApi* os = ui->os;
-  if (!os) return false;
+  if (!os || !os->prompt_keyboard) return false;
   char work[kMaxLineChars];
   strncpy(work, ioLine, sizeof(work) - 1);
   work[sizeof(work) - 1] = '\0';
 
-  drawLineEditorModal(os, title, work);
+  int kr = os->prompt_keyboard(title ? title : "EDIT SMALLTALK LINE", work, sizeof(work), false);
   touchFilterResetAfterModal(&ui->touch, os);
-
-  for (;;) {
-    FilteredTouchEvent ev = touchFilterPoll(&ui->touch, os);
-    if (ev.justClicked) {
-      int tx = ev.x;
-      int ty = ev.y;
-      if (ty < 25) {
-        if (tx <= 60) {
-          touchFilterResetAfterModal(&ui->touch, os);
-          return false;  // Cancelled
-        }
-        if (tx >= 248) {
-          strncpy(ioLine, work, maxLen - 1);
-          ioLine[maxLen - 1] = '\0';
-          touchFilterResetAfterModal(&ui->touch, os);
-          return true;
-        }
-      } else if (ty >= 27 && ty <= 60) {
-        if (tx >= 238 && tx < 279) {
-          size_t l = strlen(work);
-          if (l > 0) work[l - 1] = '\0';
-          drawLineEditorModal(os, title, work);
-        } else if (tx >= 279) {
-          work[0] = '\0';
-          drawLineEditorModal(os, title, work);
-        } else if (tx < 236 && os->prompt_keyboard) {
-          if (os->prompt_keyboard(title, work, sizeof(work), false) == 1) {
-            strncpy(ioLine, work, maxLen - 1);
-            ioLine[maxLen - 1] = '\0';
-            touchFilterResetAfterModal(&ui->touch, os);
-            return true;
-          }
-          drawLineEditorModal(os, title, work);
-          touchFilterResetAfterModal(&ui->touch, os);
-        }
-      } else if (ty >= 64 && ty < 192) {
-        int r = (ty - 64) / 32;
-        int c = (tx - 4) / 78;
-        if (r >= 0 && r < 4 && c >= 0 && c < 4) {
-          const char* tok = kQuickTokens[r * 4 + c];
-          size_t l = strlen(work);
-          size_t tl = strlen(tok);
-          if (l + tl + 1 < sizeof(work)) {
-            strcat(work, tok);
-            drawLineEditorModal(os, title, work);
-          }
-        }
-      } else if (ty >= 196) {
-        if (tx < 216) {
-          if (os->prompt_keyboard) {
-            int kr = os->prompt_keyboard(title, work, sizeof(work), false);
-            touchFilterResetAfterModal(&ui->touch, os);
-            if (kr == 1) {
-              strncpy(ioLine, work, maxLen - 1);
-              ioLine[maxLen - 1] = '\0';
-              return true;
-            }
-            drawLineEditorModal(os, title, work);
-          }
-        } else {
-          strncpy(ioLine, work, maxLen - 1);
-          ioLine[maxLen - 1] = '\0';
-          touchFilterResetAfterModal(&ui->touch, os);
-          return true;
-        }
-      }
-    }
-    if (os->delay_ms) os->delay_ms(10);
+  if (kr == 1) {
+    strncpy(ioLine, work, maxLen - 1);
+    ioLine[maxLen - 1] = '\0';
+    return true;
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

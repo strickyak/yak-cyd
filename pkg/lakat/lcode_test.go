@@ -845,12 +845,9 @@ func TestCompileAndRunBasicApp(t *testing.T) {
 	vm.MaxInstructions = 2500000
 	vm.TouchQueue = []TouchEvent{
 		{Touched: false},
-		// Click line 2 (20 CLS 0) at y=40 to open line editor modal
+		// Click line 2 (20 CLS 0) at y=40 to open ASCII keyboard line editor directly
 		{Touched: true, X: 100, Y: 40},
 		{Touched: false, X: 100, Y: 40},
-		// Click [OPEN FULL KEYBOARD (ABC/123)] at (100, 218)
-		{Touched: true, X: 100, Y: 218},
-		{Touched: false, X: 100, Y: 218},
 		// Click SAVE in top bar at (290, 10)
 		{Touched: true, X: 290, Y: 10},
 		{Touched: false, X: 290, Y: 10},
@@ -907,12 +904,9 @@ func TestCompileAndRunLogoApp(t *testing.T) {
 	vm.MaxInstructions = 2500000
 	vm.TouchQueue = []TouchEvent{
 		{Touched: false},
-		// Click line 2 (CS) at y=40 to open line editor modal
+		// Click line 2 (CS) at y=40 to open ASCII keyboard line editor directly
 		{Touched: true, X: 100, Y: 40},
 		{Touched: false, X: 100, Y: 40},
-		// Click [OPEN FULL KEYBOARD (ABC/123)] at (100, 218)
-		{Touched: true, X: 100, Y: 218},
-		{Touched: false, X: 100, Y: 218},
 		// Click SAVE in top bar at (290, 10)
 		{Touched: true, X: 290, Y: 10},
 		{Touched: false, X: 290, Y: 10},
