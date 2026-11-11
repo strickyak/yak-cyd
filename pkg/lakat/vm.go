@@ -2421,6 +2421,31 @@ func (vm *VM) execSyscall(sysId byte) error {
 			return err
 		}
 		vm.AppArg = arg
+	case SysGetAppArg:
+		maxLen, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		bufAddr, err := vm.pop()
+		if err != nil {
+			return err
+		}
+		if maxLen == 0 {
+			vm.push(0)
+			return nil
+		}
+		if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
+			return err
+		}
+		n := len(vm.AppArg)
+		if n > int(maxLen)-1 {
+			n = int(maxLen) - 1
+		}
+		if n > 0 {
+			copy(vm.Memory[bufAddr:int(bufAddr)+n], []byte(vm.AppArg[:n]))
+		}
+		vm.Memory[int(bufAddr)+n] = 0
+		vm.push(uint32(n))
 	case SysJoinNative:
 		binName, err := vm.popSliceString()
 		if err != nil {

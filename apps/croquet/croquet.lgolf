@@ -901,6 +901,11 @@ func main() {
 	wasTopTap := 0
 	prevHeaderState := -1
 	poseDirty := 0
+	var argBuf [16]byte
+	isDemoMode := 0
+	if os_get_app_arg(&argBuf[0], 15) > 0 && argBuf[0] == 'd' {
+		isDemoMode = 1
+	}
 
 	for {
 		nowMs := millis()
@@ -975,6 +980,16 @@ func main() {
 			}
 		} else {
 			wasTopTap = 0
+			if isDemoMode != 0 {
+				phase := (nowMs / 2500) % 6
+				if phase == 1 {
+					action = 1
+				} else if phase == 4 {
+					action = 4
+				} else {
+					action = 2
+				}
+			}
 		}
 
 		if action == 1 {

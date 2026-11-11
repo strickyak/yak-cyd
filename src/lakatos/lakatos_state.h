@@ -65,6 +65,28 @@ bool lakatosIsCornerExitActive();
 void lakatosSetAppTimeoutMs(uint32_t timeoutMs);
 void lakatosRequestAppExit();
 bool lakatosShouldExitApp();
+bool lakatosWasAppExitedByUser();
+
+// ---------------------------------------------------------------------------
+// Activity Modes (1 = Ambient, 2 = Demo, 3 = Active)
+// ---------------------------------------------------------------------------
+enum LakatosActivityMode {
+  LAKATOS_MODE_AMBIENT = 1,
+  LAKATOS_MODE_DEMO    = 2,
+  LAKATOS_MODE_ACTIVE  = 3,
+};
+
+int         lakatosGetActivityMode();
+void        lakatosSetActivityMode(int mode);
+const char* lakatosGetAmbientApp();
+void        lakatosSetAmbientApp(const char* appName);
+int         lakatosGetAmbientSec();
+void        lakatosSetAmbientSec(int sec);
+int         lakatosGetDemoSec();
+void        lakatosSetDemoSec(int sec);
+int         lakatosGetActiveIdleSec();
+void        lakatosSetActiveIdleSec(int sec);
+void        runLakatosModeScreen();
 
 // ---------------------------------------------------------------------------
 // Configuration, Calibration & Stylus Keyboard (implemented in lakatos_config.cpp)

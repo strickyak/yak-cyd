@@ -1122,6 +1122,13 @@ func main() {
 	initTables()
 	audio_start()
 
+	var argBuf [16]byte
+	isDemo := 0
+	if os_get_app_arg(&argBuf[0], 15) > 0 && argBuf[0] == 'd' {
+		isDemo = 1
+	}
+	settledSinceMs := 0
+
 	tft_fill_screen(BLACK)
 	drawHud()
 	drawTabletop()
@@ -1141,6 +1148,7 @@ func main() {
 			}
 			if ch == 114 || ch == 82 || ch == 32 {
 				startRoll(160, 120)
+				settledSinceMs = 0
 			}
 		}
 
@@ -1152,9 +1160,11 @@ func main() {
 				return
 			}
 			startRoll(tx, ty)
+			settledSinceMs = 0
 		}
 
 		if allSettled == 0 {
+			settledSinceMs = 0
 			stepPhysics()
 			renderScene()
 
@@ -1171,6 +1181,14 @@ func main() {
 				}
 				fpsFrames = 0
 				fpsLastMs = now
+			}
+		} else if isDemo != 0 {
+			now := os_millis()
+			if settledSinceMs == 0 {
+				settledSinceMs = now
+			} else if now-settledSinceMs >= 2500 {
+				settledSinceMs = 0
+				startRoll(70+int(os_rand(180)), 70+int(os_rand(100)))
 			}
 		}
 

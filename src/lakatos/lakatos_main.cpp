@@ -74,12 +74,18 @@ static constexpr uint16_t kDarkBrownExitColor = 0x5962;  // Dark brown RGB565 (R
 static volatile bool     gLCodeAppRunning   = false;
 static volatile bool     gInConfigScreen    = false;
 static volatile bool     gCornerExitEnabled = true;
-static volatile bool     gPleaseExitApp     = false;
-static volatile uint32_t gAppDeadlineMs     = 0;
+static volatile bool     gPleaseExitApp       = false;
+static volatile bool     gAppExitedByUser     = false;
+static volatile uint32_t gAppDeadlineMs       = 0;
+static volatile uint32_t gPendingAppTimeoutMs = 0;
 
 void lakatosBeginAppSession() {
   gPleaseExitApp     = false;
+  gAppExitedByUser   = false;
   gCornerExitEnabled = true;
+  if (gPendingAppTimeoutMs > 0) {
+    gAppDeadlineMs = millis() + gPendingAppTimeoutMs;
+  }
   gLCodeAppRunning   = true;
 }
 
@@ -97,15 +103,21 @@ bool lakatosGetCornerExitEnabled() {
 }
 
 bool lakatosIsCornerExitActive() {
-  return gLCodeAppRunning && gCornerExitEnabled;
+  return (gLCodeAppRunning || lakatosIsNativeAppRunning()) && gCornerExitEnabled;
 }
 
 void lakatosSetAppTimeoutMs(uint32_t timeoutMs) {
-  gAppDeadlineMs = (timeoutMs > 0) ? (millis() + timeoutMs) : 0;
+  gPendingAppTimeoutMs = timeoutMs;
+  gAppDeadlineMs       = (timeoutMs > 0) ? (millis() + timeoutMs) : 0;
 }
 
 void lakatosRequestAppExit() {
-  gPleaseExitApp = true;
+  gAppExitedByUser = true;
+  gPleaseExitApp   = true;
+}
+
+bool lakatosWasAppExitedByUser() {
+  return gAppExitedByUser;
 }
 
 bool lakatosShouldExitApp() {
@@ -279,6 +291,7 @@ LakatosTouchSample lakatosReadTouch() {
     gCore0LiveTouch = out;
     gCore0LiveTouchMs = tNow;
     if (lakatosIsCornerExitActive() && isTopLeftExitCorner(out.x, out.y)) {
+      gAppExitedByUser = true;
       gPleaseExitApp = true;
       gTouchClickConsumed = true;
       triggeredCornerExit = true;
@@ -298,7 +311,8 @@ LakatosTouchSample lakatosReadTouch() {
 void lakatosPollTouchLatch() {
   uint32_t now = millis();
 
-  if (gLCodeAppRunning && gAppDeadlineMs != 0 && (int32_t)(now - gAppDeadlineMs) >= 0) {
+  if ((gLCodeAppRunning || lakatosIsNativeAppRunning()) &&
+      gAppDeadlineMs != 0 && (int32_t)(now - gAppDeadlineMs) >= 0) {
     gPleaseExitApp = true;
   }
 
@@ -377,6 +391,7 @@ void lakatosPollTouchLatch() {
       if (!gPleaseExitApp) {
         triggeredCornerExit = true;
       }
+      gAppExitedByUser = true;
       gPleaseExitApp = true;
       gTouchPenDown = true;
       gTouchPressConsumed = true;
@@ -467,10 +482,12 @@ void lakatosWaitTouchRelease() {
 }
 
 void lakatosEndAppSession() {
-  gLCodeAppRunning   = false;
-  gPleaseExitApp     = false;
-  gCornerExitEnabled = true;
-  gAppDeadlineMs     = 0;
+  gLCodeAppRunning     = false;
+  gPleaseExitApp       = false;
+  gCornerExitEnabled   = true;
+  gAppDeadlineMs       = 0;
+  gPendingAppTimeoutMs = 0;
+  lakatosSetAppArg("");
 
   // Ensure on-board RGB LED is turned off when app exits
   lakatosSetRgbLed(false, false, false, 0);
@@ -514,6 +531,7 @@ LakatosTouchSample lakatosReadTouchLatched() {
     gTouchPressConsumed = true;
     gTouchClickConsumed = true;
     if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
+      gAppExitedByUser = true;
       gPleaseExitApp = true;
       valid = false;
     }
@@ -587,6 +605,7 @@ LakatosTouchSample lakatosReadClick() {
     gTouchPressConsumed = true;
     gTouchClickConsumed = true;
     if (valid && lakatosIsCornerExitActive() && isTopLeftExitCorner(latched.x, latched.y)) {
+      gAppExitedByUser = true;
       gPleaseExitApp = true;
       valid = false;
     } else if (valid) {
@@ -934,18 +953,18 @@ static void drawHomeHeaderBar() {
 static void drawHomeDropdownMenu() {
   if (!gHomeMenuOpen) return;
   LakatosTftGuard tftGuard;
-  // Dropdown panel anchored below NE Menu Wedge at top-right (x: 204..318, y: 24..169)
-  tft.fillRoundRect(204, 24, 114, 145, 5, 0x10A2);
-  tft.drawRoundRect(204, 24, 114, 145, 5, TFT_CYAN);
+  // Dropdown panel anchored below NE Menu Wedge at top-right (x: 204..318, y: 24..190)
+  tft.fillRoundRect(204, 24, 114, 166, 5, 0x10A2);
+  tft.drawRoundRect(204, 24, 114, 166, 5, TFT_CYAN);
 
-  const char* items[5] = {"Config", "FileBrowser", "Storage", "Updates", "About"};
-  for (int i = 0; i < 5; i++) {
-    int iy = 27 + i * 28;
-    tft.fillRoundRect(208, iy, 106, 24, 4, 0x18E3);
-    tft.drawRoundRect(208, iy, 106, 24, 4, TFT_CYAN);
+  const char* items[6] = {"Mode", "Config", "FileBrowser", "Storage", "Updates", "About"};
+  for (int i = 0; i < 6; i++) {
+    int iy = 27 + i * 27;
+    tft.fillRoundRect(208, iy, 106, 23, 4, 0x18E3);
+    tft.drawRoundRect(208, iy, 106, 23, 4, TFT_CYAN);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_WHITE, 0x18E3);
-    tft.drawString(items[i], 261, iy + 12, 2);
+    tft.drawString(items[i], 261, iy + 11, 2);
   }
 }
 
@@ -1317,13 +1336,18 @@ static void refreshActiveScreen() {
   }
 }
 
+static uint32_t gLastHomeActivityMs = 0;
+
 static void launchAppAndRestoreShell(const char* appPath) {
   lakatosDevLogf("Launch App: %s", appPath);
   lakatosSetRgbLed(false, false, true, 250);
+  lakatosSetAppArg("");
+  lakatosSetAppTimeoutMs(0);
   int exitCode = 0;
   String errMsg;
   bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
   lakatosWaitTouchRelease();
+  gLastHomeActivityMs = millis();
   if (ok) {
     lakatosDevLogf("App Exited: %s (code=%d)", appPath, exitCode);
     snprintf(gStatusMsg, sizeof(gStatusMsg), "Exited (%d): %s", exitCode, appPath);
@@ -1334,6 +1358,172 @@ static void launchAppAndRestoreShell(const char* appPath) {
     lakatosSetRgbLed(true, false, false, 400);
   }
   refreshActiveScreen();
+}
+
+static bool resolveAppVfsPathByName(const char* name, char* outPath, size_t outCap) {
+  if (!name || !name[0] || !outPath || outCap == 0) return false;
+  if (name[0] == '/') {
+    LakatosFsEntry st;
+    if (lakatosFsStat(name, &st) && !st.isDir) {
+      strncpy(outPath, name, outCap - 1);
+      outPath[outCap - 1] = '\0';
+      return true;
+    }
+    return false;
+  }
+
+  char fileName[48];
+  if (endsWithLapp(name)) {
+    strncpy(fileName, name, sizeof(fileName) - 1);
+    fileName[sizeof(fileName) - 1] = '\0';
+  } else {
+    snprintf(fileName, sizeof(fileName), "%s.lapp", name);
+  }
+
+  for (int i = 0; i < gHomeAppCount; i++) {
+    if (strcasecmp(gHomeApps[i].fileName, fileName) == 0 ||
+        strcasecmp(gHomeApps[i].label, name) == 0) {
+      const char* dirPrefix = "/flash/apps";
+      if (gHomeApps[i].source == APP_SRC_SD) {
+        dirPrefix = "/sd/apps";
+      } else if (gHomeApps[i].source == APP_SRC_NET) {
+        dirPrefix = "/net/apps";
+      }
+      snprintf(outPath, outCap, "%s/%s", dirPrefix, gHomeApps[i].fileName);
+      return true;
+    }
+  }
+
+  const char* const dirs[3] = {"/sd/apps", "/net/apps", "/flash/apps"};
+  for (int d = 0; d < 3; d++) {
+    if (d == 0 && !lakatosSdIsMounted()) continue;
+    if (d == 1 && (!lakatosWifiIsConnected() || strlen(lakatosGetSuperhighwayPassword()) == 0)) continue;
+    snprintf(outPath, outCap, "%s/%s", dirs[d], fileName);
+    LakatosFsEntry st;
+    if (lakatosFsStat(outPath, &st) && !st.isDir) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void stepAmbientMode() {
+  char appPath[128];
+  const char* ambName = lakatosGetAmbientApp();
+  if (!resolveAppVfsPathByName(ambName, appPath, sizeof(appPath))) {
+    if (!resolveAppVfsPathByName("gallery", appPath, sizeof(appPath))) {
+      lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+      gLastHomeActivityMs = millis();
+      refreshActiveScreen();
+      return;
+    }
+  }
+
+  char argBuf[24];
+  snprintf(argBuf, sizeof(argBuf), "%d", lakatosGetAmbientSec());
+  lakatosSetAppArg(argBuf);
+  lakatosSetAppTimeoutMs(0);
+
+  int exitCode = 0;
+  String errMsg;
+  bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
+  lakatosWaitTouchRelease();
+
+  if (!ok || lakatosWasAppExitedByUser() || Serial.available() > 0) {
+    lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+    gScreenMode   = SCREEN_HOME;
+    gHomeMenuOpen = false;
+    gLastHomeActivityMs = millis();
+    refreshActiveScreen();
+  }
+}
+
+static const char* const kDemoCandidateApps[] = {
+  "bounce",
+  "dendrite",
+  "ising",
+  "puzzle15",
+  "rubik",
+  "life",
+  "mandelbrot",
+  "dice-3d",
+  "croquet",
+  "wind",
+  "gallery",
+};
+static constexpr int kNumDemoCandidateApps =
+    sizeof(kDemoCandidateApps) / sizeof(kDemoCandidateApps[0]);
+static int gDemoOrder[kNumDemoCandidateApps];
+static int gDemoOrderPos   = 0;
+static int gDemoOrderReady = 0;
+
+static void shuffleDemoOrder() {
+  for (int i = 0; i < kNumDemoCandidateApps; i++) {
+    gDemoOrder[i] = i;
+  }
+  for (int i = kNumDemoCandidateApps - 1; i > 0; i--) {
+    int j = (int)(esp_random() % (uint32_t)(i + 1));
+    int tmp = gDemoOrder[i];
+    gDemoOrder[i] = gDemoOrder[j];
+    gDemoOrder[j] = tmp;
+  }
+  gDemoOrderPos   = 0;
+  gDemoOrderReady = 1;
+}
+
+static void stepDemoMode() {
+  if (!gDemoOrderReady || gDemoOrderPos >= kNumDemoCandidateApps) {
+    shuffleDemoOrder();
+  }
+
+  char appPath[128];
+  const char* chosenName = nullptr;
+  for (int tries = 0; tries < kNumDemoCandidateApps; tries++) {
+    if (gDemoOrderPos >= kNumDemoCandidateApps) {
+      shuffleDemoOrder();
+    }
+    const char* cand = kDemoCandidateApps[gDemoOrder[gDemoOrderPos++]];
+    if (resolveAppVfsPathByName(cand, appPath, sizeof(appPath))) {
+      chosenName = cand;
+      break;
+    }
+  }
+
+  if (!chosenName) {
+    lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+    gLastHomeActivityMs = millis();
+    refreshActiveScreen();
+    return;
+  }
+
+  int demoSec = lakatosGetDemoSec();
+  if (demoSec < 5) demoSec = 60;
+
+  char argBuf[24];
+  if (strcasecmp(chosenName, "gallery") == 0) {
+    // Show 5 random photographs over demoSec seconds (e.g. 60s / 5 = 12s per photo)
+    int photoSec = demoSec / 5;
+    if (photoSec < 1) photoSec = 1;
+    snprintf(argBuf, sizeof(argBuf), "%d", photoSec);
+  } else {
+    snprintf(argBuf, sizeof(argBuf), "demo %d", demoSec);
+  }
+
+  lakatosSetAppArg(argBuf);
+  lakatosSetAppTimeoutMs((uint32_t)demoSec * 1000u);
+
+  int exitCode = 0;
+  String errMsg;
+  bool ok = lakatosRunAppFromFile(appPath, &exitCode, &errMsg);
+  lakatosWaitTouchRelease();
+
+  if (!ok || lakatosWasAppExitedByUser() || Serial.available() > 0) {
+    lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+    gScreenMode   = SCREEN_HOME;
+    gHomeMenuOpen = false;
+    gLastHomeActivityMs = millis();
+    refreshActiveScreen();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1827,6 +2017,29 @@ static void handleSerialCommandLine(const String& line) {
       runLakatosStorageScreen();
       refreshActiveScreen();
     }
+  } else if (line == "mode" || line.startsWith("mode ")) {
+    String arg = line.substring(4);
+    arg.trim();
+    if (arg == "ambient" || arg == "1") {
+      lakatosSetActivityMode(LAKATOS_MODE_AMBIENT);
+    } else if (arg == "demo" || arg == "2") {
+      lakatosSetActivityMode(LAKATOS_MODE_DEMO);
+    } else if (arg == "active" || arg == "3") {
+      lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+      gLastHomeActivityMs = millis();
+    } else if (arg == "ui" || arg == "panel") {
+      if (!gInConfigScreen) {
+        runLakatosModeScreen();
+        gLastHomeActivityMs = millis();
+        refreshActiveScreen();
+      }
+    }
+    const char* mName = (lakatosGetActivityMode() == LAKATOS_MODE_AMBIENT) ? "Ambient"
+                      : (lakatosGetActivityMode() == LAKATOS_MODE_DEMO)    ? "Demo"
+                                                                           : "Active";
+    Serial.printf("Activity Mode: %s | Ambient: %s (%ds/img) | Demo: %ds/run | Active Idle->Ambient: %ds\r\n",
+                  mName, lakatosGetAmbientApp(), lakatosGetAmbientSec(),
+                  lakatosGetDemoSec(), lakatosGetActiveIdleSec());
   } else if (line == "cornersize" || line.startsWith("cornersize ")) {
     int sp = line.indexOf(' ');
     if (sp > 0) {
@@ -1892,6 +2105,7 @@ void setup() {
 
   gScreenMode   = SCREEN_HOME;
   gHomeMenuOpen = false;
+  gLastHomeActivityMs = millis();
   refreshHomeApps();
   drawHomeScreen();
 }
@@ -1900,6 +2114,15 @@ void loop() {
   updateLakatosConfigBackground();
   lakatosUpdateRgbLed();
   handleSerialCommand();
+
+  if (lakatosGetActivityMode() == LAKATOS_MODE_AMBIENT) {
+    stepAmbientMode();
+    return;
+  }
+  if (lakatosGetActivityMode() == LAKATOS_MODE_DEMO) {
+    stepDemoMode();
+    return;
+  }
 
   bool wifiNow = lakatosWifiIsConnected();
   if (gScreenMode == SCREEN_HOME && wifiNow && !gHomeScannedWifi) {
@@ -1923,50 +2146,72 @@ void loop() {
 
   LakatosTouchSample ts = lakatosReadTouchLatched();
   if (!ts.touched) {
+    int idleSec = lakatosGetActiveIdleSec();
+    if (gScreenMode == SCREEN_HOME && !gHomeMenuOpen && idleSec > 0 &&
+        (uint32_t)(millis() - gLastHomeActivityMs) >= (uint32_t)idleSec * 1000u) {
+      lakatosDevLogf("Active idle (%ds) -> switching to Ambient mode", idleSec);
+      lakatosSetActivityMode(LAKATOS_MODE_AMBIENT);
+      return;
+    }
     delay(15);
     return;
   }
 
+  gLastHomeActivityMs = millis();
   int tx = ts.x;
   int ty = ts.y;
   lakatosWaitTouchRelease();
+  gLastHomeActivityMs = millis();
 
   // =========================================================================
   // Mode A: Home Screen (App Launcher Grid + [MENU] Dropdown)
   // =========================================================================
   if (gScreenMode == SCREEN_HOME) {
     if (gHomeMenuOpen) {
-      // Check if user tapped one of the 5 dropdown items (x: 204..318, y: 26..169)
-      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 169) {
-        int itemIdx = (ty - 27) / 28;
+      // Check if user tapped one of the 6 dropdown items (x: 204..318, y: 26..189)
+      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 189) {
+        int itemIdx = (ty - 27) / 27;
         gHomeMenuOpen = false;
         if (itemIdx == 0) {
+          lakatosDevLogf("Menu: Mode (%d,%d)", tx, ty);
+          runLakatosModeScreen();
+          gLastHomeActivityMs = millis();
+          if (lakatosGetActivityMode() == LAKATOS_MODE_ACTIVE) {
+            refreshHomeApps();
+            drawHomeScreen();
+          }
+          return;
+        } else if (itemIdx == 1) {
           lakatosDevLogf("Menu: Config (%d,%d)", tx, ty);
           runLakatosConfigScreen(false);
+          gLastHomeActivityMs = millis();
           refreshHomeApps();
           drawHomeScreen();
           return;
-        } else if (itemIdx == 1) {
+        } else if (itemIdx == 2) {
           lakatosDevLogf("Menu: FileBrowser (%d,%d)", tx, ty);
           gScreenMode = SCREEN_FILE_BROWSER;
           refreshDirectory();
           drawFileBrowserScreen();
           return;
-        } else if (itemIdx == 2) {
+        } else if (itemIdx == 3) {
           lakatosDevLogf("Menu: Storage (%d,%d)", tx, ty);
           runLakatosStorageScreen();
-          refreshHomeApps();
-          drawHomeScreen();
-          return;
-        } else if (itemIdx == 3) {
-          lakatosDevLogf("Menu: Updates (%d,%d)", tx, ty);
-          runLakatosUpdatesScreen();
+          gLastHomeActivityMs = millis();
           refreshHomeApps();
           drawHomeScreen();
           return;
         } else if (itemIdx == 4) {
+          lakatosDevLogf("Menu: Updates (%d,%d)", tx, ty);
+          runLakatosUpdatesScreen();
+          gLastHomeActivityMs = millis();
+          refreshHomeApps();
+          drawHomeScreen();
+          return;
+        } else if (itemIdx == 5) {
           lakatosDevLogf("Menu: About (%d,%d)", tx, ty);
           runLakatosAboutScreen();
+          gLastHomeActivityMs = millis();
           refreshHomeApps();
           drawHomeScreen();
           return;

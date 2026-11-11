@@ -245,6 +245,7 @@ enum LCodeSyscall : uint8_t {
   SysPal4Render3D   = 0x55,
   SysGetCornerSize  = 0x56,
   SysSetCornerSize  = 0x57,
+  SysGetAppArg      = 0x58,
 };
 
 static constexpr uint32_t kNullGuardSize   = 256;
@@ -1117,9 +1118,14 @@ struct LCodeVM {
       case SysSerialAvail:
         lakatosPollSerialFuse();
         return push((uint32_t)Serial.available());
-      case SysSerialRead:
+      case SysSerialRead: {
         lakatosPollSerialFuse();
-        return push((uint32_t)(int32_t)Serial.read());
+        int ch = Serial.read();
+        if (ch == 'q' || ch == 'Q' || ch == 3) {
+          lakatosRequestAppExit();
+        }
+        return push((uint32_t)(int32_t)ch);
+      }
       case SysSerialWrite: {
         uint32_t ln = 0, bufAddr = 0;
         if (!pop(ln) || !pop(bufAddr)) return false;
@@ -1132,6 +1138,18 @@ struct LCodeVM {
         if (!popSliceAsCStr(argBuf, sizeof(argBuf))) return false;
         lakatosSetAppArg(argBuf);
         return true;
+      }
+      case SysGetAppArg: {
+        uint32_t maxLen = 0, bufAddr = 0;
+        if (!pop(maxLen) || !pop(bufAddr)) return false;
+        if (maxLen == 0) return push(0);
+        if (!checkAddr(bufAddr, maxLen)) return false;
+        const char* arg = lakatosGetAppArg();
+        size_t n = arg ? strlen(arg) : 0;
+        if (n > maxLen - 1) n = maxLen - 1;
+        if (n > 0) memcpy(mem + bufAddr, arg, n);
+        mem[bufAddr + n] = 0;
+        return push((uint32_t)n);
       }
       case SysJoinNative: {
         char binBuf[64];

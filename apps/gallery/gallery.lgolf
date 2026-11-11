@@ -18,7 +18,6 @@ const (
 	NAME_STRIDE     = 8     // Up to 8 bytes per basename (without ".jpg")
 	ENTRY_SIZE      = 88    // sizeof(LakatosFsEntry): name[64], size(8), mtime(8), isDir(1), pad(7)
 	ENTRY_ISDIR     = 80
-	DISPLAY_MS      = 10000
 	POLL_STEP_MS    = 40
 	AMBIENT_HIDE_MS = 60000 // Hide Exit X and Menu Wedge after 60s running & 60s without touch clicks
 )
@@ -29,13 +28,153 @@ var (
 	imgCount int
 
 	pathBuf     [32]byte // "/net/pix/" (9) + basename (<=8) + ".jpg" (4) + NUL
+	cfgBuf      [16]byte // "/flash/etc/gallery.cfg" ASCII seconds buffer
 	prefetchIdx int
+
+	slideStopIdx int = 1  // Default stop index 1 -> 12 seconds per photo
+	slideSec     int = 12 // Seconds per photo (5, 12, 30, 60, 300, 3600)
 
 	appStartMs       int = 0
 	lastTouchClickMs int = 0
 	lastSlideClickMs int = 0
 	wedgesVisible    int = 0
 )
+
+func stopSeconds(idx int) int {
+	if idx <= 0 {
+		return 5
+	}
+	if idx == 1 {
+		return 12
+	}
+	if idx == 2 {
+		return 30
+	}
+	if idx == 3 {
+		return 60
+	}
+	if idx == 4 {
+		return 300
+	}
+	return 3600
+}
+
+func stopLabel(idx int) string {
+	if idx <= 0 {
+		return "5"
+	}
+	if idx == 1 {
+		return "12"
+	}
+	if idx == 2 {
+		return "30"
+	}
+	if idx == 3 {
+		return "60"
+	}
+	if idx == 4 {
+		return "300"
+	}
+	return "3600"
+}
+
+func stopBadgeLabel(idx int) string {
+	if idx <= 0 {
+		return "5 sec"
+	}
+	if idx == 1 {
+		return "12 sec"
+	}
+	if idx == 2 {
+		return "30 sec"
+	}
+	if idx == 3 {
+		return "60s (1m)"
+	}
+	if idx == 4 {
+		return "300s (5m)"
+	}
+	return "3600s (1h)"
+}
+
+func nearestStopIdx(sec int) int {
+	bestIdx := 1
+	bestDiff := 999999
+	for i := 0; i < 6; i++ {
+		s := stopSeconds(i)
+		d := sec - s
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff = d
+			bestIdx = i
+		}
+	}
+	return bestIdx
+}
+
+func parsePositiveIntFromCfgBuf(n int) int {
+	val := 0
+	digits := 0
+	for i := 0; i < n; i++ {
+		ch := int(cfgBuf[i])
+		if ch >= '0' && ch <= '9' {
+			val = val*10 + (ch - '0')
+			digits++
+		} else if digits > 0 {
+			break
+		}
+	}
+	if digits > 0 && val > 0 {
+		return val
+	}
+	return 0
+}
+
+func loadGalleryConfig() {
+	slideStopIdx = 1
+	slideSec = 12
+	n := fs_read("/flash/etc/gallery.cfg", 0, &cfgBuf[0], 15)
+	if n > 0 {
+		val := parsePositiveIntFromCfgBuf(n)
+		if val > 0 {
+			slideStopIdx = nearestStopIdx(val)
+			slideSec = stopSeconds(slideStopIdx)
+		}
+	}
+	argLen := os_get_app_arg(&cfgBuf[0], 15)
+	if argLen > 0 {
+		argVal := parsePositiveIntFromCfgBuf(argLen)
+		if argVal > 0 {
+			slideStopIdx = nearestStopIdx(argVal)
+			slideSec = argVal
+		}
+	}
+}
+
+func saveGalleryConfig() {
+	fs_mkdir("/flash/etc", 1)
+	v := slideSec
+	if v <= 0 {
+		v = 12
+	}
+	var rev [12]byte
+	rLen := 0
+	for v > 0 && rLen < 10 {
+		rev[rLen] = byte('0' + (v % 10))
+		v = v / 10
+		rLen++
+	}
+	pos := 0
+	for i := rLen - 1; i >= 0; i-- {
+		cfgBuf[pos] = rev[i]
+		pos++
+	}
+	cfgBuf[pos] = '\n'
+	pos++
+	fs_write("/flash/etc/gallery.cfg", &cfgBuf[0], pos)
+}
 
 func toLowerByte(c int) int {
 	if c >= 'A' && c <= 'Z' {
@@ -109,6 +248,129 @@ func updateGalleryWedgesForNow(now int) {
 	}
 }
 
+func drawGalleryConfigPanel() {
+	drawGalleryWedges()
+	tft_fill_round_rect(12, 34, 296, 172, 6, 0x1082)
+	tft_draw_round_rect(12, 34, 296, 172, 6, CYAN)
+	tft_fill_round_rect(16, 38, 288, 24, 4, NAVY)
+
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, NAVY)
+	tft_draw_string("GALLERY CONFIG", 160, 50, 2)
+
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(LIGHTGREY, 0x1082)
+	tft_draw_string("Seconds per photo:", 24, 78, 2)
+
+	tft_fill_round_rect(182, 66, 114, 24, 4, 0x18E3)
+	tft_draw_round_rect(182, 66, 114, 24, 4, CYAN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string(stopBadgeLabel(slideStopIdx), 239, 78, 2)
+
+	// Slider with 6 stops: 5, 12, 30, 60, 300, 3600 at x = 35, 85, 135, 185, 235, 285
+	trackX0 := 35
+	stepX := 50
+	trackW := stepX * 5
+	tft_fill_round_rect(trackX0, 113, trackW, 6, 3, BLACK)
+	if slideStopIdx > 0 {
+		tft_fill_round_rect(trackX0, 113, slideStopIdx*stepX, 6, 3, CYAN)
+	}
+	tft_draw_round_rect(trackX0, 113, trackW, 6, 3, WHITE)
+
+	tft_set_text_datum(TC_DATUM)
+	for i := 0; i < 6; i++ {
+		sx := trackX0 + i*stepX
+		if i == slideStopIdx {
+			tft_draw_line(sx, 108, sx, 124, YELLOW)
+			tft_fill_circle(sx, 116, 6, YELLOW)
+			tft_draw_circle(sx, 116, 6, WHITE)
+			tft_set_text_color(YELLOW, 0x1082)
+		} else {
+			tft_draw_line(sx, 110, sx, 122, LIGHTGREY)
+			tft_fill_circle(sx, 116, 3, 0x2945)
+			tft_draw_circle(sx, 116, 3, CYAN)
+			tft_set_text_color(LIGHTGREY, 0x1082)
+		}
+		tft_draw_string(stopLabel(i), sx, 130, 1)
+	}
+
+	// [DONE] button
+	tft_fill_round_rect(100, 162, 120, 32, 5, 0x1A26)
+	tft_draw_round_rect(100, 162, 120, 32, 5, GREEN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, 0x1A26)
+	tft_draw_string("DONE", 160, 178, 2)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func runGalleryConfigPanel() int {
+	drawGalleryConfigPanel()
+
+	sliderDragging := false
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				exitCleanly()
+				return 99
+			}
+		}
+		if sliderDragging {
+			td, tx, ty := os_read_touch()
+			if !td {
+				sliderDragging = false
+			} else if ty >= 94 && ty <= 150 && tx >= 15 && tx <= 305 {
+				now := os_millis()
+				lastSlideClickMs = now
+				lastTouchClickMs = now
+				idx := (tx - 35 + 25) / 50
+				if idx < 0 {
+					idx = 0
+				}
+				if idx > 5 {
+					idx = 5
+				}
+				if idx != slideStopIdx {
+					slideStopIdx = idx
+					slideSec = stopSeconds(idx)
+					saveGalleryConfig()
+					drawGalleryConfigPanel()
+				}
+			}
+		} else {
+			clicked, tx, ty := os_read_click()
+			if clicked {
+				now := os_millis()
+				lastSlideClickMs = now
+				lastTouchClickMs = now
+
+				if ty >= 94 && ty <= 150 && tx >= 15 && tx <= 305 {
+					idx := (tx - 35 + 25) / 50
+					if idx < 0 {
+						idx = 0
+					}
+					if idx > 5 {
+						idx = 5
+					}
+					if idx != slideStopIdx {
+						slideStopIdx = idx
+						slideSec = stopSeconds(idx)
+						saveGalleryConfig()
+						drawGalleryConfigPanel()
+					}
+					sliderDragging = true
+				} else if (tx >= 100 && tx <= 220 && ty >= 162 && ty <= 194) ||
+					tx < 12 || tx > 308 || ty < 34 || ty > 206 {
+					saveGalleryConfig()
+					return 2
+				}
+			}
+		}
+		os_delay_ms(20)
+	}
+}
+
 func runGalleryMenu() int {
 	drawGalleryWedges()
 	s := CornerSize()
@@ -116,23 +378,19 @@ func runGalleryMenu() int {
 	if menuY < 24 {
 		menuY = 24
 	}
-	tft_fill_round_rect(204, menuY, 114, 119, 5, 0x10A2)
-	tft_draw_round_rect(204, menuY, 114, 119, 5, CYAN)
+	tft_fill_round_rect(204, menuY, 114, 61, 5, 0x10A2)
+	tft_draw_round_rect(204, menuY, 114, 61, 5, CYAN)
 
 	tft_set_text_datum(MC_DATUM)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 2; i++ {
 		iy := menuY + 3 + i*29
 		tft_fill_round_rect(208, iy, 106, 25, 4, 0x18E3)
 		tft_draw_round_rect(208, iy, 106, 25, 4, CYAN)
 		tft_set_text_color(WHITE, 0x18E3)
 		if i == 0 {
-			tft_draw_string("Next Photo", 261, iy+12, 2)
-		} else if i == 1 {
-			tft_draw_string("Prev Photo", 261, iy+12, 2)
-		} else if i == 2 {
 			tft_draw_string("Shuffle", 261, iy+12, 2)
 		} else {
-			tft_draw_string("Exit", 261, iy+12, 2)
+			tft_draw_string("Config", 261, iy+12, 2)
 		}
 	}
 	tft_set_text_datum(TL_DATUM)
@@ -150,21 +408,14 @@ func runGalleryMenu() int {
 			now := os_millis()
 			lastSlideClickMs = now
 			lastTouchClickMs = now
-			if cx >= 204 && cx <= 318 && cy >= menuY+2 && cy < menuY+118 {
+			if cx >= 204 && cx <= 318 && cy >= menuY+2 && cy < menuY+60 {
 				itemIdx := (cy - (menuY + 3)) / 29
 				if itemIdx == 0 {
-					return 1
-				}
-				if itemIdx == 1 {
-					return -1
-				}
-				if itemIdx == 2 {
 					shuffleCatalog()
 					return 1
 				}
-				if itemIdx == 3 {
-					exitCleanly()
-					return 99
+				if itemIdx == 1 {
+					return runGalleryConfigPanel()
 				}
 			}
 			// Tapped Menu Wedge or outside dropdown -> close menu and redraw current slide
@@ -403,6 +654,7 @@ func displaySlide(idx int) bool {
 func main() {
 	appStartMs = os_millis()
 	lastTouchClickMs = 0
+	loadGalleryConfig()
 	tft_fill_screen(BLACK)
 	drawGalleryWedges()
 	tft_set_text_color(CYAN, BLACK)
@@ -417,7 +669,7 @@ func main() {
 			for failures < count {
 				if displaySlide(idx) {
 					failures = 0
-					act := waitSlideAction(DISPLAY_MS)
+					act := waitSlideAction(slideSec * 1000)
 					if act == 99 {
 						return
 					}

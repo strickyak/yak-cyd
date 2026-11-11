@@ -1083,7 +1083,6 @@ bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErr
     return false;
   }
 
-  gLakatosAppArg[0]           = '\0';
   gLakatosJoinNativeTarget[0] = '\0';
   static char resolvedBinPath[128];
 

@@ -1213,4 +1213,72 @@ func TestGalleryAmbientModeHidesAndRestoresWedges(t *testing.T) {
 	}
 }
 
+func TestGalleryConfigPersistence(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/gallery/gallery.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(gallery.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("Gallery Viewer", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	tmpDir := t.TempDir()
+	pixDir := filepath.Join(tmpDir, "net", "pix")
+	if err := os.MkdirAll(pixDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	var jpgBuf bytes.Buffer
+	if err := jpeg.Encode(&jpgBuf, img, nil); err != nil {
+		t.Fatalf("jpeg.Encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pixDir, "pic1.jpg"), jpgBuf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(pic1.jpg): %v", err)
+	}
+
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 4000000
+
+	injectedFlow := false
+	vm.StepHook = func(v *VM, pc int, op byte) {
+		if v.VirtualMs >= 1000 && !injectedFlow {
+			injectedFlow = true
+			// 1. Click NE Menu Wedge (315, 4) -> opens 2-item menu (Shuffle, Config)
+			// 2. Click "Config" item (itemIdx == 1 at y = 24 + 3 + 29 + 12 = 68)
+			// 3. Touch slider stop 4 (300s at x = 235, y = 116) + release
+			// 4. Touch [DONE] button (160, 178) + release
+			v.TouchQueue = append(v.TouchQueue,
+				TouchEvent{Touched: true, X: 315, Y: 4},
+				TouchEvent{Touched: true, X: 260, Y: 68},
+				TouchEvent{Touched: true, X: 235, Y: 116},
+				TouchEvent{Touched: false},
+				TouchEvent{Touched: true, X: 160, Y: 178},
+				TouchEvent{Touched: false},
+			)
+		}
+		if v.VirtualMs >= 3000 {
+			v.SerialIn = append(v.SerialIn, 'q')
+		}
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+
+	cfgBytes, err := os.ReadFile(filepath.Join(tmpDir, "flash", "etc", "gallery.cfg"))
+	if err != nil {
+		t.Fatalf("expected /flash/etc/gallery.cfg to be written: %v", err)
+	}
+	if string(cfgBytes) != "300\n" {
+		t.Fatalf("expected gallery.cfg to contain %q, got %q", "300\n", string(cfgBytes))
+	}
+}
+
+
 

@@ -271,6 +271,7 @@ const (
 	SysPal4Render3D   = byte(0x55) // (bufAddr w h camAddr primsAddr primCount -- visCount)
 	SysGetCornerSize  = byte(0x56) // ( -- size)
 	SysSetCornerSize  = byte(0x57) // (size -- )
+	SysGetAppArg      = byte(0x58) // (bufAddr maxLen -- len)
 )
 
 type ArgType string
@@ -491,6 +492,7 @@ var SyscallByName = map[string]byte{
 	"SYS_PAL4_RENDER_3D":      SysPal4Render3D,
 	"SYS_GET_CORNER_SIZE":     SysGetCornerSize,
 	"SYS_SET_CORNER_SIZE":     SysSetCornerSize,
+	"SYS_GET_APP_ARG":         SysGetAppArg,
 	"SYS_READ_TOUCH":         SysReadTouch,
 	"SYS_READ_CLICK":         SysReadClick,
 	"SYS_READ_TOUCH_RAW":     SysReadTouchRaw,

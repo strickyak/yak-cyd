@@ -144,6 +144,12 @@ static char   gShPass[64]      = "";  // Never stored in source code; loaded fro
 static bool   gTouchSpotEnabled = false;
 static int    gCornerSize      = 12;
 
+static int    gActivityMode    = LAKATOS_MODE_ACTIVE;
+static char   gAmbientApp[32]  = "gallery";
+static int    gAmbientSec      = 60;
+static int    gDemoSec         = 60;
+static int    gActiveIdleSec   = 300;
+
 static void applyAirportCode(const char* code) {
   char up[4] = {'S', 'F', 'O', '\0'};
   for (int i = 0; i < 3 && code && code[i]; i++) {
@@ -201,6 +207,10 @@ static void saveConfigToNvs() {
   prefs.putString("serialNo", gSerialNo);
   prefs.putString("shUrl", gShUrl);
   prefs.putString("shPass", gShPass);
+  prefs.putString("ambApp", gAmbientApp);
+  prefs.putInt("ambSec", gAmbientSec);
+  prefs.putInt("demoSec", gDemoSec);
+  prefs.putInt("idleSec", gActiveIdleSec);
   prefs.end();
 }
 
@@ -231,8 +241,20 @@ void initLakatosConfig() {
   String savedSer  = prefs.getString("serialNo", "");
   String savedUrl  = prefs.getString("shUrl", "http://pizga.net:1908/");
   String savedPass = prefs.getString("shPass", "");
+  String savedAmb  = prefs.getString("ambApp", "gallery");
+  gAmbientSec      = constrain((int)prefs.getInt("ambSec", 60), 1, 86400);
+  gDemoSec         = constrain((int)prefs.getInt("demoSec", 60), 5, 3600);
+  gActiveIdleSec   = constrain((int)prefs.getInt("idleSec", 300), 0, 86400);
   prefs.end();
   gTouchSpotEnabled = false;
+  gActivityMode     = LAKATOS_MODE_ACTIVE;
+
+  if (savedAmb.length() > 0) {
+    strncpy(gAmbientApp, savedAmb.c_str(), sizeof(gAmbientApp) - 1);
+    gAmbientApp[sizeof(gAmbientApp) - 1] = '\0';
+  } else {
+    strcpy(gAmbientApp, "gallery");
+  }
 
   strncpy(gDeviceName, savedDev.c_str(), sizeof(gDeviceName) - 1);
   strncpy(gShUrl, savedUrl.c_str(), sizeof(gShUrl) - 1);
@@ -397,6 +419,58 @@ void lakatosSetCornerSize(int sz) {
   gCornerSize = snapCornerSize(sz);
   saveConfigToNvs();
   gConfigNeedsRedraw = true;
+}
+
+int lakatosGetActivityMode() {
+  return gActivityMode;
+}
+
+void lakatosSetActivityMode(int mode) {
+  if (mode < LAKATOS_MODE_AMBIENT || mode > LAKATOS_MODE_ACTIVE) {
+    mode = LAKATOS_MODE_ACTIVE;
+  }
+  gActivityMode = mode;
+}
+
+const char* lakatosGetAmbientApp() {
+  return gAmbientApp;
+}
+
+void lakatosSetAmbientApp(const char* appName) {
+  if (!appName || !appName[0]) {
+    strcpy(gAmbientApp, "gallery");
+  } else {
+    strncpy(gAmbientApp, appName, sizeof(gAmbientApp) - 1);
+    gAmbientApp[sizeof(gAmbientApp) - 1] = '\0';
+  }
+  saveConfigToNvs();
+}
+
+int lakatosGetAmbientSec() {
+  return constrain(gAmbientSec, 1, 86400);
+}
+
+void lakatosSetAmbientSec(int sec) {
+  gAmbientSec = constrain(sec, 1, 86400);
+  saveConfigToNvs();
+}
+
+int lakatosGetDemoSec() {
+  return constrain(gDemoSec, 5, 3600);
+}
+
+void lakatosSetDemoSec(int sec) {
+  gDemoSec = constrain(sec, 5, 3600);
+  saveConfigToNvs();
+}
+
+int lakatosGetActiveIdleSec() {
+  return constrain(gActiveIdleSec, 0, 86400);
+}
+
+void lakatosSetActiveIdleSec(int sec) {
+  gActiveIdleSec = constrain(sec, 0, 86400);
+  saveConfigToNvs();
 }
 
 bool lakatosWifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
@@ -2094,6 +2168,180 @@ void runLakatosConfigScreen(bool startInCalibration) {
             runTouchCalibrationModal();
             drawConfigScreen();
           }
+        }
+      }
+    } else {
+      if (wasDown) {
+        wasDown = false;
+        lastRel = now;
+      }
+    }
+    delay(15);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Activity Mode Screen (1. Ambient, 2. Demo, 3. Active)
+// ---------------------------------------------------------------------------
+static void drawModeScreen() {
+  const int cs = lakatosGetCornerSize();
+  LakatosTftGuard tftLock;
+  tft.fillScreen(0x0841);
+  tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+
+  // Top-left NW Exit X
+  tft.fillRect(0, 0, cs, cs, TFT_BLACK);
+  tft.drawLine(0, 0, cs - 1, cs - 1, TFT_WHITE);
+  tft.drawLine(cs - 1, 0, 0, cs - 1, TFT_WHITE);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.drawString("ACTIVITY MODE", 160, 12, 2);
+
+  // Row 1 (y: 28..62): 3 Mode Selector Buttons
+  const char* const modeLabels[3] = {"1. AMBIENT", "2. DEMO", "3. ACTIVE"};
+  for (int i = 0; i < 3; i++) {
+    int modeId = i + 1;
+    int bx     = 6 + i * 104;
+    bool sel   = (gActivityMode == modeId);
+    uint16_t bg     = sel ? 0x1A26 : 0x18E3;
+    uint16_t border = sel ? TFT_GREEN : 0x39E7;
+    tft.fillRoundRect(bx, 28, 100, 34, 5, bg);
+    tft.drawRoundRect(bx, 28, 100, 34, 5, border);
+    if (sel) {
+      tft.drawRoundRect(bx + 1, 29, 98, 32, 4, TFT_YELLOW);
+    }
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(sel ? TFT_YELLOW : TFT_WHITE, bg);
+    tft.drawString(modeLabels[i], bx + 50, 45, 2);
+  }
+
+  // Row 2 (y: 66..108): Ambient App Name (left) & Ambient Seconds/Image (right)
+  tft.fillRoundRect(6, 66, 190, 42, 5, 0x18E3);
+  tft.drawRoundRect(6, 66, 190, 42, 5, TFT_CYAN);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x18E3);
+  tft.drawString("AMBIENT APP:", 12, 70, 1);
+  tft.setTextColor(TFT_WHITE, 0x18E3);
+  tft.drawString(gAmbientApp, 12, 84, 2);
+
+  tft.fillRoundRect(202, 66, 112, 42, 5, 0x18E3);
+  tft.drawRoundRect(202, 66, 112, 42, 5, TFT_CYAN);
+  tft.setTextColor(TFT_CYAN, 0x18E3);
+  tft.drawString("SEC / IMAGE:", 208, 70, 1);
+  char ambSecBuf[24];
+  snprintf(ambSecBuf, sizeof(ambSecBuf), "%d s", gAmbientSec);
+  tft.setTextColor(TFT_YELLOW, 0x18E3);
+  tft.drawString(ambSecBuf, 208, 84, 2);
+
+  // Row 3 (y: 112..154): Demo Seconds per Run
+  tft.fillRoundRect(6, 112, 308, 42, 5, 0x18E3);
+  tft.drawRoundRect(6, 112, 308, 42, 5, TFT_MAGENTA);
+  tft.setTextColor(TFT_MAGENTA, 0x18E3);
+  tft.drawString("DEMO SECONDS PER RUN (DEFAULT 60):", 12, 116, 1);
+  char demoBuf[48];
+  snprintf(demoBuf, sizeof(demoBuf), "%d s  (Demos + 5 random photos)", gDemoSec);
+  tft.setTextColor(TFT_WHITE, 0x18E3);
+  tft.drawString(demoBuf, 12, 130, 2);
+
+  // Row 4 (y: 158..200): Active Inactivity Seconds -> Ambient
+  tft.fillRoundRect(6, 158, 308, 42, 5, 0x18E3);
+  tft.drawRoundRect(6, 158, 308, 42, 5, TFT_ORANGE);
+  tft.setTextColor(TFT_ORANGE, 0x18E3);
+  tft.drawString("ACTIVE INACTIVITY -> AMBIENT (SEC):", 12, 162, 1);
+  char idleBuf[48];
+  if (gActiveIdleSec > 0) {
+    snprintf(idleBuf, sizeof(idleBuf), "%d s idle on Home -> Ambient", gActiveIdleSec);
+  } else {
+    snprintf(idleBuf, sizeof(idleBuf), "0 s (Auto-Ambient disabled)");
+  }
+  tft.setTextColor(TFT_WHITE, 0x18E3);
+  tft.drawString(idleBuf, 12, 176, 2);
+
+  // Row 5 (y: 205..236): Action button to immediately activate chosen mode
+  tft.fillRoundRect(6, 205, 308, 31, 5, 0x1A26);
+  tft.drawRoundRect(6, 205, 308, 31, 5, TFT_GREEN);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, 0x1A26);
+  if (gActivityMode == LAKATOS_MODE_AMBIENT) {
+    tft.drawString("START AMBIENT MODE NOW", 160, 220, 2);
+  } else if (gActivityMode == LAKATOS_MODE_DEMO) {
+    tft.drawString("START DEMO MODE NOW", 160, 220, 2);
+  } else {
+    tft.drawString("RETURN TO ACTIVE HOME", 160, 220, 2);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+void runLakatosModeScreen() {
+  lakatosSetInConfigScreen(true);
+  drawModeScreen();
+  lakatosWaitTouchRelease();
+
+  bool wasDown = false;
+  uint32_t lastRel = millis();
+
+  while (true) {
+    updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      lakatosSetInConfigScreen(false);
+      return;
+    }
+
+    LakatosTouchSample t = lakatosReadTouch();
+    uint32_t now = millis();
+    if (t.touched) {
+      if (!wasDown && (now - lastRel > 100)) {
+        wasDown = true;
+        int cs = lakatosGetCornerSize();
+        if (t.x < cs && t.y < cs) {
+          lakatosSetInConfigScreen(false);
+          return;
+        } else if (t.y >= 28 && t.y <= 62) {
+          if (t.x >= 6 && t.x <= 106) {
+            lakatosSetActivityMode(LAKATOS_MODE_AMBIENT);
+          } else if (t.x >= 110 && t.x <= 210) {
+            lakatosSetActivityMode(LAKATOS_MODE_DEMO);
+          } else if (t.x >= 214 && t.x <= 314) {
+            lakatosSetActivityMode(LAKATOS_MODE_ACTIVE);
+          }
+          drawModeScreen();
+        } else if (t.y >= 66 && t.y <= 108) {
+          if (t.x < 198) {
+            char buf[sizeof(gAmbientApp)];
+            strncpy(buf, gAmbientApp, sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
+            if (lakatosPromptKeyboard("AMBIENT APP NAME", buf, sizeof(buf), false) == 1) {
+              lakatosSetAmbientApp(buf);
+            }
+          } else {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", gAmbientSec);
+            if (lakatosPromptKeyboard("AMBIENT SEC / IMAGE", buf, sizeof(buf), false) == 1) {
+              int v = atoi(buf);
+              if (v > 0) lakatosSetAmbientSec(v);
+            }
+          }
+          drawModeScreen();
+        } else if (t.y >= 112 && t.y <= 154) {
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d", gDemoSec);
+          if (lakatosPromptKeyboard("DEMO SECONDS PER RUN", buf, sizeof(buf), false) == 1) {
+            int v = atoi(buf);
+            if (v > 0) lakatosSetDemoSec(v);
+          }
+          drawModeScreen();
+        } else if (t.y >= 158 && t.y <= 200) {
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d", gActiveIdleSec);
+          if (lakatosPromptKeyboard("IDLE SEC TO AMBIENT (0=OFF)", buf, sizeof(buf), false) == 1) {
+            int v = atoi(buf);
+            if (v >= 0) lakatosSetActiveIdleSec(v);
+          }
+          drawModeScreen();
+        } else if (t.y >= 204 && t.y <= 238 && t.x >= 6 && t.x <= 314) {
+          lakatosSetInConfigScreen(false);
+          return;
         }
       }
     } else {
