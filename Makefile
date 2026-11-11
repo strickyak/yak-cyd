@@ -65,16 +65,23 @@ apps: lakat
 	$(PYTHON) tools/build_lapp.py
 
 lakatos: apps
+	$(PYTHON) tools/gen_version.py
+	$(PIO) run -e updater
 	$(PIO) run -e lakatos -t upload
+	$(PYTHON) tools/pack_krn.py
 
 build-lakatos: apps
+	$(PYTHON) tools/gen_version.py
+	$(PIO) run -e updater
 	$(PIO) run -e lakatos
+	$(PYTHON) tools/pack_krn.py
 
 web-installer: build-lakatos
 	rm -rf build/web-installer
 	mkdir -p build/web-installer build/web-installer/apps build/web-installer/fs_root/apps
 	cp web-installer/index.html web-installer/manifest.json web-installer/manifest-os-only.json build/web-installer/
 	cp .pio/build/lakatos/bootloader.bin .pio/build/lakatos/partitions.bin .pio/build/lakatos/firmware.bin build/web-installer/
+	cp .pio/build/updater/firmware.bin build/web-installer/updater.bin
 	cp $(BOOT_APP0) build/web-installer/boot_app0.bin
 	cp build/apps/*.lapp build/apps/native.bin build/web-installer/apps/
 	cp build/apps/*.lapp build/apps/native.bin build/web-installer/fs_root/apps/

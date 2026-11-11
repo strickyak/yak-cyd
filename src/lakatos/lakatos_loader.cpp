@@ -907,14 +907,15 @@ static const LakatosApi gLakatosApi = {
 
 // ---------------------------------------------------------------------------
 // Hardware Flash MMU Mapper (IRAM-resident)
-// Maps physical flash pages of app_slot (0x180000+) simultaneously into:
+// Maps physical flash pages of app_slot (0x1A0000+) simultaneously into:
 //   - DROM: 0x3F700000 (read-only data & header)
 //   - IROM: 0x40300000 (executable instructions)
 // ---------------------------------------------------------------------------
 static void IRAM_ATTR mapAppFlashMmu(uint32_t flashOffset, uint32_t mapBytes) {
+  uint32_t maxPages = LAKATOS_APP_FLASH_MAX_SIZE >> 16;
   uint32_t numPages = (mapBytes + 0xFFFFu) >> 16;
   if (numPages == 0) numPages = 1;
-  if (numPages > 12) numPages = 12;
+  if (numPages > maxPages) numPages = maxPages;
 
   spi_flash_disable_interrupts_caches_and_other_cpu();
 

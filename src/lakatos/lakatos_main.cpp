@@ -934,15 +934,15 @@ static void drawHomeHeaderBar() {
 static void drawHomeDropdownMenu() {
   if (!gHomeMenuOpen) return;
   LakatosTftGuard tftGuard;
-  // Dropdown panel anchored below [MENU] at top-right (x: 204..318, y: 24..143)
-  tft.fillRoundRect(204, 24, 114, 119, 5, 0x10A2);
-  tft.drawRoundRect(204, 24, 114, 119, 5, TFT_CYAN);
+  // Dropdown panel anchored below NE Menu Wedge at top-right (x: 204..318, y: 24..169)
+  tft.fillRoundRect(204, 24, 114, 145, 5, 0x10A2);
+  tft.drawRoundRect(204, 24, 114, 145, 5, TFT_CYAN);
 
-  const char* items[4] = {"Config", "FileBrowser", "Storage", "About"};
-  for (int i = 0; i < 4; i++) {
-    int iy = 27 + i * 29;
-    tft.fillRoundRect(208, iy, 106, 25, 4, 0x18E3);
-    tft.drawRoundRect(208, iy, 106, 25, 4, TFT_CYAN);
+  const char* items[5] = {"Config", "FileBrowser", "Storage", "Updates", "About"};
+  for (int i = 0; i < 5; i++) {
+    int iy = 27 + i * 28;
+    tft.fillRoundRect(208, iy, 106, 24, 4, 0x18E3);
+    tft.drawRoundRect(208, iy, 106, 24, 4, TFT_CYAN);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_WHITE, 0x18E3);
     tft.drawString(items[i], 261, iy + 12, 2);
@@ -1936,9 +1936,9 @@ void loop() {
   // =========================================================================
   if (gScreenMode == SCREEN_HOME) {
     if (gHomeMenuOpen) {
-      // Check if user tapped one of the 4 dropdown items (x: 204..318, y: 26..143)
-      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 143) {
-        int itemIdx = (ty - 27) / 29;
+      // Check if user tapped one of the 5 dropdown items (x: 204..318, y: 26..169)
+      if (tx >= 204 && tx <= 318 && ty >= 26 && ty <= 169) {
+        int itemIdx = (ty - 27) / 28;
         gHomeMenuOpen = false;
         if (itemIdx == 0) {
           lakatosDevLogf("Menu: Config (%d,%d)", tx, ty);
@@ -1959,6 +1959,12 @@ void loop() {
           drawHomeScreen();
           return;
         } else if (itemIdx == 3) {
+          lakatosDevLogf("Menu: Updates (%d,%d)", tx, ty);
+          runLakatosUpdatesScreen();
+          refreshHomeApps();
+          drawHomeScreen();
+          return;
+        } else if (itemIdx == 4) {
           lakatosDevLogf("Menu: About (%d,%d)", tx, ty);
           runLakatosAboutScreen();
           refreshHomeApps();
@@ -1966,7 +1972,7 @@ void loop() {
           return;
         }
       }
-      // Tapped [MENU] or outside the dropdown -> close menu
+      // Tapped NE Menu Wedge or outside the dropdown -> close menu
       gHomeMenuOpen = false;
       drawHomeScreen();
       return;

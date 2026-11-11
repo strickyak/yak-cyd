@@ -1,8 +1,16 @@
 #include "lakatos_state.h"
+#include "lakatos_version.h"
+#include <FS.h>
+#include <LittleFS.h>
+#include <SD.h>
 #include <WiFi.h>
 #include <bootloader_random.h>
+#include <esp32/rom/crc.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_random.h>
 #include <math.h>
+#include <mbedtls/sha256.h>
 #include <string.h>
 #include <time.h>
 
@@ -396,6 +404,10 @@ bool lakatosWifiIsConnected() { return WiFi.status() == WL_CONNECTED; }
 int64_t lakatosGetUnixTime() {
   time_t now = time(nullptr);
   return (int64_t)now;
+}
+
+int64_t lakatosGetKernelVersionSec() {
+  return LAKATOS_KERNEL_VERSION_SEC;
 }
 
 bool lakatosFormatLocalTime(char* buf, size_t len, const char* fmt) {
@@ -1221,7 +1233,9 @@ void runLakatosAboutScreen() {
     };
 
     drawRow("OS / API:", "Lakatos OS v" + String(LAKATOS_API_VERSION), TFT_WHITE);
-    drawRow("Runtime:", "LCode 32-Bit VM + FPU", TFT_GREEN);
+    char kverBuf[32];
+    snprintf(kverBuf, sizeof(kverBuf), "%lld", (long long)lakatosGetKernelVersionSec());
+    drawRow("Kernel Ver:", String(kverBuf), TFT_CYAN);
     drawRow("Device ID:", String(gDeviceName) + "/" + String(gSerialNo), TFT_YELLOW);
     drawRow("Airport:", String(gAirportCode) + " (" + String(gAirportCity) + ")", TFT_CYAN);
     drawRow("Free RAM:", String(ESP.getFreeHeap() / 1024) + " KB SRAM", TFT_WHITE);
@@ -1246,6 +1260,510 @@ void runLakatosAboutScreen() {
         if (t.y <= 25 && t.x <= 62) {
           lakatosSetInConfigScreen(false);
           return;  // HOME -> back to Home screen
+        }
+      }
+    } else {
+      if (wasDown) {
+        wasDown = false;
+        lastRel = now;
+      }
+    }
+    delay(15);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Kernel Updates Screen (/net/apps/lakatos.krn check & OTA upgrade)
+// ---------------------------------------------------------------------------
+static void formatUnixSecUtc(int64_t sec, char* outBuf, size_t maxLen) {
+  if (sec <= 0) {
+    snprintf(outBuf, maxLen, "--");
+    return;
+  }
+  time_t ts = (time_t)sec;
+  struct tm tmUtc;
+  gmtime_r(&ts, &tmUtc);
+  strftime(outBuf, maxLen, "%Y-%m-%d %H:%M:%S UTC", &tmUtc);
+}
+
+static bool probeRemoteKernelHeader(LakatosKernelHeader* outHdr, String* outStatus) {
+  memset(outHdr, 0, sizeof(*outHdr));
+  if (!lakatosWifiIsConnected()) {
+    if (outStatus) *outStatus = "Wi-Fi offline";
+    return false;
+  }
+  int32_t got = lakatosFsRead("/net/apps/lakatos.krn", 0, outHdr, sizeof(*outHdr));
+  if (got != (int32_t)sizeof(*outHdr)) {
+    if (outStatus) *outStatus = "/net/apps/lakatos.krn unreachable";
+    return false;
+  }
+  if (outHdr->magic != LAKATOS_KERNEL_MAGIC || outHdr->kernel_size < 65536) {
+    if (outStatus) *outStatus = "Invalid lakatos.krn header";
+    return false;
+  }
+  int64_t localVer = lakatosGetKernelVersionSec();
+  if (outHdr->version_sec > localVer) {
+    if (outStatus) *outStatus = "NEW UPDATE AVAILABLE!";
+  } else if (outHdr->version_sec == localVer) {
+    if (outStatus) *outStatus = "Up to date (same version)";
+  } else {
+    if (outStatus) *outStatus = "Remote version is older";
+  }
+  return true;
+}
+
+static void drawUpdatesProgressBar(const char* stepMsg, int pct, uint16_t color) {
+  LakatosTftGuard tftLock;
+  tft.fillRoundRect(10, 178, 300, 54, 6, 0x1082);
+  tft.drawRoundRect(10, 178, 300, 54, 6, TFT_CYAN);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, 0x1082);
+  tft.drawString(stepMsg ? stepMsg : "", 160, 191, 1);
+
+  int bx = 22, by = 203, bw = 276, bh = 16;
+  tft.fillRoundRect(bx, by, bw, bh, 4, TFT_BLACK);
+  int clamped = constrain(pct, 0, 100);
+  int fw = (bw * clamped) / 100;
+  if (fw > 0) {
+    tft.fillRoundRect(bx, by, fw, bh, 4, color);
+  }
+  tft.drawRoundRect(bx, by, bw, bh, 4, TFT_WHITE);
+
+  char pbuf[16];
+  snprintf(pbuf, sizeof(pbuf), "%d%%", clamped);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(pbuf, 160, by + bh / 2, 1);
+}
+
+static bool ensureOta1UpdaterInstalled(LakatosVfsStream* s,
+                                       const LakatosKernelHeader& hdr,
+                                       const esp_partition_t* ota1Part,
+                                       String* outErr) {
+  if (!ota1Part) {
+    if (outErr) *outErr = "app1 (ota_1) partition missing!";
+    return false;
+  }
+  if (hdr.updater_size == 0) {
+    uint8_t magic = 0;
+    if (esp_partition_read(ota1Part, 0, &magic, 1) == ESP_OK && magic == 0xE9) {
+      return true;
+    }
+    if (outErr) *outErr = "No updater in ota_1 or lakatos.krn";
+    return false;
+  }
+  if (hdr.updater_size > ota1Part->size) {
+    if (outErr) *outErr = "Updater exceeds ota_1 size";
+    return false;
+  }
+
+  uint8_t* secBuf = (uint8_t*)malloc(4096);
+  if (!secBuf) {
+    if (outErr) *outErr = "Out of memory for updater buffer";
+    return false;
+  }
+
+  // Check if ota_1 already contains this exact updater image (by CRC32)
+  uint8_t firstByte = 0;
+  bool alreadyMatches = false;
+  if (esp_partition_read(ota1Part, 0, &firstByte, 1) == ESP_OK && firstByte == 0xE9) {
+    uint32_t crc = 0;
+    uint32_t rem = hdr.updater_size;
+    uint32_t off = 0;
+    bool readOk = true;
+    while (rem > 0) {
+      uint32_t n = (rem > 4096u) ? 4096u : rem;
+      if (esp_partition_read(ota1Part, off, secBuf, n) != ESP_OK) {
+        readOk = false;
+        break;
+      }
+      crc = crc32_le(crc, secBuf, n);
+      off += n;
+      rem -= n;
+    }
+    if (readOk && crc == hdr.updater_crc32) {
+      alreadyMatches = true;
+    }
+  }
+
+  if (alreadyMatches) {
+    free(secBuf);
+    return true;
+  }
+
+  // Stream updater_size bytes from s into ota1Part and verify CRC32
+  uint32_t crc = 0;
+  uint32_t offset = 0;
+  int lastPct = -1;
+  while (offset < hdr.updater_size) {
+    uint32_t want = hdr.updater_size - offset;
+    if (want > 4096u) want = 4096u;
+    memset(secBuf, 0xFF, 4096);
+    uint32_t got = 0;
+    while (got < want) {
+      int32_t r = lakatosFsStreamRead(s, secBuf + got, want - got);
+      if (r <= 0) {
+        free(secBuf);
+        if (outErr) *outErr = "Network drop while reading updater";
+        return false;
+      }
+      got += (uint32_t)r;
+    }
+    crc = crc32_le(crc, secBuf, want);
+    if (esp_partition_erase_range(ota1Part, offset, 4096) != ESP_OK ||
+        esp_partition_write(ota1Part, offset, secBuf, 4096) != ESP_OK) {
+      free(secBuf);
+      if (outErr) *outErr = "Flash write to ota_1 failed";
+      return false;
+    }
+    offset += want;
+    int pct = (int)((uint64_t)offset * 100ULL / hdr.updater_size);
+    if (pct - lastPct >= 5 || pct == 100) {
+      lastPct = pct;
+      drawUpdatesProgressBar("Provisioning OTA Updater (ota_1)...", pct, TFT_MAGENTA);
+    }
+  }
+  free(secBuf);
+
+  if (crc != hdr.updater_crc32) {
+    if (outErr) *outErr = "Updater CRC32 mismatch";
+    return false;
+  }
+  return true;
+}
+
+static bool performKernelOtaUpgrade(String* outErr) {
+  const esp_partition_t* app0Part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+  const esp_partition_t* ota1Part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
+  const esp_partition_t* appSlotPart = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "app_slot");
+
+  if (!app0Part || !ota1Part) {
+    if (outErr) *outErr = "OTA partition table missing ota_1";
+    return false;
+  }
+
+  drawUpdatesProgressBar("Opening /net/apps/lakatos.krn...", 0, TFT_CYAN);
+  LakatosVfsStream* s = lakatosFsOpenRead("/net/apps/lakatos.krn");
+  if (!s) {
+    if (outErr) *outErr = "Cannot open /net/apps/lakatos.krn";
+    return false;
+  }
+
+  LakatosKernelHeader hdr;
+  if (lakatosFsStreamRead(s, &hdr, sizeof(hdr)) != (int32_t)sizeof(hdr) ||
+      hdr.magic != LAKATOS_KERNEL_MAGIC ||
+      hdr.kernel_size < 65536 ||
+      hdr.kernel_size > app0Part->size) {
+    lakatosFsClose(s);
+    if (outErr) *outErr = "Invalid lakatos.krn header/size";
+    return false;
+  }
+
+  uint8_t* buf = (uint8_t*)malloc(4096);
+  if (!buf) {
+    lakatosFsClose(s);
+    if (outErr) *outErr = "Out of heap memory";
+    return false;
+  }
+
+  bool useSd = lakatosSdIsMounted();
+  File sdFile;
+  File lfsFile;
+  uint32_t slotCap = 0;
+
+  if (useSd) {
+    SD.mkdir("/apps");
+    SD.remove("/apps/lakatos.krn.stage");
+    sdFile = SD.open("/apps/lakatos.krn.stage", FILE_WRITE);
+    if (!sdFile || sdFile.write((const uint8_t*)&hdr, sizeof(hdr)) != sizeof(hdr)) {
+      if (sdFile) sdFile.close();
+      useSd = false;
+    }
+  }
+
+  if (!useSd) {
+    if (!appSlotPart) {
+      free(buf);
+      lakatosFsClose(s);
+      if (outErr) *outErr = "Neither SD nor app_slot available";
+      return false;
+    }
+    slotCap = appSlotPart->size - sizeof(LakatosKernelHeader);
+    uint32_t needLfs = (hdr.kernel_size > slotCap) ? (hdr.kernel_size - slotCap) : 0;
+    LittleFS.remove("/lakatos.krn.stage");
+    if (LittleFS.totalBytes() - LittleFS.usedBytes() < needLfs + 16384u) {
+      // Temporarily evict /flash/apps/native.bin if needed to make staging room
+      LittleFS.remove("/apps/native.bin");
+    }
+    if (needLfs > 0) {
+      lfsFile = LittleFS.open("/lakatos.krn.stage", "w");
+      if (!lfsFile) {
+        free(buf);
+        lakatosFsClose(s);
+        if (outErr) *outErr = "Cannot open /flash staging file";
+        return false;
+      }
+    }
+  }
+
+  mbedtls_sha256_context shaCtx;
+  mbedtls_sha256_init(&shaCtx);
+  mbedtls_sha256_starts(&shaCtx, 0);
+
+  uint32_t done = 0;
+  int lastPct = -1;
+  uint8_t slotSector[4096];
+  uint32_t slotWritePos = 0;
+  if (!useSd) {
+    memset(slotSector, 0xFF, sizeof(slotSector));
+    memcpy(slotSector, &hdr, sizeof(hdr));
+    slotWritePos = sizeof(hdr);
+  }
+
+  while (done < hdr.kernel_size) {
+    uint32_t want = hdr.kernel_size - done;
+    if (want > 4096u) want = 4096u;
+    int32_t r = lakatosFsStreamRead(s, buf, want);
+    if (r <= 0) {
+      mbedtls_sha256_free(&shaCtx);
+      if (sdFile) { sdFile.close(); SD.remove("/apps/lakatos.krn.stage"); }
+      if (lfsFile) { lfsFile.close(); LittleFS.remove("/lakatos.krn.stage"); }
+      free(buf);
+      lakatosFsClose(s);
+      if (outErr) *outErr = "Network drop during kernel download";
+      return false;
+    }
+
+    mbedtls_sha256_update(&shaCtx, buf, (size_t)r);
+
+    if (useSd) {
+      if (sdFile.write(buf, (size_t)r) != (size_t)r) {
+        mbedtls_sha256_free(&shaCtx);
+        sdFile.close();
+        SD.remove("/apps/lakatos.krn.stage");
+        free(buf);
+        lakatosFsClose(s);
+        if (outErr) *outErr = "SD write error during staging";
+        return false;
+      }
+    } else {
+      for (int32_t i = 0; i < r; i++) {
+        uint32_t absPos = done + (uint32_t)i;
+        if (absPos < slotCap) {
+          uint32_t inSlot = sizeof(LakatosKernelHeader) + absPos;
+          uint32_t secOff = inSlot & 4095u;
+          slotSector[secOff] = buf[i];
+          if (secOff == 4095u || absPos + 1 == slotCap || absPos + 1 == hdr.kernel_size) {
+            uint32_t secBase = inSlot & ~4095u;
+            if (esp_partition_erase_range(appSlotPart, secBase, 4096) != ESP_OK ||
+                esp_partition_write(appSlotPart, secBase, slotSector, 4096) != ESP_OK) {
+              mbedtls_sha256_free(&shaCtx);
+              if (lfsFile) { lfsFile.close(); LittleFS.remove("/lakatos.krn.stage"); }
+              free(buf);
+              lakatosFsClose(s);
+              if (outErr) *outErr = "app_slot flash write error";
+              return false;
+            }
+            memset(slotSector, 0xFF, sizeof(slotSector));
+          }
+        } else {
+          uint32_t remInBuf = (uint32_t)(r - i);
+          if (lfsFile.write(buf + i, remInBuf) != remInBuf) {
+            mbedtls_sha256_free(&shaCtx);
+            lfsFile.close();
+            LittleFS.remove("/lakatos.krn.stage");
+            esp_partition_erase_range(appSlotPart, 0, 4096);
+            free(buf);
+            lakatosFsClose(s);
+            if (outErr) *outErr = "/flash write error during staging";
+            return false;
+          }
+          break;
+        }
+      }
+    }
+
+    done += (uint32_t)r;
+    int pct = (int)((uint64_t)done * 100ULL / hdr.kernel_size);
+    if (pct - lastPct >= 2 || pct == 100) {
+      lastPct = pct;
+      drawUpdatesProgressBar("Staging /net/apps/lakatos.krn...", pct, TFT_GREEN);
+    }
+  }
+
+  if (sdFile) sdFile.close();
+  if (lfsFile) lfsFile.close();
+  free(buf);
+
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&shaCtx, digest);
+  mbedtls_sha256_free(&shaCtx);
+
+  if (memcmp(digest, hdr.kernel_sha256, 32) != 0) {
+    if (useSd) SD.remove("/apps/lakatos.krn.stage");
+    else {
+      esp_partition_erase_range(appSlotPart, 0, 4096);
+      LittleFS.remove("/lakatos.krn.stage");
+    }
+    lakatosFsClose(s);
+    if (outErr) *outErr = "SHA-256 verification failed!";
+    return false;
+  }
+
+  // Ensure ota_1 has the updater binary before switching boot partition
+  if (!ensureOta1UpdaterInstalled(s, hdr, ota1Part, outErr)) {
+    lakatosFsClose(s);
+    return false;
+  }
+  lakatosFsClose(s);
+
+  drawUpdatesProgressBar("Verified! Rebooting to OTA Updater...", 100, TFT_YELLOW);
+  if (esp_ota_set_boot_partition(ota1Part) != ESP_OK) {
+    if (outErr) *outErr = "esp_ota_set_boot_partition failed";
+    return false;
+  }
+  delay(400);
+  ESP.restart();
+  return true;
+}
+
+static void drawUpdatesScreen(bool reachable, const LakatosKernelHeader& remHdr, const String& statusMsg) {
+  const int cs = lakatosGetCornerSize();
+  const int64_t curVer = lakatosGetKernelVersionSec();
+  LakatosTftGuard tftLock;
+
+  tft.fillScreen(0x0841);
+  tft.fillRect(0, 0, LAKATOS_SCREEN_W, 24, TFT_NAVY);
+
+  // NW Corner Exit X
+  tft.fillRect(0, 0, cs, cs, TFT_BLACK);
+  tft.drawLine(0, 0, cs - 1, cs - 1, TFT_WHITE);
+  tft.drawLine(cs - 1, 0, 0, cs - 1, TFT_WHITE);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.drawString("KERNEL UPDATES", 145, 12, 2);
+
+  // [REFRESH] button on top-right
+  tft.fillRoundRect(248, 2, 68, 20, 4, 0x2945);
+  tft.drawRoundRect(248, 2, 68, 20, 4, TFT_CYAN);
+  tft.setTextColor(TFT_CYAN, 0x2945);
+  tft.drawString("REFRESH", 282, 12, 1);
+
+  // Card 1: Running Kernel Version (y: 28..96)
+  tft.fillRoundRect(6, 28, 308, 66, 6, 0x1082);
+  tft.drawRoundRect(6, 28, 308, 66, 6, 0x39E7);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, 0x1082);
+  tft.drawString("CURRENT RUNNING KERNEL:", 14, 34, 1);
+
+  char curBuf[48];
+  snprintf(curBuf, sizeof(curBuf), "%lld", (long long)curVer);
+  tft.setTextColor(TFT_WHITE, 0x1082);
+  tft.drawString(curBuf, 14, 48, 4);
+
+  char curDate[48];
+  formatUnixSecUtc(curVer, curDate, sizeof(curDate));
+  tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+  tft.drawString(curDate, 14, 78, 1);
+
+  // Card 2: Available Kernel at /net/apps/lakatos.krn (y: 100..172)
+  tft.fillRoundRect(6, 100, 308, 72, 6, 0x1082);
+  uint16_t card2Border = !reachable ? TFT_ORANGE
+                       : ((remHdr.version_sec > curVer) ? TFT_GREEN : TFT_CYAN);
+  tft.drawRoundRect(6, 100, 308, 72, 6, card2Border);
+  tft.setTextColor(TFT_MAGENTA, 0x1082);
+  tft.drawString("AVAILABLE (/net/apps/lakatos.krn):", 14, 106, 1);
+
+  if (reachable) {
+    char remBuf[48];
+    snprintf(remBuf, sizeof(remBuf), "%lld", (long long)remHdr.version_sec);
+    uint16_t verCol = (remHdr.version_sec > curVer) ? TFT_GREEN : TFT_YELLOW;
+    tft.setTextColor(verCol, 0x1082);
+    tft.drawString(remBuf, 14, 120, 4);
+
+    char remDate[64];
+    char utcStr[40];
+    formatUnixSecUtc(remHdr.version_sec, utcStr, sizeof(utcStr));
+    snprintf(remDate, sizeof(remDate), "%s (%u KB)", utcStr, (unsigned)(remHdr.kernel_size / 1024));
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString(remDate, 14, 148, 1);
+
+    tft.setTextColor((remHdr.version_sec > curVer) ? TFT_GREEN : TFT_CYAN, 0x1082);
+    tft.drawString(statusMsg, 14, 160, 1);
+  } else {
+    tft.setTextColor(TFT_ORANGE, 0x1082);
+    tft.drawString("UNREACHABLE", 14, 124, 2);
+    tft.setTextColor(TFT_LIGHTGREY, 0x1082);
+    tft.drawString(statusMsg, 14, 150, 1);
+  }
+
+  // Bottom Action Area (y: 178..232)
+  if (reachable) {
+    bool isNewer = (remHdr.version_sec > curVer);
+    uint16_t btnBg = isNewer ? 0x03E0 : 0x18E3;
+    uint16_t btnBorder = isNewer ? TFT_GREEN : TFT_CYAN;
+    tft.fillRoundRect(10, 180, 300, 50, 6, btnBg);
+    tft.drawRoundRect(10, 180, 300, 50, 6, btnBorder);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, btnBg);
+    if (isNewer) {
+      tft.drawString("UPGRADE LAKATOS KERNEL NOW", 160, 198, 2);
+    } else {
+      tft.drawString("REINSTALL / FORCE UPGRADE", 160, 198, 2);
+    }
+    tft.setTextColor(TFT_YELLOW, btnBg);
+    tft.drawString("Stages & verifies SHA-256 before flashing", 160, 217, 1);
+  } else {
+    tft.fillRoundRect(10, 180, 300, 50, 6, 0x18E3);
+    tft.drawRoundRect(10, 180, 300, 50, 6, 0x39E7);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, 0x18E3);
+    tft.drawString("Tap REFRESH to check /net/apps/lakatos.krn", 160, 205, 1);
+  }
+}
+
+void runLakatosUpdatesScreen() {
+  lakatosSetInConfigScreen(true);
+
+  LakatosKernelHeader remHdr;
+  String statusMsg = "Checking /net/apps/lakatos.krn...";
+  drawUpdatesScreen(false, remHdr, statusMsg);
+
+  bool reachable = probeRemoteKernelHeader(&remHdr, &statusMsg);
+  drawUpdatesScreen(reachable, remHdr, statusMsg);
+  lakatosWaitTouchRelease();
+
+  bool wasDown = false;
+  uint32_t lastRel = millis();
+  while (true) {
+    updateLakatosConfigBackground();
+    if (lakatosShouldExitApp()) {
+      lakatosSetInConfigScreen(false);
+      return;
+    }
+    LakatosTouchSample t = lakatosReadTouch();
+    uint32_t now = millis();
+    if (t.touched) {
+      if (!wasDown && (now - lastRel > 100)) {
+        wasDown = true;
+        int cs = lakatosGetCornerSize();
+        if (t.x < cs && t.y < cs) {
+          lakatosSetInConfigScreen(false);
+          return;
+        } else if (t.y <= 25 && t.x >= 244) {
+          statusMsg = "Checking /net/apps/lakatos.krn...";
+          drawUpdatesScreen(false, remHdr, statusMsg);
+          reachable = probeRemoteKernelHeader(&remHdr, &statusMsg);
+          drawUpdatesScreen(reachable, remHdr, statusMsg);
+        } else if (reachable && t.y >= 178 && t.y <= 234 && t.x >= 10 && t.x <= 310) {
+          String err;
+          if (!performKernelOtaUpgrade(&err)) {
+            statusMsg = err;
+            drawUpdatesScreen(reachable, remHdr, statusMsg);
+          }
         }
       }
     } else {

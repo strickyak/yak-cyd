@@ -98,6 +98,7 @@ void        lakatosDevLogf(const char* fmt, ...);
 void        lakatosPollSerialFuse();
 bool        lakatosFormatLocalTime(char* buf, size_t len, const char* fmt);
 int64_t     lakatosGetUnixTime();
+int64_t     lakatosGetKernelVersionSec();
 bool        lakatosWifiIsConnected();
 
 // Opens a modal stylus keyboard; returns 1 on Enter, 0 on Cancel/Hide, -1 on ^C
@@ -107,6 +108,7 @@ int lakatosPromptKeyboard(const char* title, char* buf, size_t maxLen,
 // Enters the interactive Settings / Calibration UI (returns when user taps HOME)
 void runLakatosConfigScreen(bool startInCalibration = false);
 void runLakatosStorageScreen();
+void runLakatosUpdatesScreen();
 void runLakatosAboutScreen();
 
 // ---------------------------------------------------------------------------

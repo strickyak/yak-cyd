@@ -18,8 +18,35 @@ extern "C" {
 #define LAKATOS_APP_HEADER_SIZE     128u         // 0x80 bytes
 #define LAKATOS_APP_FLAG_LCODE      1u           // Bit 0: LCode bytecode payload (runs in RAM, 0 flash wear)
 
-#define LAKATOS_APP_FLASH_OFFSET    0x00180000u  // Physical flash offset of app_slot
-#define LAKATOS_APP_FLASH_MAX_SIZE  0x000C0000u  // 768 KB (12 x 64 KB MMU pages)
+#define LAKATOS_APP_FLASH_OFFSET    0x00190000u  // Physical flash offset of app_slot
+#define LAKATOS_APP_FLASH_MAX_SIZE  0x00030000u  // 192 KB (3 x 64 KB MMU pages)
+#define LAKATOS_OTA1_FLASH_OFFSET   0x001C0000u  // Physical flash offset of app1 (ota_1 updater)
+#define LAKATOS_OTA1_FLASH_MAX_SIZE 0x00080000u  // 512 KB (8 x 64 KB MMU pages)
+
+#define LAKATOS_KERNEL_MAGIC        0x4E524B4Cu  // "LKRN" in little-endian
+#define LAKATOS_KERNEL_HEADER_SIZE  64u
+
+// ---------------------------------------------------------------------------
+// 64-Byte .krn Kernel Package Header (located at offset 0 of lakatos.krn)
+//   [0 .. 64)                              : LakatosKernelHeader
+//   [64 .. 64 + kernel_size)               : firmware.bin (app0 / ota_0 image)
+//   [64 + kernel_size .. + updater_size)   : updater.bin  (app1 / ota_1 image)
+// ---------------------------------------------------------------------------
+typedef struct LakatosKernelHeader {
+  uint32_t magic;            // LAKATOS_KERNEL_MAGIC ("LKRN")
+  uint32_t header_version;   // 1
+  int64_t  version_sec;      // 8-byte Unix seconds build timestamp (2036/2038-safe)
+  uint32_t kernel_size;      // Size of firmware.bin payload in bytes
+  uint32_t updater_size;     // Size of appended updater.bin payload in bytes (0 if none)
+  uint8_t  kernel_sha256[32];// SHA-256 of firmware.bin payload [64 .. 64 + kernel_size)
+  uint32_t updater_crc32;    // CityHash32 / CRC of updater.bin payload
+  uint32_t flags;            // Reserved flags (0)
+} LakatosKernelHeader;
+
+#ifdef __cplusplus
+static_assert(sizeof(LakatosKernelHeader) == LAKATOS_KERNEL_HEADER_SIZE,
+              "LakatosKernelHeader must be exactly 64 bytes");
+#endif
 
 #define LAKATOS_APP_IROM_BASE       0x40300000u  // Virtual instruction address base (.text)
 #define LAKATOS_APP_DROM_BASE       0x3F700000u  // Virtual read-only data address base (.rodata)
