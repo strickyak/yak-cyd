@@ -1335,6 +1335,70 @@ func main() {
 	}
 }
 
+func TestCalcAppEqualsAndRpnModes(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/calc/calc.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(calc.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("calc", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	tmpDir := t.TempDir()
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.VfsRoot = tmpDir
+	vm.MaxInstructions = 4000000
+
+	btnTap := func(row, col int) TouchEvent {
+		return TouchEvent{
+			Touched: true,
+			X:       4 + col*63 + 29,
+			Y:       88 + row*30 + 13,
+		}
+	}
+
+	// Default mode is EQUALS:
+	// 1. Tap FN (0,0) -> SIN (0,1) -> 3 (3,3) -> 0 (4,1) -> = (4,3) => sin(30 deg) = 0.5
+	// 2. Open NE Menu Wedge (315, 4) -> select "Style: RPN" (item 0 at x=250, y=38)
+	// 3. In RPN mode: tap 3 (3,3) -> ENTER (4,3) -> 4 (2,1) -> + (4,4) => 7
+	// 4. Tap FN (0,0) -> EXP (2,0) -> FN (0,0) -> LN (1,0) => 7
+	vm.TouchQueue = append(vm.TouchQueue,
+		btnTap(0, 0), // FN prefix
+		btnTap(0, 1), // SIN
+		btnTap(3, 3), // 3
+		btnTap(4, 1), // 0
+		btnTap(4, 3), // =
+		TouchEvent{Touched: true, X: 315, Y: 4},  // NE Menu Wedge
+		TouchEvent{Touched: true, X: 250, Y: 38}, // Style: RPN
+		btnTap(3, 3), // 3
+		btnTap(4, 3), // ENTER
+		btnTap(2, 1), // 4
+		btnTap(4, 4), // +
+		btnTap(0, 0), // FN prefix
+		btnTap(2, 0), // EXP (e^7)
+		btnTap(0, 0), // FN prefix
+		btnTap(1, 0), // LN (ln(e^7) = 7)
+		TouchEvent{Touched: true, X: 2, Y: 2}, // NW Exit Wedge
+	)
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+
+	cfgBytes, err := os.ReadFile(filepath.Join(tmpDir, "flash", "etc", "calc.cfg"))
+	if err != nil {
+		t.Fatalf("expected /flash/etc/calc.cfg to be persisted: %v", err)
+	}
+	if string(cfgBytes) != "RD\n" {
+		t.Fatalf("expected calc.cfg to be %q (RPN + DEG), got %q", "RD\n", string(cfgBytes))
+	}
+}
+
+
 
 
 

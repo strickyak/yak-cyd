@@ -1,0 +1,1371 @@
+// calc: Scientific Calculator for Lakatos OS (320x240)
+// Supports:
+//   - Persistent RPN vs EQUALS mode (and DEG vs RAD angle mode) in /flash/etc/calc.cfg
+//   - Prefix [FN] button for scientific functions:
+//     SIN, COS, TAN, ASIN, ACOS, ATAN, LN, EXP, LOG, 10^x, SQRT, x^2, y^x, 1/x, PI, e, ABS
+//   - Float32 precision with 4-level RPN stack (X, Y, Z, T) and algebraic EQUALS evaluator.
+package main
+
+import "wedge"
+
+const (
+	MODE_EQUALS = 0
+	MODE_RPN    = 1
+
+	ANGLE_DEG = 0
+	ANGLE_RAD = 1
+
+	BINOP_NONE = 0
+	BINOP_ADD  = 1
+	BINOP_SUB  = 2
+	BINOP_MUL  = 3
+	BINOP_DIV  = 4
+	BINOP_POW  = 5
+
+	UFN_NONE  = 0
+	UFN_SIN   = 1
+	UFN_COS   = 2
+	UFN_TAN   = 3
+	UFN_ASIN  = 4
+	UFN_ACOS  = 5
+	UFN_ATAN  = 6
+	UFN_LN    = 7
+	UFN_EXP   = 8
+	UFN_LOG   = 9
+	UFN_POW10 = 10
+	UFN_SQRT  = 11
+	UFN_SQ    = 12
+	UFN_INV   = 13
+	UFN_ABS   = 14
+
+	GRID_X0   = 4
+	GRID_Y0   = 88
+	CELL_W    = 59
+	CELL_H    = 27
+	STEP_X    = 63
+	STEP_Y    = 30
+	GRID_COLS = 5
+	GRID_ROWS = 5
+)
+
+var (
+	calcMode  int = MODE_RPN // Default RPN or EQUALS, persisted in /flash/etc/calc.cfg
+	angleMode int = ANGLE_DEG
+	fnPrefix  int = 0
+
+	// 4-Level RPN Stack: stackX (bottom/display), stackY, stackZ, stackT
+	stackX float32 = 0.0
+	stackY float32 = 0.0
+	stackZ float32 = 0.0
+	stackT float32 = 0.0
+
+	// Memory Register
+	memReg float32 = 0.0
+
+	// EQUALS (Algebraic) Mode State
+	eqAcc          float32 = 0.0
+	eqLastRhs      float32 = 0.0
+	eqPendingOp    int     = BINOP_NONE
+	eqRepeatOp     int     = BINOP_NONE
+	eqPendingUnary int     = UFN_NONE
+	eqHasAcc       int     = 0
+
+	// Digit Entry Buffer
+	entryBuf      [24]byte
+	entryLen      int = 0
+	entryHasDot   int = 0
+	entryNegative int = 0
+	entering      int = 0
+	suppressLift  int = 0
+	errorState    int = 0
+
+	cfgBuf  [16]byte
+	lineBuf [48]byte
+)
+
+// ============================================================================
+// Persistent Config (/flash/etc/calc.cfg)
+// Byte 0: 'R' (RPN) or 'E' (EQUALS)
+// Byte 1: 'D' (DEG) or 'R' (RAD)
+// ============================================================================
+func loadCalcConfig() {
+	calcMode = MODE_EQUALS
+	angleMode = ANGLE_DEG
+	n := fs_read("/flash/etc/calc.cfg", 0, &cfgBuf[0], 15)
+	if n >= 1 {
+		if cfgBuf[0] == 'R' || cfgBuf[0] == '1' {
+			calcMode = MODE_RPN
+		} else if cfgBuf[0] == 'E' || cfgBuf[0] == '0' {
+			calcMode = MODE_EQUALS
+		}
+	}
+	if n >= 2 {
+		if cfgBuf[1] == 'R' {
+			angleMode = ANGLE_RAD
+		} else if cfgBuf[1] == 'D' {
+			angleMode = ANGLE_DEG
+		}
+	}
+}
+
+func saveCalcConfig() {
+	fs_mkdir("/flash/etc", 1)
+	if calcMode == MODE_RPN {
+		cfgBuf[0] = 'R'
+	} else {
+		cfgBuf[0] = 'E'
+	}
+	if angleMode == ANGLE_RAD {
+		cfgBuf[1] = 'R'
+	} else {
+		cfgBuf[1] = 'D'
+	}
+	cfgBuf[2] = '\n'
+	fs_write("/flash/etc/calc.cfg", &cfgBuf[0], 3)
+}
+
+// ============================================================================
+// Float32 Scientific Math Helpers
+// ============================================================================
+func isNanOrInf(x float32) bool {
+	bits := float32_bits(x)
+	exp := (bits >> 23) & 0xFF
+	return exp == 0xFF
+}
+
+func mathLn(x float32) float32 {
+	if x <= 0.0 {
+		errorState = 1
+		return 0.0
+	}
+	bits := float32_bits(x)
+	exp := ((bits >> 23) & 0xFF) - 127
+	mantBits := (bits & 0x007FFFFF) | 0x3F800000
+	m := float32_from_bits(mantBits)
+	if m > 1.41421356 {
+		m = m * 0.5
+		exp = exp + 1
+	}
+	t := (m - 1.0) / (m + 1.0)
+	t2 := t * t
+	poly := 1.0 + t2*(0.33333334+t2*(0.2+t2*(0.14285715+t2*0.11111111)))
+	lnM := 2.0 * t * poly
+	return lnM + float32(exp)*0.69314718
+}
+
+func mathExp(x float32) float32 {
+	if x > 88.0 {
+		errorState = 1
+		return 0.0
+	}
+	if x < -88.0 {
+		return 0.0
+	}
+	kFloat := floor(x*1.44269504 + 0.5)
+	k := int(kFloat)
+	r := x - kFloat*0.69314718
+	p := 1.0 + r*(1.0+r*(0.5+r*(0.16666667+r*(0.041666668+r*(0.008333334+r*0.0013888889)))))
+	if k < -126 {
+		return 0.0
+	}
+	if k > 127 {
+		errorState = 1
+		return 0.0
+	}
+	scaleBits := (k + 127) << 23
+	scale := float32_from_bits(scaleBits)
+	return p * scale
+}
+
+func mathPow(base float32, expVal float32) float32 {
+	if expVal == 0.0 {
+		return 1.0
+	}
+	if base == 0.0 {
+		if expVal < 0.0 {
+			errorState = 1
+		}
+		return 0.0
+	}
+	if base > 0.0 {
+		return mathExp(expVal * mathLn(base))
+	}
+	// Negative base: only valid for integer exponents
+	fl := floor(expVal)
+	if fl != expVal {
+		errorState = 1
+		return 0.0
+	}
+	mag := mathExp(expVal * mathLn(-base))
+	n := int(fl)
+	if (n & 1) != 0 {
+		return -mag
+	}
+	return mag
+}
+
+func toRadians(v float32) float32 {
+	if angleMode == ANGLE_DEG {
+		return v * 0.0174532925
+	}
+	return v
+}
+
+func fromRadians(rad float32) float32 {
+	if angleMode == ANGLE_DEG {
+		return rad * 57.2957795
+	}
+	return rad
+}
+
+func evalUnaryFn(fnId int, x float32) float32 {
+	if fnId == UFN_SIN {
+		return sin(toRadians(x))
+	}
+	if fnId == UFN_COS {
+		return cos(toRadians(x))
+	}
+	if fnId == UFN_TAN {
+		rad := toRadians(x)
+		c := cos(rad)
+		if fabs(c) < 0.0000001 {
+			errorState = 1
+			return 0.0
+		}
+		return sin(rad) / c
+	}
+	if fnId == UFN_ASIN {
+		if x < -1.0 || x > 1.0 {
+			errorState = 1
+			return 0.0
+		}
+		rem := 1.0 - x*x
+		if rem < 0.0 {
+			rem = 0.0
+		}
+		return fromRadians(atan2(x, sqrt(rem)))
+	}
+	if fnId == UFN_ACOS {
+		if x < -1.0 || x > 1.0 {
+			errorState = 1
+			return 0.0
+		}
+		rem := 1.0 - x*x
+		if rem < 0.0 {
+			rem = 0.0
+		}
+		return fromRadians(atan2(sqrt(rem), x))
+	}
+	if fnId == UFN_ATAN {
+		return fromRadians(atan2(x, 1.0))
+	}
+	if fnId == UFN_LN {
+		return mathLn(x)
+	}
+	if fnId == UFN_EXP {
+		return mathExp(x)
+	}
+	if fnId == UFN_LOG {
+		return mathLn(x) * 0.4342944819
+	}
+	if fnId == UFN_POW10 {
+		return mathExp(x * 2.302585093)
+	}
+	if fnId == UFN_SQRT {
+		if x < 0.0 {
+			errorState = 1
+			return 0.0
+		}
+		return sqrt(x)
+	}
+	if fnId == UFN_SQ {
+		return x * x
+	}
+	if fnId == UFN_INV {
+		if x == 0.0 {
+			errorState = 1
+			return 0.0
+		}
+		return 1.0 / x
+	}
+	if fnId == UFN_ABS {
+		return fabs(x)
+	}
+	return x
+}
+
+func evalBinaryOp(op int, a float32, b float32) float32 {
+	if op == BINOP_ADD {
+		return a + b
+	}
+	if op == BINOP_SUB {
+		return a - b
+	}
+	if op == BINOP_MUL {
+		return a * b
+	}
+	if op == BINOP_DIV {
+		if b == 0.0 {
+			errorState = 1
+			return 0.0
+		}
+		return a / b
+	}
+	if op == BINOP_POW {
+		return mathPow(a, b)
+	}
+	return b
+}
+
+// ============================================================================
+// Entry Buffer Parsing & Stack Manipulation
+// ============================================================================
+func resetEntryBuf() {
+	entryLen = 0
+	entryHasDot = 0
+	entryNegative = 0
+	entering = 0
+}
+
+func parseEntryValue() float32 {
+	if entryLen == 0 {
+		return 0.0
+	}
+	var intPart float32 = 0.0
+	var fracPart float32 = 0.0
+	var fracScale float32 = 1.0
+	inFrac := 0
+	for i := 0; i < entryLen; i++ {
+		ch := entryBuf[i]
+		if ch == '.' {
+			inFrac = 1
+		} else if ch >= '0' && ch <= '9' {
+			d := float32(int(ch) - '0')
+			if inFrac == 0 {
+				intPart = intPart*10.0 + d
+			} else {
+				fracScale = fracScale * 10.0
+				fracPart = fracPart + d/fracScale
+			}
+		}
+	}
+	val := intPart + fracPart
+	if entryNegative != 0 {
+		val = -val
+	}
+	return val
+}
+
+func rpnLiftStack() {
+	stackT = stackZ
+	stackZ = stackY
+	stackY = stackX
+}
+
+func rpnDropStack() {
+	stackY = stackZ
+	stackZ = stackT
+}
+
+func commitEntryIfActive() {
+	if entering != 0 {
+		stackX = parseEntryValue()
+		resetEntryBuf()
+	}
+}
+
+func startDigitEntryIfNeeded() {
+	if errorState != 0 {
+		errorState = 0
+		stackX = 0.0
+		resetEntryBuf()
+	}
+	if entering == 0 {
+		if calcMode == MODE_RPN {
+			if suppressLift == 0 {
+				rpnLiftStack()
+			}
+		} else {
+			if eqPendingOp == BINOP_NONE && eqPendingUnary == UFN_NONE {
+				eqHasAcc = 0
+			}
+		}
+		suppressLift = 0
+		entryLen = 0
+		entryHasDot = 0
+		entryNegative = 0
+		entering = 1
+	}
+}
+
+func pressDigit(d int) {
+	startDigitEntryIfNeeded()
+	if entryLen >= 14 {
+		return
+	}
+	if entryLen == 1 && entryBuf[0] == '0' && d == 0 {
+		return
+	}
+	if entryLen == 1 && entryBuf[0] == '0' && d != 0 {
+		entryBuf[0] = byte('0' + d)
+		stackX = parseEntryValue()
+		return
+	}
+	entryBuf[entryLen] = byte('0' + d)
+	entryLen++
+	stackX = parseEntryValue()
+}
+
+func pressDecimalDot() {
+	startDigitEntryIfNeeded()
+	if entryHasDot != 0 || entryLen >= 13 {
+		return
+	}
+	if entryLen == 0 {
+		entryBuf[0] = '0'
+		entryLen = 1
+	}
+	entryBuf[entryLen] = '.'
+	entryLen++
+	entryHasDot = 1
+	stackX = parseEntryValue()
+}
+
+func pressBackspace() {
+	if errorState != 0 {
+		errorState = 0
+		resetEntryBuf()
+		stackX = 0.0
+		return
+	}
+	if entering != 0 {
+		if entryLen > 0 {
+			last := entryBuf[entryLen-1]
+			if last == '.' {
+				entryHasDot = 0
+			}
+			entryLen--
+		}
+		if entryLen == 0 {
+			entryNegative = 0
+			stackX = 0.0
+			entering = 0
+		} else {
+			stackX = parseEntryValue()
+		}
+	} else {
+		stackX = 0.0
+		suppressLift = 1
+	}
+}
+
+func pressToggleSign() {
+	if errorState != 0 {
+		return
+	}
+	if entering != 0 {
+		if entryNegative == 0 {
+			entryNegative = 1
+		} else {
+			entryNegative = 0
+		}
+		stackX = parseEntryValue()
+	} else {
+		stackX = -stackX
+	}
+}
+
+func clearAll() {
+	errorState = 0
+	fnPrefix = 0
+	resetEntryBuf()
+	stackX = 0.0
+	stackY = 0.0
+	stackZ = 0.0
+	stackT = 0.0
+	eqAcc = 0.0
+	eqLastRhs = 0.0
+	eqPendingOp = BINOP_NONE
+	eqRepeatOp = BINOP_NONE
+	eqPendingUnary = UFN_NONE
+	eqHasAcc = 0
+	suppressLift = 1
+}
+
+func pressClear() {
+	if errorState != 0 {
+		clearAll()
+		return
+	}
+	if entering != 0 {
+		resetEntryBuf()
+		stackX = 0.0
+		suppressLift = 1
+		return
+	}
+	clearAll()
+}
+
+func pushConstant(c float32) {
+	errorState = 0
+	if calcMode == MODE_RPN {
+		if entering != 0 {
+			commitEntryIfActive()
+			rpnLiftStack()
+		} else if suppressLift == 0 {
+			rpnLiftStack()
+		}
+		stackX = c
+		suppressLift = 0
+	} else {
+		resetEntryBuf()
+		stackX = c
+		if eqPendingUnary != UFN_NONE {
+			stackX = evalUnaryFn(eqPendingUnary, stackX)
+			eqPendingUnary = UFN_NONE
+		}
+		suppressLift = 0
+	}
+}
+
+func applyUnaryFunction(fnId int) {
+	if errorState != 0 {
+		return
+	}
+	if calcMode == MODE_RPN {
+		commitEntryIfActive()
+		stackX = evalUnaryFn(fnId, stackX)
+		if isNanOrInf(stackX) {
+			errorState = 1
+			stackX = 0.0
+		}
+		suppressLift = 0
+		return
+	}
+
+	// EQUALS Mode:
+	// If the user hasn't started typing an operand right afterCLR or after a binary operator,
+	// arm eqPendingUnary so prefix order (e.g. FN -> SIN -> 30 -> =) works naturally!
+	// If a number is already on screen (entering != 0 or a result is sitting in stackX with no binary op waiting),
+	// evaluate immediately!
+	if entering == 0 && (eqPendingOp != BINOP_NONE || (eqHasAcc == 0 && stackX == 0.0 && suppressLift != 0)) {
+		eqPendingUnary = fnId
+		return
+	}
+
+	commitEntryIfActive()
+	if eqPendingUnary != UFN_NONE {
+		stackX = evalUnaryFn(eqPendingUnary, stackX)
+		eqPendingUnary = UFN_NONE
+	}
+	stackX = evalUnaryFn(fnId, stackX)
+	if isNanOrInf(stackX) {
+		errorState = 1
+		stackX = 0.0
+	}
+	suppressLift = 0
+}
+
+func resolveEqualsPendingUnary() {
+	if eqPendingUnary != UFN_NONE {
+		stackX = evalUnaryFn(eqPendingUnary, stackX)
+		eqPendingUnary = UFN_NONE
+		if isNanOrInf(stackX) {
+			errorState = 1
+			stackX = 0.0
+		}
+	}
+}
+
+func applyBinaryOperator(op int) {
+	if errorState != 0 {
+		return
+	}
+	if calcMode == MODE_RPN {
+		commitEntryIfActive()
+		res := evalBinaryOp(op, stackY, stackX)
+		if isNanOrInf(res) {
+			errorState = 1
+			stackX = 0.0
+		} else if errorState == 0 {
+			stackX = res
+			rpnDropStack()
+		}
+		suppressLift = 0
+		return
+	}
+
+	// EQUALS Mode
+	wasEntering := entering
+	commitEntryIfActive()
+	resolveEqualsPendingUnary()
+	if errorState != 0 {
+		return
+	}
+
+	if eqPendingOp != BINOP_NONE {
+		if wasEntering != 0 {
+			res := evalBinaryOp(eqPendingOp, eqAcc, stackX)
+			if isNanOrInf(res) {
+				errorState = 1
+				stackX = 0.0
+				eqPendingOp = BINOP_NONE
+				return
+			}
+			eqAcc = res
+			stackX = res
+		}
+	} else {
+		eqAcc = stackX
+		eqHasAcc = 1
+	}
+	eqPendingOp = op
+	eqRepeatOp = BINOP_NONE
+	suppressLift = 1
+}
+
+func pressEnterOrEquals() {
+	if errorState != 0 {
+		clearAll()
+		return
+	}
+	if calcMode == MODE_RPN {
+		commitEntryIfActive()
+		rpnLiftStack()
+		suppressLift = 1
+		return
+	}
+
+	// EQUALS Mode
+	commitEntryIfActive()
+	resolveEqualsPendingUnary()
+	if errorState != 0 {
+		return
+	}
+	if eqPendingOp != BINOP_NONE {
+		eqLastRhs = stackX
+		eqRepeatOp = eqPendingOp
+		res := evalBinaryOp(eqPendingOp, eqAcc, stackX)
+		eqPendingOp = BINOP_NONE
+		if isNanOrInf(res) {
+			errorState = 1
+			stackX = 0.0
+			return
+		}
+		stackX = res
+		eqAcc = res
+		eqHasAcc = 1
+	} else if eqRepeatOp != BINOP_NONE {
+		res := evalBinaryOp(eqRepeatOp, stackX, eqLastRhs)
+		if isNanOrInf(res) {
+			errorState = 1
+			stackX = 0.0
+			return
+		}
+		stackX = res
+		eqAcc = res
+	}
+	suppressLift = 0
+}
+
+// ============================================================================
+// UI Formatting & Rendering
+// ============================================================================
+func formatEntryString() string {
+	pos := 0
+	if entryNegative != 0 {
+		lineBuf[pos] = '-'
+		pos++
+	}
+	if entryLen == 0 {
+		lineBuf[pos] = '0'
+		pos++
+	} else {
+		for i := 0; i < entryLen && pos < 44; i++ {
+			lineBuf[pos] = entryBuf[i]
+			pos++
+		}
+	}
+	lineBuf[pos] = 0
+	return make_slice(&lineBuf[0], 48, pos)
+}
+
+func unaryOpName(fnId int) string {
+	if fnId == UFN_SIN {
+		return "SIN("
+	}
+	if fnId == UFN_COS {
+		return "COS("
+	}
+	if fnId == UFN_TAN {
+		return "TAN("
+	}
+	if fnId == UFN_ASIN {
+		return "ASIN("
+	}
+	if fnId == UFN_ACOS {
+		return "ACOS("
+	}
+	if fnId == UFN_ATAN {
+		return "ATAN("
+	}
+	if fnId == UFN_LN {
+		return "LN("
+	}
+	if fnId == UFN_EXP {
+		return "EXP("
+	}
+	if fnId == UFN_LOG {
+		return "LOG("
+	}
+	if fnId == UFN_POW10 {
+		return "10^("
+	}
+	if fnId == UFN_SQRT {
+		return "SQRT("
+	}
+	if fnId == UFN_SQ {
+		return "SQ("
+	}
+	if fnId == UFN_INV {
+		return "1/("
+	}
+	if fnId == UFN_ABS {
+		return "ABS("
+	}
+	return ""
+}
+
+func binOpSymbol(op int) string {
+	if op == BINOP_ADD {
+		return " +"
+	}
+	if op == BINOP_SUB {
+		return " -"
+	}
+	if op == BINOP_MUL {
+		return " *"
+	}
+	if op == BINOP_DIV {
+		return " /"
+	}
+	if op == BINOP_POW {
+		return " ^"
+	}
+	return ""
+}
+
+func drawHeaderBar() {
+	tft_fill_rect(0, 0, 320, 22, 0x0843)
+	DrawExitWedge()
+	DrawMenuWedge()
+
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(CYAN, 0x0843)
+	tft_draw_string("CALC", 28, 11, 2)
+
+	// Mode Badge: RPN vs EQUALS
+	modeBg := 0x1A26
+	if calcMode == MODE_EQUALS {
+		modeBg = 0x2945
+	}
+	tft_fill_round_rect(82, 3, 68, 16, 3, modeBg)
+	tft_draw_round_rect(82, 3, 68, 16, 3, CYAN)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, modeBg)
+	if calcMode == MODE_RPN {
+		tft_draw_string("RPN", 116, 11, 1)
+	} else {
+		tft_draw_string("EQUALS", 116, 11, 1)
+	}
+
+	// Angle Unit Badge: DEG vs RAD
+	tft_fill_round_rect(156, 3, 42, 16, 3, 0x18E3)
+	tft_draw_round_rect(156, 3, 42, 16, 3, LIGHTGREY)
+	tft_set_text_color(YELLOW, 0x18E3)
+	if angleMode == ANGLE_DEG {
+		tft_draw_string("DEG", 177, 11, 1)
+	} else {
+		tft_draw_string("RAD", 177, 11, 1)
+	}
+
+	// Memory Indicator Badge
+	if memReg != 0.0 {
+		tft_fill_round_rect(204, 3, 28, 16, 3, PURPLE)
+		tft_set_text_color(WHITE, PURPLE)
+		tft_draw_string("M", 218, 11, 1)
+	}
+
+	// Prefix [FN] Active Indicator Badge
+	if fnPrefix != 0 {
+		tft_fill_round_rect(238, 3, 48, 16, 3, ORANGE)
+		tft_draw_round_rect(238, 3, 48, 16, 3, YELLOW)
+		tft_set_text_color(BLACK, ORANGE)
+		tft_draw_string("FN", 262, 11, 1)
+	}
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawDisplayBox() {
+	tft_fill_round_rect(4, 24, 312, 60, 5, 0x0821)
+	tft_draw_round_rect(4, 24, 312, 60, 5, CYAN)
+
+	if calcMode == MODE_RPN {
+		// Top line: Z and T stack registers
+		tft_set_text_datum(ML_DATUM)
+		tft_set_text_color(LIGHTGREY, 0x0821)
+		tft_draw_string("Z:", 10, 33, 1)
+		tft_set_text_datum(MR_DATUM)
+		tft_draw_string(float_to_str(stackZ), 152, 33, 1)
+
+		tft_set_text_datum(ML_DATUM)
+		tft_draw_string("T:", 164, 33, 1)
+		tft_set_text_datum(MR_DATUM)
+		tft_draw_string(float_to_str(stackT), 308, 33, 1)
+
+		// Middle line: Y register
+		tft_set_text_datum(ML_DATUM)
+		tft_set_text_color(CYAN, 0x0821)
+		tft_draw_string("Y:", 10, 48, 2)
+		tft_set_text_datum(MR_DATUM)
+		tft_draw_string(float_to_str(stackY), 308, 48, 2)
+
+		// Bottom line: X register (current entry or top of stack)
+		tft_set_text_datum(ML_DATUM)
+		tft_set_text_color(YELLOW, 0x0821)
+		tft_draw_string("X:", 10, 70, 2)
+	} else {
+		// EQUALS Mode: top status line shows pending expression / unary prefix
+		tft_set_text_datum(ML_DATUM)
+		tft_set_text_color(CYAN, 0x0821)
+		if eqPendingUnary != UFN_NONE {
+			tft_draw_string(unaryOpName(eqPendingUnary), 12, 36, 2)
+		}
+		if eqPendingOp != BINOP_NONE {
+			tft_set_text_datum(MR_DATUM)
+			tft_set_text_color(LIGHTGREY, 0x0821)
+			tft_draw_string(float_to_str(eqAcc), 282, 36, 2)
+			tft_set_text_color(YELLOW, 0x0821)
+			tft_draw_string(binOpSymbol(eqPendingOp), 308, 36, 2)
+		}
+	}
+
+	// Main X / Entry value on bottom right
+	tft_set_text_datum(MR_DATUM)
+	if errorState != 0 {
+		tft_set_text_color(RED, 0x0821)
+		tft_draw_string("ERROR", 308, 69, 4)
+	} else if entering != 0 {
+		tft_set_text_color(YELLOW, 0x0821)
+		s := formatEntryString()
+		if len(s) > 12 {
+			tft_draw_string(s, 308, 69, 2)
+		} else {
+			tft_draw_string(s, 308, 69, 4)
+		}
+	} else {
+		tft_set_text_color(WHITE, 0x0821)
+		s := float_to_str(stackX)
+		if len(s) > 12 {
+			tft_draw_string(s, 308, 69, 2)
+		} else {
+			tft_draw_string(s, 308, 69, 4)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+}
+
+func buttonLabel(row int, col int) string {
+	idx := row*5 + col
+	if fnPrefix != 0 {
+		if idx == 0 {
+			return "FN*"
+		}
+		if idx == 1 {
+			return "SIN"
+		}
+		if idx == 2 {
+			return "COS"
+		}
+		if idx == 3 {
+			return "TAN"
+		}
+		if idx == 4 {
+			return "<-"
+		}
+		if idx == 5 {
+			return "LN"
+		}
+		if idx == 6 {
+			return "ASIN"
+		}
+		if idx == 7 {
+			return "ACOS"
+		}
+		if idx == 8 {
+			return "ATAN"
+		}
+		if idx == 9 {
+			return "1/x"
+		}
+		if idx == 10 {
+			return "EXP"
+		}
+		if idx == 11 {
+			return "LOG"
+		}
+		if idx == 12 {
+			return "10^x"
+		}
+		if idx == 13 {
+			return "y^x"
+		}
+		if idx == 14 {
+			return "x^2"
+		}
+		if idx == 15 {
+			return "SQRT"
+		}
+		if idx == 16 {
+			return "PI"
+		}
+		if idx == 17 {
+			return "e"
+		}
+		if idx == 18 {
+			return "ABS"
+		}
+		if idx == 19 {
+			return "+/-"
+		}
+		if idx == 20 {
+			return "CLR"
+		}
+		if idx == 21 {
+			return "SWAP"
+		}
+		if idx == 22 {
+			return "DROP"
+		}
+		if idx == 23 {
+			return "STO"
+		}
+		return "RCL"
+	}
+
+	// Normal (unprefixed) keypad layout
+	if idx == 0 {
+		return "FN"
+	}
+	if idx == 1 {
+		return "y^x"
+	}
+	if idx == 2 {
+		return "SQRT"
+	}
+	if idx == 3 {
+		return "CLR"
+	}
+	if idx == 4 {
+		return "<-"
+	}
+	if idx == 5 {
+		return "SIN"
+	}
+	if idx == 6 {
+		return "7"
+	}
+	if idx == 7 {
+		return "8"
+	}
+	if idx == 8 {
+		return "9"
+	}
+	if idx == 9 {
+		return "/"
+	}
+	if idx == 10 {
+		return "COS"
+	}
+	if idx == 11 {
+		return "4"
+	}
+	if idx == 12 {
+		return "5"
+	}
+	if idx == 13 {
+		return "6"
+	}
+	if idx == 14 {
+		return "*"
+	}
+	if idx == 15 {
+		return "LN"
+	}
+	if idx == 16 {
+		return "1"
+	}
+	if idx == 17 {
+		return "2"
+	}
+	if idx == 18 {
+		return "3"
+	}
+	if idx == 19 {
+		return "-"
+	}
+	if idx == 20 {
+		return "+/-"
+	}
+	if idx == 21 {
+		return "0"
+	}
+	if idx == 22 {
+		return "."
+	}
+	if idx == 23 {
+		if calcMode == MODE_RPN {
+			return "ENTER"
+		}
+		return "="
+	}
+	return "+"
+}
+
+func buttonColors(row int, col int) (int, int, int) {
+	idx := row*5 + col
+	// Prefix button [FN]
+	if idx == 0 {
+		if fnPrefix != 0 {
+			return YELLOW, WHITE, BLACK
+		}
+		return 0xC260, YELLOW, WHITE
+	}
+	// CLR button
+	if (fnPrefix == 0 && idx == 3) || (fnPrefix != 0 && idx == 20) {
+		return MAROON, RED, WHITE
+	}
+	// Backspace button
+	if idx == 4 {
+		return 0x4908, LIGHTGREY, WHITE
+	}
+	if fnPrefix != 0 {
+		// Scientific function palette colors
+		if row == 4 {
+			return 0x2945, CYAN, YELLOW
+		}
+		return 0x194A, CYAN, WHITE
+	}
+	// ENTER / = button
+	if idx == 23 {
+		return 0x03E0, GREEN, WHITE
+	}
+	// Arithmetic operators (+, -, *, /)
+	if col == 4 && row >= 1 {
+		return 0x2945, CYAN, YELLOW
+	}
+	// Digits 0..9 and '.'
+	if col >= 1 && col <= 3 && row >= 1 && (row < 4 || col <= 2) {
+		return 0x18E3, 0x4A69, WHITE
+	}
+	// Direct scientific keys on left/top
+	return 0x10A3, CYAN, CYAN
+}
+
+func drawKeypad() {
+	tft_set_text_datum(MC_DATUM)
+	for r := 0; r < GRID_ROWS; r++ {
+		by := GRID_Y0 + r*STEP_Y
+		for c := 0; c < GRID_COLS; c++ {
+			bx := GRID_X0 + c*STEP_X
+			bg, border, fg := buttonColors(r, c)
+			tft_fill_round_rect(bx, by, CELL_W, CELL_H, 4, bg)
+			tft_draw_round_rect(bx, by, CELL_W, CELL_H, 4, border)
+			tft_set_text_color(fg, bg)
+			tft_draw_string(buttonLabel(r, c), bx+CELL_W/2, by+CELL_H/2, 2)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawCalcScreen() {
+	tft_fill_screen(BLACK)
+	drawHeaderBar()
+	drawDisplayBox()
+	drawKeypad()
+}
+
+func handleButtonPress(row int, col int) {
+	idx := row*5 + col
+	if idx == 0 {
+		if fnPrefix == 0 {
+			fnPrefix = 1
+		} else {
+			fnPrefix = 0
+		}
+		drawHeaderBar()
+		drawKeypad()
+		return
+	}
+
+	if fnPrefix != 0 {
+		fnPrefix = 0
+		if idx == 1 {
+			applyUnaryFunction(UFN_SIN)
+		} else if idx == 2 {
+			applyUnaryFunction(UFN_COS)
+		} else if idx == 3 {
+			applyUnaryFunction(UFN_TAN)
+		} else if idx == 4 {
+			pressBackspace()
+		} else if idx == 5 {
+			applyUnaryFunction(UFN_LN)
+		} else if idx == 6 {
+			applyUnaryFunction(UFN_ASIN)
+		} else if idx == 7 {
+			applyUnaryFunction(UFN_ACOS)
+		} else if idx == 8 {
+			applyUnaryFunction(UFN_ATAN)
+		} else if idx == 9 {
+			applyUnaryFunction(UFN_INV)
+		} else if idx == 10 {
+			applyUnaryFunction(UFN_EXP)
+		} else if idx == 11 {
+			applyUnaryFunction(UFN_LOG)
+		} else if idx == 12 {
+			applyUnaryFunction(UFN_POW10)
+		} else if idx == 13 {
+			applyBinaryOperator(BINOP_POW)
+		} else if idx == 14 {
+			applyUnaryFunction(UFN_SQ)
+		} else if idx == 15 {
+			applyUnaryFunction(UFN_SQRT)
+		} else if idx == 16 {
+			pushConstant(3.14159265)
+		} else if idx == 17 {
+			pushConstant(2.71828183)
+		} else if idx == 18 {
+			applyUnaryFunction(UFN_ABS)
+		} else if idx == 19 {
+			pressToggleSign()
+		} else if idx == 20 {
+			pressClear()
+		} else if idx == 21 {
+			// SWAP X <-> Y
+			commitEntryIfActive()
+			tmp := stackX
+			stackX = stackY
+			stackY = tmp
+			suppressLift = 0
+		} else if idx == 22 {
+			// DROP X
+			resetEntryBuf()
+			stackX = stackY
+			rpnDropStack()
+			suppressLift = 0
+		} else if idx == 23 {
+			// STO -> Memory
+			commitEntryIfActive()
+			memReg = stackX
+		} else if idx == 24 {
+			// RCL <- Memory
+			pushConstant(memReg)
+		}
+		drawHeaderBar()
+		drawDisplayBox()
+		drawKeypad()
+		return
+	}
+
+	// Normal (unprefixed) button actions
+	if idx == 1 {
+		applyBinaryOperator(BINOP_POW)
+	} else if idx == 2 {
+		applyUnaryFunction(UFN_SQRT)
+	} else if idx == 3 {
+		pressClear()
+	} else if idx == 4 {
+		pressBackspace()
+	} else if idx == 5 {
+		applyUnaryFunction(UFN_SIN)
+	} else if idx == 6 {
+		pressDigit(7)
+	} else if idx == 7 {
+		pressDigit(8)
+	} else if idx == 8 {
+		pressDigit(9)
+	} else if idx == 9 {
+		applyBinaryOperator(BINOP_DIV)
+	} else if idx == 10 {
+		applyUnaryFunction(UFN_COS)
+	} else if idx == 11 {
+		pressDigit(4)
+	} else if idx == 12 {
+		pressDigit(5)
+	} else if idx == 13 {
+		pressDigit(6)
+	} else if idx == 14 {
+		applyBinaryOperator(BINOP_MUL)
+	} else if idx == 15 {
+		applyUnaryFunction(UFN_LN)
+	} else if idx == 16 {
+		pressDigit(1)
+	} else if idx == 17 {
+		pressDigit(2)
+	} else if idx == 18 {
+		pressDigit(3)
+	} else if idx == 19 {
+		applyBinaryOperator(BINOP_SUB)
+	} else if idx == 20 {
+		pressToggleSign()
+	} else if idx == 21 {
+		pressDigit(0)
+	} else if idx == 22 {
+		pressDecimalDot()
+	} else if idx == 23 {
+		pressEnterOrEquals()
+	} else if idx == 24 {
+		applyBinaryOperator(BINOP_ADD)
+	}
+	drawHeaderBar()
+	drawDisplayBox()
+}
+
+// ============================================================================
+// Top-Right Dropdown Menu (RPN vs EQUALS, DEG vs RAD, Clear All)
+// ============================================================================
+func runCalcMenu() {
+	s := CornerSize()
+	menuY := s
+	if menuY < 22 {
+		menuY = 22
+	}
+	menuW := 136
+	menuX := 318 - menuW
+	menuH := 118
+
+	tft_fill_round_rect(menuX, menuY, menuW, menuH, 5, 0x10A2)
+	tft_draw_round_rect(menuX, menuY, menuW, menuH, 5, CYAN)
+
+	tft_set_text_datum(MC_DATUM)
+	for i := 0; i < 4; i++ {
+		iy := menuY + 4 + i*28
+		bg := 0x18E3
+		border := CYAN
+		if (i == 0 && calcMode == MODE_RPN) || (i == 1 && calcMode == MODE_EQUALS) {
+			bg = 0x03E0
+			border = GREEN
+		}
+		tft_fill_round_rect(menuX+4, iy, menuW-8, 24, 4, bg)
+		tft_draw_round_rect(menuX+4, iy, menuW-8, 24, 4, border)
+		tft_set_text_color(WHITE, bg)
+		if i == 0 {
+			tft_draw_string("Style: RPN", menuX+menuW/2, iy+12, 2)
+		} else if i == 1 {
+			tft_draw_string("Style: EQUALS", menuX+menuW/2, iy+12, 2)
+		} else if i == 2 {
+			if angleMode == ANGLE_DEG {
+				tft_draw_string("Angle: DEG->RAD", menuX+menuW/2, iy+12, 2)
+			} else {
+				tft_draw_string("Angle: RAD->DEG", menuX+menuW/2, iy+12, 2)
+			}
+		} else {
+			tft_draw_string("Clear All", menuX+menuW/2, iy+12, 2)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, cx, cy := os_read_click()
+		if clicked {
+			if cx >= menuX && cx <= menuX+menuW && cy >= menuY+4 && cy < menuY+menuH-2 {
+				item := (cy - (menuY + 4)) / 28
+				if item == 0 {
+					calcMode = MODE_RPN
+					eqPendingOp = BINOP_NONE
+					eqPendingUnary = UFN_NONE
+					saveCalcConfig()
+				} else if item == 1 {
+					calcMode = MODE_EQUALS
+					eqPendingOp = BINOP_NONE
+					eqPendingUnary = UFN_NONE
+					saveCalcConfig()
+				} else if item == 2 {
+					if angleMode == ANGLE_DEG {
+						angleMode = ANGLE_RAD
+					} else {
+						angleMode = ANGLE_DEG
+					}
+					saveCalcConfig()
+				} else if item == 3 {
+					clearAll()
+				}
+			}
+			drawCalcScreen()
+			return
+		}
+		os_delay_ms(20)
+	}
+}
+
+func main() {
+	loadCalcConfig()
+	clearAll()
+	drawCalcScreen()
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if IsExitWedge(tx, ty) {
+				os_exit(0)
+			} else if IsMenuWedge(tx, ty) {
+				runCalcMenu()
+			} else if ty < 22 {
+				// Quick tap on header badges: RPN/EQUALS (x: 82..150), DEG/RAD (x: 156..198), FN (x: 238..286)
+				if tx >= 82 && tx <= 150 {
+					if calcMode == MODE_RPN {
+						calcMode = MODE_EQUALS
+					} else {
+						calcMode = MODE_RPN
+					}
+					eqPendingOp = BINOP_NONE
+					eqPendingUnary = UFN_NONE
+					saveCalcConfig()
+					drawCalcScreen()
+				} else if tx >= 156 && tx <= 198 {
+					if angleMode == ANGLE_DEG {
+						angleMode = ANGLE_RAD
+					} else {
+						angleMode = ANGLE_DEG
+					}
+					saveCalcConfig()
+					drawHeaderBar()
+				}
+			} else if ty >= GRID_Y0 && tx >= GRID_X0 {
+				col := (tx - GRID_X0) / STEP_X
+				row := (ty - GRID_Y0) / STEP_Y
+				if col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS {
+					bx := GRID_X0 + col*STEP_X
+					by := GRID_Y0 + row*STEP_Y
+					if tx < bx+CELL_W && ty < by+CELL_H {
+						handleButtonPress(row, col)
+					}
+				}
+			}
+		}
+		os_delay_ms(20)
+	}
+}
