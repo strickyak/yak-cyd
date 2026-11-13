@@ -1,0 +1,199 @@
+package main
+
+// Matrix Green Rain Sub-App (green-rain.sapp)
+// Draws falling columns of glowing green glyphs with white-green leading drops
+// and fading phosphor trails directly over the existing screen image. Uses only
+// static global arrays (zero malloc/free) and returns after 3 seconds (3000 ms)
+// or on screen tap.
+
+const COLS = 40
+const ROWS = 30
+
+const COL_HEAD   = 0xDFFF // Glinting white-green leading glyph
+const COL_BRIGHT = 0x07E0 // Vivid bright green
+const COL_MID    = 0x0580 // Medium matrix green
+const COL_DARK   = 0x0340 // Darker trail green
+const COL_DIM    = 0x01A0 // Dim phosphor green tail
+const COL_BLACK  = 0x0000
+
+var grid [30][40]byte
+var headRow [40]int
+var tailLen [40]int
+var colTick [40]int
+var colStep [40]int
+
+func randomGlyph() int {
+	r := os_rand(64)
+	if r < 10 {
+		return '0' + r
+	}
+	if r < 36 {
+		return 'A' + (r - 10)
+	}
+	if r < 52 {
+		return 'a' + (r - 36)
+	}
+	// Matrix-style punctuation/math glyphs
+	if r == 52 {
+		return '$'
+	}
+	if r == 53 {
+		return '+'
+	}
+	if r == 54 {
+		return '-'
+	}
+	if r == 55 {
+		return '*'
+	}
+	if r == 56 {
+		return '='
+	}
+	if r == 57 {
+		return '<'
+	}
+	if r == 58 {
+		return '>'
+	}
+	if r == 59 {
+		return ':'
+	}
+	if r == 60 {
+		return '#'
+	}
+	if r == 61 {
+		return '%'
+	}
+	if r == 62 {
+		return '&'
+	}
+	return '?'
+}
+
+func drawCell(c int, r int, color int) {
+	if r < 0 || r >= ROWS {
+		return
+	}
+	ch := int(grid[r][c])
+	if ch == 0 {
+		ch = randomGlyph()
+		grid[r][c] = byte(ch)
+	}
+	x := c*8 + 1
+	y := r * 8
+	os_tft_draw_char(x, y, ch, color, COL_BLACK, 1)
+}
+
+func clearCell(c int, r int) {
+	if r < 0 || r >= ROWS {
+		return
+	}
+	grid[r][c] = 0
+	x := c*8 + 1
+	y := r * 8
+	os_tft_fill_rect(x, y, 6, 8, COL_BLACK)
+}
+
+func initColumns() {
+	for c := 0; c < COLS; c = c + 1 {
+		// Stagger starting heads so rain is already falling across the screen
+		headRow[c] = int(os_rand(28)) - 14
+		tailLen[c] = 8 + int(os_rand(14))
+		colStep[c] = 1 + int(os_rand(2))
+		colTick[c] = int(os_rand(colStep[c]))
+	}
+}
+
+func stepColumn(c int) {
+	colTick[c] = colTick[c] + 1
+	if colTick[c] < colStep[c] {
+		return
+	}
+	colTick[c] = 0
+
+	h := headRow[c] + 1
+	headRow[c] = h
+	tLen := tailLen[c]
+
+	// New glyph at leading head
+	if h >= 0 && h < ROWS {
+		grid[h][c] = byte(randomGlyph())
+		drawCell(c, h, COL_HEAD)
+	}
+
+	// Shade transitions along the trail behind the head
+	drawCell(c, h-1, COL_BRIGHT)
+	drawCell(c, h-3, COL_MID)
+
+	midOff := tLen / 2
+	if midOff < 4 {
+		midOff = 4
+	}
+	// Occasionally shimmer/mutate a glyph in the middle of the trail
+	if h-midOff >= 0 && h-midOff < ROWS && os_rand(3) == 0 {
+		grid[h-midOff][c] = byte(randomGlyph())
+	}
+	drawCell(c, h-midOff, COL_DARK)
+	drawCell(c, h-(tLen-2), COL_DIM)
+
+	// Erase behind the tail
+	clearCell(c, h-tLen)
+
+	// Respawn column at the top once its tail has exited the bottom of the screen
+	if h-tLen >= ROWS {
+		headRow[c] = -1 - int(os_rand(8))
+		tailLen[c] = 8 + int(os_rand(14))
+		colStep[c] = 1 + int(os_rand(2))
+	}
+}
+
+func main() {
+	initColumns()
+
+	// Pre-populate already-falling streams on the initial frame
+	for c := 0; c < COLS; c = c + 1 {
+		h := headRow[c]
+		tLen := tailLen[c]
+		if h > 0 {
+			for r := 0; r <= h && r < ROWS; r = r + 1 {
+				dist := h - r
+				if dist < tLen {
+					grid[r][c] = byte(randomGlyph())
+					col := COL_BRIGHT
+					if dist == 0 {
+						col = COL_HEAD
+					} else if dist >= tLen-2 {
+						col = COL_DIM
+					} else if dist >= tLen/2 {
+						col = COL_DARK
+					} else if dist >= 3 {
+						col = COL_MID
+					}
+					drawCell(c, r, col)
+				}
+			}
+		}
+	}
+
+	elapsed := 0
+	for elapsed < 3000 {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			os_exit(0)
+		}
+
+		for c := 0; c < COLS; c = c + 1 {
+			stepColumn(c)
+		}
+
+		os_delay_ms(40)
+		elapsed = elapsed + 40
+	}
+	os_exit(0)
+}

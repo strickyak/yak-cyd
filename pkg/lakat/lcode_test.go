@@ -1495,4 +1495,41 @@ func TestColorbarsSubApp(t *testing.T) {
 	}
 }
 
+func TestGreenRainSubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/green-rain/green-rain.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile green-rain.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("green-rain", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp green-rain.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.MaxInstructions = 8000000
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("green-rain sub-app did not exit cleanly after 3s")
+	}
+
+	// Verify that green-rain rendered glowing green glyph pixels across the screen
+	greenPixels := 0
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 320; x++ {
+			if vm.Screen[y][x] != 0x0000 {
+				greenPixels++
+			}
+		}
+	}
+	if greenPixels < 500 {
+		t.Fatalf("expected >= 500 lit Matrix rain glyph pixels on screen, got %d", greenPixels)
+	}
+}
+
+
 

@@ -68,6 +68,7 @@ apps: lakat
 	$(LAKAT) compile -req $(REQ) -title "graph" -o build/apps/graph.lapp apps/graph/graph.lgolf
 	$(LAKAT) compile -req $(REQ) -title "ambient" -o build/apps/ambient.lapp apps/ambient/ambient.lgolf
 	$(LAKAT) compile -req $(REQ) -title "Color Bars" -o build/subapps/colorbars.sapp subapps/colorbars/colorbars.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Green Rain" -o build/subapps/green-rain.sapp subapps/green-rain/green-rain.lgolf
 	$(PYTHON) tools/build_lapp.py --req $(REQ)
 
 lakatos: apps
