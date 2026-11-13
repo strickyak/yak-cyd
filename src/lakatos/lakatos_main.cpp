@@ -847,6 +847,137 @@ static void refreshHomeApps() {
   }
 }
 
+#define LAKATOS_HOME_TEXT_FLOW 1
+
+#if LAKATOS_HOME_TEXT_FLOW
+struct HomeAppWordLayout {
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+  int16_t hitX;
+  int16_t hitY;
+  int16_t hitW;
+  int16_t hitH;
+};
+
+static int simulateHomeFlowLines(uint8_t font, uint8_t textSize, int spaceW,
+                                 int xLeft, int xRight,
+                                 HomeAppWordLayout* outBoxes, int count) {
+  if (count <= 0) return 0;
+  tft.setTextSize(textSize);
+  int fontH = tft.fontHeight(font);
+  int line = 0;
+  int curX = xLeft;
+
+  for (int i = 0; i < count; i++) {
+    int w = tft.textWidth(gHomeApps[i].label, font);
+    if (w < 8) w = 8;
+    if (curX > xLeft && curX + spaceW + w > xRight) {
+      line++;
+      curX = xLeft;
+    }
+    int wx = (curX == xLeft) ? curX : (curX + spaceW);
+    if (outBoxes) {
+      outBoxes[i].x = (int16_t)wx;
+      outBoxes[i].y = (int16_t)line;  // temporarily stores line index
+      outBoxes[i].w = (int16_t)w;
+      outBoxes[i].h = (int16_t)fontH;
+    }
+    curX = wx + w;
+  }
+  tft.setTextSize(1);
+  return line + 1;
+}
+
+static void computeHomeFlowLayout(int count, uint8_t& outFont, uint8_t& outTextSize,
+                                  HomeAppWordLayout* outBoxes) {
+  const int xLeft  = 6;
+  const int xRight = 314;
+  const int yTop   = 26;
+  const int availH = 212;  // y = 26..238
+
+  struct Candidate {
+    uint8_t font;
+    uint8_t textSize;
+    int     fontH;
+    int     minGapY;
+    int     minSpaceW;
+    int     maxSpaceW;
+  };
+  const Candidate kCandidates[] = {
+      {4, 2, 52, 6, 20, 36},
+      {2, 2, 32, 4, 16, 30},
+      {4, 1, 26, 4, 12, 24},
+      {2, 1, 16, 4, 10, 24},
+      {1, 1,  8, 3,  6, 14},
+  };
+
+  uint8_t chosenFont   = 2;
+  uint8_t chosenSize   = 1;
+  int     chosenSpaceW = 12;
+  int     chosenFontH  = 16;
+
+  for (size_t c = 0; c < sizeof(kCandidates) / sizeof(kCandidates[0]); c++) {
+    const Candidate& cand = kCandidates[c];
+    int lines = simulateHomeFlowLines(cand.font, cand.textSize, cand.minSpaceW,
+                                      xLeft, xRight, nullptr, count);
+    if (lines * (cand.fontH + cand.minGapY) <= availH ||
+        c == (sizeof(kCandidates) / sizeof(kCandidates[0])) - 1) {
+      chosenFont   = cand.font;
+      chosenSize   = cand.textSize;
+      chosenSpaceW = cand.minSpaceW;
+      chosenFontH  = cand.fontH;
+
+      int targetLines = availH / (cand.fontH + cand.minGapY + 5);
+      if (targetLines < 1) targetLines = 1;
+      for (int sw = cand.minSpaceW + 2; sw <= cand.maxSpaceW; sw += 2) {
+        int testLines = simulateHomeFlowLines(cand.font, cand.textSize, sw,
+                                              xLeft, xRight, nullptr, count);
+        if (testLines * (cand.fontH + cand.minGapY) <= availH &&
+            testLines <= targetLines) {
+          chosenSpaceW = sw;
+        } else {
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  outFont     = chosenFont;
+  outTextSize = chosenSize;
+
+  int numLines = simulateHomeFlowLines(chosenFont, chosenSize, chosenSpaceW,
+                                       xLeft, xRight, outBoxes, count);
+  if (numLines <= 0 || !outBoxes) return;
+
+  int lineStep = availH;
+  int yStart   = yTop + (availH - chosenFontH) / 2;
+  if (numLines >= 2) {
+    int usableH = availH - 8;  // y = 30..234
+    lineStep = (usableH - chosenFontH) / (numLines - 1);
+    if (lineStep < chosenFontH + 2) lineStep = chosenFontH + 2;
+    int totalBlockH = (numLines - 1) * lineStep + chosenFontH;
+    yStart = yTop + (availH - totalBlockH) / 2;
+    if (yStart < yTop + 2) yStart = yTop + 2;
+  }
+
+  for (int i = 0; i < count; i++) {
+    int lineIdx = outBoxes[i].y;
+    int py = yStart + lineIdx * lineStep;
+    outBoxes[i].y = (int16_t)py;
+
+    int padX = chosenSpaceW / 2;
+    int padY = (lineStep - chosenFontH) / 2;
+    if (padY < 1) padY = 1;
+    outBoxes[i].hitX = (int16_t)(outBoxes[i].x - padX);
+    outBoxes[i].hitY = (int16_t)(py - padY);
+    outBoxes[i].hitW = (int16_t)(outBoxes[i].w + padX * 2);
+    outBoxes[i].hitH = (int16_t)(chosenFontH + padY * 2);
+  }
+}
+#else
 static void computeHomeGrid(int count, int& outCols, int& outRows,
                             int& outX0, int& outY0, int& outCellW, int& outCellH) {
   if (count <= 0) {
@@ -870,6 +1001,7 @@ static void computeHomeGrid(int count, int& outCols, int& outRows,
   outCellH = 212 / outRows;
   if (outCellH > 52) outCellH = 52;
 }
+#endif
 
 static bool gDirListError = false;
 
@@ -978,6 +1110,26 @@ static void drawHomeScreen() {
     tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     tft.drawString("No apps in /{sd,net,flash}/apps", 160, 130, 2);
   } else {
+#if LAKATOS_HOME_TEXT_FLOW
+    HomeAppWordLayout boxes[kMaxHomeApps];
+    uint8_t font = 2, textSize = 1;
+    computeHomeFlowLayout(gHomeAppCount, font, textSize, boxes);
+
+    tft.setTextSize(textSize);
+    tft.setTextDatum(TL_DATUM);
+    for (int i = 0; i < gHomeAppCount; i++) {
+      const HomeAppEntry& app = gHomeApps[i];
+      uint16_t fg = TFT_CYAN;
+      if (app.source == APP_SRC_SD) {
+        fg = TFT_GREEN;
+      } else if (app.source == APP_SRC_NET) {
+        fg = TFT_WHITE;
+      }
+      tft.setTextColor(fg, TFT_BLACK);
+      tft.drawString(app.label, boxes[i].x, boxes[i].y, font);
+    }
+    tft.setTextSize(1);
+#else
     int cols = 1, rows = 1, x0 = 4, y0 = 26, cellW = 312, cellH = 48;
     computeHomeGrid(gHomeAppCount, cols, rows, x0, y0, cellW, cellH);
 
@@ -1011,6 +1163,7 @@ static void drawHomeScreen() {
       tft.setTextColor(TFT_WHITE, bg);
       tft.drawString(app.label, bx + bw / 2, by + bh / 2, font);
     }
+#endif
   }
 
   if (gHomeMenuOpen) {
@@ -2313,8 +2466,35 @@ void loop() {
       return;
     }
 
-    // 2. App Grid Tiles (y >= 26)
+    // 2. App Grid Tiles / Text Links (y >= 26)
     if (ty >= 26 && gHomeAppCount > 0) {
+#if LAKATOS_HOME_TEXT_FLOW
+      HomeAppWordLayout boxes[kMaxHomeApps];
+      uint8_t font = 2, textSize = 1;
+      computeHomeFlowLayout(gHomeAppCount, font, textSize, boxes);
+      int matchedIdx = -1;
+      for (int i = 0; i < gHomeAppCount; i++) {
+        if (tx >= boxes[i].hitX && tx < boxes[i].hitX + boxes[i].hitW &&
+            ty >= boxes[i].hitY && ty < boxes[i].hitY + boxes[i].hitH) {
+          matchedIdx = i;
+          break;
+        }
+      }
+      if (matchedIdx >= 0) {
+        const HomeAppEntry& app = gHomeApps[matchedIdx];
+        const char* dirPrefix = "/flash/apps";
+        if (app.source == APP_SRC_SD) {
+          dirPrefix = "/sd/apps";
+        } else if (app.source == APP_SRC_NET) {
+          dirPrefix = "/net/apps";
+        }
+        char fullPath[128];
+        snprintf(fullPath, sizeof(fullPath), "%s/%s", dirPrefix, app.fileName);
+        lakatosDevLogf("Home Launch: %s (%d,%d)", fullPath, tx, ty);
+        launchAppAndRestoreShell(fullPath);
+        return;
+      }
+#else
       int cols = 1, rows = 1, x0 = 4, y0 = 26, cellW = 312, cellH = 48;
       computeHomeGrid(gHomeAppCount, cols, rows, x0, y0, cellW, cellH);
       int col = (tx - x0) / cellW;
@@ -2336,6 +2516,7 @@ void loop() {
           return;
         }
       }
+#endif
     }
     return;
   }

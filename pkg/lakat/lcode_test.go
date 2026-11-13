@@ -1398,7 +1398,64 @@ func TestCalcAppEqualsAndRpnModes(t *testing.T) {
 	}
 }
 
+func TestGraphCalculatorApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/graph/graph.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(graph.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("graph", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
 
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.MaxInstructions = 8000000
 
+	vm.KeyboardQueue = []string{
+		"2x^2 - 4*cos(x) + ln(e)",
+		"-4",
+		"4",
+		"-4",
+		"12",
+	}
+	vm.TouchQueue = []TouchEvent{
+		{Touched: true, X: 24, Y: 226},  // [f(x)] button -> enters "2x^2 - 4*cos(x) + ln(e)"
+		{Touched: true, X: 65, Y: 226},  // [+] Zoom In
+		{Touched: true, X: 102, Y: 226}, // [-] Zoom Out
+		{Touched: true, X: 138, Y: 226}, // [<] Pan Left
+		{Touched: true, X: 173, Y: 226}, // [>] Pan Right
+		{Touched: true, X: 208, Y: 226}, // [^] Pan Up
+		{Touched: true, X: 243, Y: 226}, // [v] Pan Down
+		{Touched: true, X: 290, Y: 226}, // [BOUNDS] open Corner Coordinates modal
+		{Touched: true, X: 80, Y: 78},   // X Min -> "-4"
+		{Touched: true, X: 220, Y: 78},  // X Max -> "4"
+		{Touched: true, X: 80, Y: 128},  // Y Min -> "-4"
+		{Touched: true, X: 220, Y: 128}, // Y Max -> "12"
+		{Touched: true, X: 254, Y: 181}, // [DONE] close modal & redraw graph
+		{Touched: true, X: 2, Y: 2},     // NW Exit Wedge
+	}
 
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("graph app did not exit cleanly")
+	}
+
+	// Verify that yellow curve pixels (0xFFE0) were plotted across the graph viewport
+	yellowPixels := 0
+	for y := 26; y < 208; y++ {
+		for x := 0; x < 320; x++ {
+			if vm.Screen[y][x] == 0xFFE0 {
+				yellowPixels++
+			}
+		}
+	}
+	if yellowPixels < 150 {
+		t.Fatalf("expected plotted curve to have >= 150 yellow pixels in viewport, got %d", yellowPixels)
+	}
+}
 

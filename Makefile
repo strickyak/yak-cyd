@@ -64,6 +64,7 @@ apps: lakat
 	$(LAKAT) compile -req $(REQ) -title "logo" -o build/apps/logo.lapp apps/logo/logo.lgolf
 	$(LAKAT) compile -req $(REQ) -title "chat" -o build/apps/chat.lapp apps/chat/chat.lgolf
 	$(LAKAT) compile -req $(REQ) -title "calc" -o build/apps/calc.lapp apps/calc/calc.lgolf
+	$(LAKAT) compile -req $(REQ) -title "graph" -o build/apps/graph.lapp apps/graph/graph.lgolf
 	$(PYTHON) tools/build_lapp.py --req $(REQ)
 
 lakatos: apps

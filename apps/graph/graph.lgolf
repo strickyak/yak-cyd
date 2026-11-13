@@ -1,0 +1,1360 @@
+// graph: Scientific & Polynomial Graphing Calculator for Lakatos OS (320x240)
+// Features:
+//   - Algebraic expression parser & bytecode evaluator for f(x):
+//     Supports polynomials (x^3 - 3*x, 2x^2 + 1), implicit multiplication,
+//     +, -, *, /, ^, parentheses, constants (pi, e), and scientific functions:
+//     sin, cos, tan, asin, acos, atan, ln, exp, log, sqrt, abs, floor, ceil
+//   - On-graph buttons for f(x) input, Zoom In (+), Zoom Out (-),
+//     Pan Left (<), Pan Right (>), Pan Up (^), Pan Down (v), and Corner Bounds Modal (XY)
+//   - Modal dialog to enter exact corner coordinates (X Min, X Max, Y Min, Y Max)
+package main
+
+import "wedge"
+
+const (
+	PLOT_X0 = 0
+	PLOT_Y0 = 24
+	PLOT_W  = 320
+	PLOT_H  = 186
+
+	BAR_Y0 = 212
+	BAR_H  = 28
+
+	// Compiled RPN Opcodes for fast f(x) evaluation across 320 columns
+	ROP_NUM   = 1
+	ROP_X     = 2
+	ROP_ADD   = 3
+	ROP_SUB   = 4
+	ROP_MUL   = 5
+	ROP_DIV   = 6
+	ROP_POW   = 7
+	ROP_NEG   = 8
+	ROP_SIN   = 10
+	ROP_COS   = 11
+	ROP_TAN   = 12
+	ROP_ASIN  = 13
+	ROP_ACOS  = 14
+	ROP_ATAN  = 15
+	ROP_LN    = 16
+	ROP_EXP   = 17
+	ROP_LOG   = 18
+	ROP_SQRT  = 19
+	ROP_ABS   = 20
+	ROP_FLOOR = 21
+	ROP_CEIL  = 22
+
+	TOK_EOF   = 0
+	TOK_NUM   = 1
+	TOK_X     = 2
+	TOK_OP    = 3
+	TOK_LP    = 4
+	TOK_RP    = 5
+	TOK_FN    = 6
+)
+
+var (
+	exprBuf [64]byte
+	kbBuf   [64]byte
+	lineBuf [64]byte
+
+	// Compiled RPN program for f(x)
+	rpnOp    [64]int
+	rpnVal   [64]float32
+	rpnCount int = 0
+	parseErr int = 0
+
+	// Lexer state during compileExpr()
+	lexPos   int     = 0
+	curKind  int     = 0
+	curOp    int     = 0
+	curFn    int     = 0
+	curNum   float32 = 0.0
+
+	// Evaluation stack
+	evalStk  [32]float32
+	evalErr  int = 0
+
+	// Viewport corner coordinates
+	xMin float32 = -5.0
+	xMax float32 = 5.0
+	yMin float32 = -5.0
+	yMax float32 = 5.0
+
+	// Optional trace cursor on graph
+	traceActive int     = 0
+	traceX      float32 = 0.0
+	traceY      float32 = 0.0
+	traceValid  int     = 0
+)
+
+// ============================================================================
+// Float32 Scientific Math Helpers
+// ============================================================================
+func isNanOrInf(x float32) bool {
+	bits := float32_bits(x)
+	exp := (bits >> 23) & 0xFF
+	return exp == 0xFF
+}
+
+func mathLn(x float32) float32 {
+	if x <= 0.0 {
+		evalErr = 1
+		return 0.0
+	}
+	bits := float32_bits(x)
+	exp := ((bits >> 23) & 0xFF) - 127
+	mantBits := (bits & 0x007FFFFF) | 0x3F800000
+	m := float32_from_bits(mantBits)
+	if m > 1.41421356 {
+		m = m * 0.5
+		exp = exp + 1
+	}
+	t := (m - 1.0) / (m + 1.0)
+	t2 := t * t
+	poly := 1.0 + t2*(0.33333334+t2*(0.2+t2*(0.14285715+t2*0.11111111)))
+	lnM := 2.0 * t * poly
+	return lnM + float32(exp)*0.69314718
+}
+
+func mathExp(x float32) float32 {
+	if x > 88.0 {
+		evalErr = 1
+		return 0.0
+	}
+	if x < -88.0 {
+		return 0.0
+	}
+	kFloat := floor(x*1.44269504 + 0.5)
+	k := int(kFloat)
+	r := x - kFloat*0.69314718
+	p := 1.0 + r*(1.0+r*(0.5+r*(0.16666667+r*(0.041666668+r*(0.008333334+r*0.0013888889)))))
+	if k < -126 {
+		return 0.0
+	}
+	if k > 127 {
+		evalErr = 1
+		return 0.0
+	}
+	scaleBits := (k + 127) << 23
+	scale := float32_from_bits(scaleBits)
+	return p * scale
+}
+
+func mathPow(base float32, expVal float32) float32 {
+	if expVal == 0.0 {
+		return 1.0
+	}
+	if expVal == 1.0 {
+		return base
+	}
+	if expVal == 2.0 {
+		return base * base
+	}
+	if expVal == 3.0 {
+		return base * base * base
+	}
+	if expVal == 4.0 {
+		b2 := base * base
+		return b2 * b2
+	}
+	if base == 0.0 {
+		if expVal < 0.0 {
+			evalErr = 1
+		}
+		return 0.0
+	}
+	if base > 0.0 {
+		return mathExp(expVal * mathLn(base))
+	}
+	fl := floor(expVal)
+	if fl != expVal {
+		evalErr = 1
+		return 0.0
+	}
+	mag := mathExp(expVal * mathLn(-base))
+	n := int(fl)
+	if (n & 1) != 0 {
+		return -mag
+	}
+	return mag
+}
+
+// ============================================================================
+// String & Number Parsing Helpers
+// ============================================================================
+func toLowerByte(c int) int {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}
+
+func isAlpha(c int) bool {
+	ch := toLowerByte(c)
+	return ch >= 'a' && ch <= 'z'
+}
+
+func isDigit(c int) bool {
+	return c >= '0' && c <= '9'
+}
+
+func setCStrLiteral(dst *byte, s string, maxLen int) {
+	n := len(s)
+	if n >= maxLen {
+		n = maxLen - 1
+	}
+	if n > 0 {
+		memcpy(int(dst), int(cstr(s)), n)
+	}
+	poke1(int(dst)+n, 0)
+}
+
+func cstrSlice(buf *byte, maxLen int) string {
+	ln := 0
+	for ln < maxLen-1 {
+		if peek1(int(buf)+ln) == 0 {
+			break
+		}
+		ln++
+	}
+	return make_slice(buf, maxLen, ln)
+}
+
+func copyFloatToCStr(val float32, dst *byte, maxLen int) {
+	s := float_to_str(val)
+	setCStrLiteral(dst, s, maxLen)
+}
+
+func parseFloatFromCStr(buf *byte) (bool, float32) {
+	pos := 0
+	for peek1(int(buf)+pos) == ' ' {
+		pos++
+	}
+	ch := peek1(int(buf) + pos)
+	if ch == 0 {
+		return false, 0.0
+	}
+	neg := 0
+	if ch == '-' {
+		neg = 1
+		pos++
+	} else if ch == '+' {
+		pos++
+	}
+	var intPart float32 = 0.0
+	var fracPart float32 = 0.0
+	var fracScale float32 = 1.0
+	inFrac := 0
+	digits := 0
+	for {
+		c := peek1(int(buf) + pos)
+		if c == '.' && inFrac == 0 {
+			inFrac = 1
+			pos++
+		} else if c >= '0' && c <= '9' {
+			d := float32(c - '0')
+			if inFrac == 0 {
+				intPart = intPart*10.0 + d
+			} else {
+				fracScale = fracScale * 10.0
+				fracPart = fracPart + d/fracScale
+			}
+			digits++
+			pos++
+		} else {
+			break
+		}
+	}
+	if digits == 0 {
+		return false, 0.0
+	}
+	res := intPart + fracPart
+	if neg != 0 {
+		res = -res
+	}
+	return true, res
+}
+
+// ============================================================================
+// Recursive-Descent Expression Compiler (supports implicit multiplication)
+// ============================================================================
+func emitRpn(op int, val float32) {
+	if rpnCount < 64 {
+		rpnOp[rpnCount] = op
+		rpnVal[rpnCount] = val
+		rpnCount++
+	} else {
+		parseErr = 1
+	}
+}
+
+func matchIdent3(a int, b int, c int, t0 int, t1 int, t2 int) bool {
+	return a == t0 && b == t1 && c == t2
+}
+
+func matchIdent4(a int, b int, c int, d int, t0 int, t1 int, t2 int, t3 int) bool {
+	return a == t0 && b == t1 && c == t2 && d == t3
+}
+
+func nextToken() {
+	for {
+		c := int(exprBuf[lexPos])
+		if c == ' ' || c == '\t' {
+			lexPos++
+		} else {
+			break
+		}
+	}
+	c := int(exprBuf[lexPos])
+	if c == 0 {
+		curKind = TOK_EOF
+		return
+	}
+	if isDigit(c) || c == '.' {
+		var intPart float32 = 0.0
+		var fracPart float32 = 0.0
+		var fracScale float32 = 1.0
+		inFrac := 0
+		digits := 0
+		for {
+			ch := int(exprBuf[lexPos])
+			if ch == '.' && inFrac == 0 {
+				inFrac = 1
+				lexPos++
+			} else if isDigit(ch) {
+				d := float32(ch - '0')
+				if inFrac == 0 {
+					intPart = intPart*10.0 + d
+				} else {
+					fracScale = fracScale * 10.0
+					fracPart = fracPart + d/fracScale
+				}
+				digits++
+				lexPos++
+			} else {
+				break
+			}
+		}
+		if digits == 0 {
+			parseErr = 1
+		}
+		curKind = TOK_NUM
+		curNum = intPart + fracPart
+		return
+	}
+
+	if isAlpha(c) {
+		start := lexPos
+		for isAlpha(int(exprBuf[lexPos])) || isDigit(int(exprBuf[lexPos])) {
+			lexPos++
+		}
+		ln := lexPos - start
+		c0 := toLowerByte(int(exprBuf[start]))
+		c1 := 0
+		c2 := 0
+		c3 := 0
+		c4 := 0
+		if ln >= 2 {
+			c1 = toLowerByte(int(exprBuf[start+1]))
+		}
+		if ln >= 3 {
+			c2 = toLowerByte(int(exprBuf[start+2]))
+		}
+		if ln >= 4 {
+			c3 = toLowerByte(int(exprBuf[start+3]))
+		}
+		if ln >= 5 {
+			c4 = toLowerByte(int(exprBuf[start+4]))
+		}
+
+		if ln == 1 && c0 == 'x' {
+			curKind = TOK_X
+			return
+		}
+		if ln == 1 && c0 == 'e' {
+			curKind = TOK_NUM
+			curNum = 2.71828183
+			return
+		}
+		if ln == 2 && c0 == 'p' && c1 == 'i' {
+			curKind = TOK_NUM
+			curNum = 3.14159265
+			return
+		}
+		if ln == 2 && c0 == 'l' && c1 == 'n' {
+			curKind = TOK_FN
+			curFn = ROP_LN
+			return
+		}
+		if ln == 3 {
+			if matchIdent3(c0, c1, c2, 's', 'i', 'n') {
+				curKind = TOK_FN
+				curFn = ROP_SIN
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'c', 'o', 's') {
+				curKind = TOK_FN
+				curFn = ROP_COS
+				return
+			}
+			if matchIdent3(c0, c1, c2, 't', 'a', 'n') {
+				curKind = TOK_FN
+				curFn = ROP_TAN
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'e', 'x', 'p') {
+				curKind = TOK_FN
+				curFn = ROP_EXP
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'l', 'o', 'g') {
+				curKind = TOK_FN
+				curFn = ROP_LOG
+				return
+			}
+			if matchIdent3(c0, c1, c2, 's', 'q', 'r') {
+				curKind = TOK_FN
+				curFn = ROP_SQRT
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'a', 'b', 's') {
+				curKind = TOK_FN
+				curFn = ROP_ABS
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'a', 't', 'n') {
+				curKind = TOK_FN
+				curFn = ROP_ATAN
+				return
+			}
+			if matchIdent3(c0, c1, c2, 'i', 'n', 't') {
+				curKind = TOK_FN
+				curFn = ROP_FLOOR
+				return
+			}
+		}
+		if ln == 4 {
+			if matchIdent4(c0, c1, c2, c3, 's', 'q', 'r', 't') {
+				curKind = TOK_FN
+				curFn = ROP_SQRT
+				return
+			}
+			if matchIdent4(c0, c1, c2, c3, 'a', 's', 'i', 'n') {
+				curKind = TOK_FN
+				curFn = ROP_ASIN
+				return
+			}
+			if matchIdent4(c0, c1, c2, c3, 'a', 'c', 'o', 's') {
+				curKind = TOK_FN
+				curFn = ROP_ACOS
+				return
+			}
+			if matchIdent4(c0, c1, c2, c3, 'a', 't', 'a', 'n') {
+				curKind = TOK_FN
+				curFn = ROP_ATAN
+				return
+			}
+			if matchIdent4(c0, c1, c2, c3, 'c', 'e', 'i', 'l') {
+				curKind = TOK_FN
+				curFn = ROP_CEIL
+				return
+			}
+		}
+		if ln == 5 && c0 == 'f' && c1 == 'l' && c2 == 'o' && c3 == 'o' && c4 == 'r' {
+			curKind = TOK_FN
+			curFn = ROP_FLOOR
+			return
+		}
+		parseErr = 1
+		curKind = TOK_EOF
+		return
+	}
+
+	lexPos++
+	if c == '(' {
+		curKind = TOK_LP
+		return
+	}
+	if c == ')' {
+		curKind = TOK_RP
+		return
+	}
+	if c == '+' || c == '-' || c == '/' || c == '^' {
+		curKind = TOK_OP
+		curOp = c
+		return
+	}
+	if c == '*' {
+		if exprBuf[lexPos] == '*' {
+			lexPos++
+			curKind = TOK_OP
+			curOp = '^'
+			return
+		}
+		curKind = TOK_OP
+		curOp = '*'
+		return
+	}
+	parseErr = 1
+	curKind = TOK_EOF
+}
+
+// Atom: number | x | ( expr ) | fn( expr ) | fn factor
+func parseAtom() {
+	if curKind == TOK_NUM {
+		v := curNum
+		nextToken()
+		emitRpn(ROP_NUM, v)
+		return
+	}
+	if curKind == TOK_X {
+		nextToken()
+		emitRpn(ROP_X, 0.0)
+		return
+	}
+	if curKind == TOK_LP {
+		nextToken()
+		parseAddSub()
+		if curKind == TOK_RP {
+			nextToken()
+		} else {
+			parseErr = 1
+		}
+		return
+	}
+	if curKind == TOK_FN {
+		fnOp := curFn
+		nextToken()
+		if curKind == TOK_LP {
+			nextToken()
+			parseAddSub()
+			if curKind == TOK_RP {
+				nextToken()
+			} else {
+				parseErr = 1
+			}
+		} else {
+			parseUnary()
+		}
+		emitRpn(fnOp, 0.0)
+		return
+	}
+	parseErr = 1
+}
+
+// Power: Atom [ '^' Unary ] (right-associative, binds tighter than unary '-')
+func parsePower() {
+	parseAtom()
+	if curKind == TOK_OP && curOp == '^' {
+		nextToken()
+		parseUnary()
+		emitRpn(ROP_POW, 0.0)
+	}
+}
+
+// Unary: '+' Unary | '-' Unary | Power
+func parseUnary() {
+	if curKind == TOK_OP && curOp == '+' {
+		nextToken()
+		parseUnary()
+		return
+	}
+	if curKind == TOK_OP && curOp == '-' {
+		nextToken()
+		parseUnary()
+		emitRpn(ROP_NEG, 0.0)
+		return
+	}
+	parsePower()
+}
+
+func canStartImplicitMul() bool {
+	return curKind == TOK_X || curKind == TOK_LP || curKind == TOK_FN || curKind == TOK_NUM
+}
+
+// MulDiv: Unary { ('*' | '/' | implicit-mul) Unary }
+func parseMulDiv() {
+	parseUnary()
+	for {
+		if curKind == TOK_OP && (curOp == '*' || curOp == '/') {
+			op := curOp
+			nextToken()
+			parseUnary()
+			if op == '*' {
+				emitRpn(ROP_MUL, 0.0)
+			} else {
+				emitRpn(ROP_DIV, 0.0)
+			}
+		} else if canStartImplicitMul() {
+			parseUnary()
+			emitRpn(ROP_MUL, 0.0)
+		} else {
+			break
+		}
+	}
+}
+
+// AddSub: MulDiv { ('+' | '-') MulDiv }
+func parseAddSub() {
+	parseMulDiv()
+	for curKind == TOK_OP && (curOp == '+' || curOp == '-') {
+		op := curOp
+		nextToken()
+		parseMulDiv()
+		if op == '+' {
+			emitRpn(ROP_ADD, 0.0)
+		} else {
+			emitRpn(ROP_SUB, 0.0)
+		}
+	}
+}
+
+func compileExpr() bool {
+	rpnCount = 0
+	parseErr = 0
+	lexPos = 0
+	nextToken()
+	if curKind == TOK_EOF {
+		parseErr = 1
+		return false
+	}
+	parseAddSub()
+	if curKind != TOK_EOF {
+		parseErr = 1
+	}
+	return parseErr == 0 && rpnCount > 0
+}
+
+func evalF(xVal float32) (bool, float32) {
+	if parseErr != 0 || rpnCount == 0 {
+		return false, 0.0
+	}
+	evalErr = 0
+	sp := 0
+	for i := 0; i < rpnCount; i++ {
+		op := rpnOp[i]
+		if op == ROP_NUM {
+			evalStk[sp] = rpnVal[i]
+			sp++
+		} else if op == ROP_X {
+			evalStk[sp] = xVal
+			sp++
+		} else if op == ROP_NEG {
+			if sp < 1 {
+				return false, 0.0
+			}
+			evalStk[sp-1] = -evalStk[sp-1]
+		} else if op >= ROP_ADD && op <= ROP_POW {
+			if sp < 2 {
+				return false, 0.0
+			}
+			b := evalStk[sp-1]
+			a := evalStk[sp-2]
+			sp--
+			var r float32 = 0.0
+			if op == ROP_ADD {
+				r = a + b
+			} else if op == ROP_SUB {
+				r = a - b
+			} else if op == ROP_MUL {
+				r = a * b
+			} else if op == ROP_DIV {
+				if b == 0.0 {
+					return false, 0.0
+				}
+				r = a / b
+			} else if op == ROP_POW {
+				r = mathPow(a, b)
+			}
+			if evalErr != 0 || isNanOrInf(r) {
+				return false, 0.0
+			}
+			evalStk[sp-1] = r
+		} else {
+			if sp < 1 {
+				return false, 0.0
+			}
+			u := evalStk[sp-1]
+			var r float32 = 0.0
+			if op == ROP_SIN {
+				r = sin(u)
+			} else if op == ROP_COS {
+				r = cos(u)
+			} else if op == ROP_TAN {
+				c := cos(u)
+				if fabs(c) < 0.000001 {
+					return false, 0.0
+				}
+				r = sin(u) / c
+			} else if op == ROP_ASIN {
+				if u < -1.0 || u > 1.0 {
+					return false, 0.0
+				}
+				rem := 1.0 - u*u
+				if rem < 0.0 {
+					rem = 0.0
+				}
+				r = atan2(u, sqrt(rem))
+			} else if op == ROP_ACOS {
+				if u < -1.0 || u > 1.0 {
+					return false, 0.0
+				}
+				rem := 1.0 - u*u
+				if rem < 0.0 {
+					rem = 0.0
+				}
+				r = atan2(sqrt(rem), u)
+			} else if op == ROP_ATAN {
+				r = atan2(u, 1.0)
+			} else if op == ROP_LN {
+				r = mathLn(u)
+			} else if op == ROP_EXP {
+				r = mathExp(u)
+			} else if op == ROP_LOG {
+				r = mathLn(u) * 0.4342944819
+			} else if op == ROP_SQRT {
+				if u < 0.0 {
+					return false, 0.0
+				}
+				r = sqrt(u)
+			} else if op == ROP_ABS {
+				r = fabs(u)
+			} else if op == ROP_FLOOR {
+				r = floor(u)
+			} else if op == ROP_CEIL {
+				r = ceil(u)
+			}
+			if evalErr != 0 || isNanOrInf(r) {
+				return false, 0.0
+			}
+			evalStk[sp-1] = r
+		}
+	}
+	if sp != 1 {
+		return false, 0.0
+	}
+	return true, evalStk[0]
+}
+
+// ============================================================================
+// Viewport Transformations (Zoom, Pan, Auto-Fit Y)
+// ============================================================================
+func zoomViewport(factor float32) {
+	cx := 0.5 * (xMin + xMax)
+	cy := 0.5 * (yMin + yMax)
+	halfW := 0.5 * (xMax - xMin) * factor
+	halfH := 0.5 * (yMax - yMin) * factor
+	if halfW < 0.0001 {
+		halfW = 0.0001
+	}
+	if halfH < 0.0001 {
+		halfH = 0.0001
+	}
+	if halfW > 100000.0 {
+		halfW = 100000.0
+	}
+	if halfH > 100000.0 {
+		halfH = 100000.0
+	}
+	xMin = cx - halfW
+	xMax = cx + halfW
+	yMin = cy - halfH
+	yMax = cy + halfH
+	traceActive = 0
+}
+
+func panViewport(dxFrac float32, dyFrac float32) {
+	dx := (xMax - xMin) * dxFrac
+	dy := (yMax - yMin) * dyFrac
+	xMin = xMin + dx
+	xMax = xMax + dx
+	yMin = yMin + dy
+	yMax = yMax + dy
+	traceActive = 0
+}
+
+func autoFitY() {
+	found := 0
+	var lo float32 = 0.0
+	var hi float32 = 0.0
+	spanX := xMax - xMin
+	for px := 0; px < PLOT_W; px += 2 {
+		xv := xMin + (float32(px)*spanX)/float32(PLOT_W-1)
+		ok, yv := evalF(xv)
+		if ok && yv > -100000.0 && yv < 100000.0 {
+			if found == 0 {
+				lo = yv
+				hi = yv
+				found = 1
+			} else {
+				if yv < lo {
+					lo = yv
+				}
+				if yv > hi {
+					hi = yv
+				}
+			}
+		}
+	}
+	if found != 0 {
+		margin := (hi - lo) * 0.12
+		if margin < 0.5 {
+			margin = 1.0
+		}
+		yMin = lo - margin
+		yMax = hi + margin
+	}
+}
+
+// ============================================================================
+// Graph Rendering & UI Controls
+// ============================================================================
+func worldToScreenX(xv float32) int {
+	return PLOT_X0 + int(((xv-xMin)/(xMax-xMin))*float32(PLOT_W-1)+0.5)
+}
+
+func worldToScreenY(yv float32) int {
+	return PLOT_Y0 + PLOT_H - 1 - int(((yv-yMin)/(yMax-yMin))*float32(PLOT_H-1)+0.5)
+}
+
+func chooseGridStep(span float32) float32 {
+	raw := span / 6.0
+	if raw <= 0.0 {
+		return 1.0
+	}
+	var mag float32 = 1.0
+	for raw >= 10.0 {
+		raw = raw * 0.1
+		mag = mag * 10.0
+	}
+	for raw < 1.0 {
+		raw = raw * 10.0
+		mag = mag * 0.1
+	}
+	if raw < 2.0 {
+		return 1.0 * mag
+	}
+	if raw < 5.0 {
+		return 2.0 * mag
+	}
+	return 5.0 * mag
+}
+
+func drawTopBar() {
+	tft_fill_rect(0, 0, 320, 24, 0x0843)
+	DrawExitWedge()
+	DrawMenuWedge()
+
+	// Formula Bar Button: f(x) = ...
+	tft_fill_round_rect(18, 2, 282, 20, 4, 0x18E3)
+	tft_draw_round_rect(18, 2, 282, 20, 4, CYAN)
+	tft_set_text_datum(ML_DATUM)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string("f(x)=", 24, 12, 2)
+	tft_set_text_color(WHITE, 0x18E3)
+	tft_draw_string(cstrSlice(&exprBuf[0], 64), 66, 12, 2)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawBottomControlBar() {
+	tft_fill_rect(0, BAR_Y0, 320, BAR_H, 0x0843)
+	tft_draw_fast_hline(0, BAR_Y0, 320, CYAN)
+
+	tft_set_text_datum(MC_DATUM)
+
+	// 0: [f(x)] (x = 2..45)
+	tft_fill_round_rect(2, BAR_Y0+3, 44, 22, 4, 0x2945)
+	tft_draw_round_rect(2, BAR_Y0+3, 44, 22, 4, YELLOW)
+	tft_set_text_color(YELLOW, 0x2945)
+	tft_draw_string("f(x)", 24, BAR_Y0+14, 2)
+
+	// 1: [ + ] Zoom In (x = 48..83)
+	tft_fill_round_rect(48, BAR_Y0+3, 35, 22, 4, 0x03E0)
+	tft_draw_round_rect(48, BAR_Y0+3, 35, 22, 4, GREEN)
+	tft_set_text_color(WHITE, 0x03E0)
+	tft_draw_string("+", 65, BAR_Y0+14, 2)
+
+	// 2: [ - ] Zoom Out (x = 85..120)
+	tft_fill_round_rect(85, BAR_Y0+3, 35, 22, 4, 0x4800)
+	tft_draw_round_rect(85, BAR_Y0+3, 35, 22, 4, RED)
+	tft_set_text_color(WHITE, 0x4800)
+	tft_draw_string("-", 102, BAR_Y0+14, 2)
+
+	// 3: [ < ] Pan Left (x = 122..155)
+	tft_fill_round_rect(122, BAR_Y0+3, 33, 22, 4, 0x18E3)
+	tft_draw_round_rect(122, BAR_Y0+3, 33, 22, 4, CYAN)
+	tft_set_text_color(WHITE, 0x18E3)
+	tft_draw_string("<", 138, BAR_Y0+14, 2)
+
+	// 4: [ > ] Pan Right (x = 157..190)
+	tft_fill_round_rect(157, BAR_Y0+3, 33, 22, 4, 0x18E3)
+	tft_draw_round_rect(157, BAR_Y0+3, 33, 22, 4, CYAN)
+	tft_set_text_color(WHITE, 0x18E3)
+	tft_draw_string(">", 173, BAR_Y0+14, 2)
+
+	// 5: [ ^ ] Pan Up (x = 192..225)
+	tft_fill_round_rect(192, BAR_Y0+3, 33, 22, 4, 0x18E3)
+	tft_draw_round_rect(192, BAR_Y0+3, 33, 22, 4, CYAN)
+	tft_set_text_color(WHITE, 0x18E3)
+	tft_draw_string("^", 208, BAR_Y0+14, 2)
+
+	// 6: [ v ] Pan Down (x = 227..260)
+	tft_fill_round_rect(227, BAR_Y0+3, 33, 22, 4, 0x18E3)
+	tft_draw_round_rect(227, BAR_Y0+3, 33, 22, 4, CYAN)
+	tft_set_text_color(WHITE, 0x18E3)
+	tft_draw_string("v", 243, BAR_Y0+14, 2)
+
+	// 7: [BOUNDS] Corner Coordinates Modal (x = 262..318)
+	tft_fill_round_rect(262, BAR_Y0+3, 56, 22, 4, PURPLE)
+	tft_draw_round_rect(262, BAR_Y0+3, 56, 22, 4, WHITE)
+	tft_set_text_color(WHITE, PURPLE)
+	tft_draw_string("BOUNDS", 290, BAR_Y0+14, 1)
+
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawGraphViewport() {
+	tft_fill_rect(PLOT_X0, PLOT_Y0, PLOT_W, PLOT_H, BLACK)
+
+	// 1. Subtle coordinate grid lines
+	stepX := chooseGridStep(xMax - xMin)
+	firstGridX := floor(xMin/stepX) * stepX
+	gx := firstGridX
+	steps := 0
+	for gx <= xMax && steps < 24 {
+		if gx >= xMin {
+			sx := worldToScreenX(gx)
+			if sx >= 0 && sx < PLOT_W {
+				tft_draw_fast_v_line(sx, PLOT_Y0, PLOT_H, 0x10A3)
+			}
+		}
+		gx = gx + stepX
+		steps++
+	}
+
+	stepY := chooseGridStep(yMax - yMin)
+	firstGridY := floor(yMin/stepY) * stepY
+	gy := firstGridY
+	steps = 0
+	for gy <= yMax && steps < 24 {
+		if gy >= yMin {
+			sy := worldToScreenY(gy)
+			if sy >= PLOT_Y0 && sy < PLOT_Y0+PLOT_H {
+				tft_draw_fast_h_line(0, sy, PLOT_W, 0x10A3)
+			}
+		}
+		gy = gy + stepY
+		steps++
+	}
+
+	// 2. X=0 and Y=0 Axes + Tick Marks
+	if xMin <= 0.0 && xMax >= 0.0 {
+		axX := worldToScreenX(0.0)
+		if axX >= 0 && axX < PLOT_W {
+			tft_draw_fast_v_line(axX, PLOT_Y0, PLOT_H, 0x4A69)
+			gy = firstGridY
+			steps = 0
+			for gy <= yMax && steps < 24 {
+				sy := worldToScreenY(gy)
+				if sy >= PLOT_Y0 && sy < PLOT_Y0+PLOT_H {
+					tft_draw_fast_h_line(axX-2, sy, 5, CYAN)
+				}
+				gy = gy + stepY
+				steps++
+			}
+		}
+	}
+	if yMin <= 0.0 && yMax >= 0.0 {
+		axY := worldToScreenY(0.0)
+		if axY >= PLOT_Y0 && axY < PLOT_Y0+PLOT_H {
+			tft_draw_fast_h_line(0, axY, PLOT_W, 0x4A69)
+			gx = firstGridX
+			steps = 0
+			for gx <= xMax && steps < 24 {
+				sx := worldToScreenX(gx)
+				if sx >= 0 && sx < PLOT_W {
+					tft_draw_fast_v_line(sx, axY-2, 5, CYAN)
+				}
+				gx = gx + stepX
+				steps++
+			}
+		}
+	}
+
+	// 3. Plot y = f(x) across all 320 pixel columns
+	if parseErr != 0 {
+		tft_set_text_datum(MC_DATUM)
+		tft_set_text_color(RED, BLACK)
+		tft_draw_string("Syntax error in f(x)", 160, PLOT_Y0+PLOT_H/2, 2)
+		tft_set_text_datum(TL_DATUM)
+	} else {
+		spanX := xMax - xMin
+		prevValid := 0
+		prevSy := 0
+		for px := 0; px < PLOT_W; px++ {
+			xv := xMin + (float32(px)*spanX)/float32(PLOT_W-1)
+			ok, yv := evalF(xv)
+			if ok {
+				sy := worldToScreenY(yv)
+				inView := sy >= PLOT_Y0-PLOT_H && sy < PLOT_Y0+2*PLOT_H
+				if inView {
+					if prevValid != 0 && abs(sy-prevSy) < PLOT_H {
+						// Clip line segment vertically to [PLOT_Y0 .. PLOT_Y0+PLOT_H-1]
+						y0 := prevSy
+						y1 := sy
+						if y0 > y1 {
+							tmp := y0
+							y0 = y1
+							y1 = tmp
+						}
+						if y1 >= PLOT_Y0 && y0 < PLOT_Y0+PLOT_H {
+							if y0 < PLOT_Y0 {
+								y0 = PLOT_Y0
+							}
+							if y1 >= PLOT_Y0+PLOT_H {
+								y1 = PLOT_Y0 + PLOT_H - 1
+							}
+							tft_draw_fast_v_line(px, y0, y1-y0+1, YELLOW)
+						}
+					} else if sy >= PLOT_Y0 && sy < PLOT_Y0+PLOT_H {
+						tft_draw_fast_v_line(px, sy, 2, YELLOW)
+					}
+					prevSy = sy
+					prevValid = 1
+				} else {
+					prevValid = 0
+				}
+			} else {
+				prevValid = 0
+			}
+		}
+	}
+
+	// 4. Corner Coordinate Overlays
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(LIGHTGREY, BLACK)
+	tft_draw_string(float_to_str(yMax), 4, PLOT_Y0+3, 1)
+	tft_set_text_datum(BL_DATUM)
+	tft_draw_string(float_to_str(xMin), 4, PLOT_Y0+PLOT_H-3, 1)
+	tft_set_text_datum(BR_DATUM)
+	tft_draw_string(float_to_str(xMax), 316, PLOT_Y0+PLOT_H-3, 1)
+	tft_set_text_datum(TR_DATUM)
+	tft_draw_string(float_to_str(yMin), 316, PLOT_Y0+PLOT_H-12, 1)
+
+	// 5. Optional Trace Crosshair & Readout
+	if traceActive != 0 {
+		tsx := worldToScreenX(traceX)
+		if tsx >= 0 && tsx < PLOT_W {
+			tft_draw_fast_v_line(tsx, PLOT_Y0, PLOT_H, 0x39E7)
+		}
+		if traceValid != 0 {
+			tsy := worldToScreenY(traceY)
+			if tsy >= PLOT_Y0 && tsy < PLOT_Y0+PLOT_H {
+				tft_fill_circle(tsx, tsy, 3, GREEN)
+			}
+		}
+		tft_set_text_datum(TC_DATUM)
+		tft_set_text_color(GREEN, BLACK)
+		tft_draw_string(float_to_str(traceX), 130, PLOT_Y0+3, 1)
+		if traceValid != 0 {
+			tft_set_text_color(YELLOW, BLACK)
+			tft_draw_string(float_to_str(traceY), 195, PLOT_Y0+3, 1)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawGraphScreen() {
+	drawTopBar()
+	drawGraphViewport()
+	drawBottomControlBar()
+}
+
+// ============================================================================
+// Function Prompt & Corner Coordinates Modal
+// ============================================================================
+func promptFunctionExpr() {
+	memcpy(int(&kbBuf[0]), int(&exprBuf[0]), 64)
+	res := os_prompt_keyboard("f(x) = (e.g. x^3-3x, sin(x))", &kbBuf[0], 63, false)
+	if res == 1 && kbBuf[0] != 0 {
+		memcpy(int(&exprBuf[0]), int(&kbBuf[0]), 64)
+		compileExpr()
+		traceActive = 0
+	}
+	drawGraphScreen()
+}
+
+func drawBoundsModal() {
+	tft_fill_round_rect(12, 26, 296, 188, 6, 0x1082)
+	tft_draw_round_rect(12, 26, 296, 188, 6, CYAN)
+	tft_fill_round_rect(16, 30, 288, 22, 4, NAVY)
+
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, NAVY)
+	tft_draw_string("CORNER COORDINATES", 160, 41, 2)
+
+	// 2x2 Grid of Editable Coordinate Boxes
+	// Top-left: X Min (20, 58, 134, 42)
+	tft_fill_round_rect(20, 58, 134, 42, 4, 0x18E3)
+	tft_draw_round_rect(20, 58, 134, 42, 4, CYAN)
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(LIGHTGREY, 0x18E3)
+	tft_draw_string("X Min (Left):", 26, 62, 1)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string(float_to_str(xMin), 26, 76, 2)
+
+	// Top-right: X Max (166, 58, 134, 42)
+	tft_fill_round_rect(166, 58, 134, 42, 4, 0x18E3)
+	tft_draw_round_rect(166, 58, 134, 42, 4, CYAN)
+	tft_set_text_color(LIGHTGREY, 0x18E3)
+	tft_draw_string("X Max (Right):", 172, 62, 1)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string(float_to_str(xMax), 172, 76, 2)
+
+	// Bottom-left: Y Min (20, 108, 134, 42)
+	tft_fill_round_rect(20, 108, 134, 42, 4, 0x18E3)
+	tft_draw_round_rect(20, 108, 134, 42, 4, CYAN)
+	tft_set_text_color(LIGHTGREY, 0x18E3)
+	tft_draw_string("Y Min (Bottom):", 26, 112, 1)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string(float_to_str(yMin), 26, 126, 2)
+
+	// Bottom-right: Y Max (166, 108, 134, 42)
+	tft_fill_round_rect(166, 108, 134, 42, 4, 0x18E3)
+	tft_draw_round_rect(166, 108, 134, 42, 4, CYAN)
+	tft_set_text_color(LIGHTGREY, 0x18E3)
+	tft_draw_string("Y Max (Top):", 172, 112, 1)
+	tft_set_text_color(YELLOW, 0x18E3)
+	tft_draw_string(float_to_str(yMax), 172, 126, 2)
+
+	// Action buttons at bottom of modal (y = 162..198)
+	tft_set_text_datum(MC_DATUM)
+
+	// [-10..10] Reset standard window
+	tft_fill_round_rect(20, 164, 84, 34, 4, 0x2945)
+	tft_draw_round_rect(20, 164, 84, 34, 4, CYAN)
+	tft_set_text_color(WHITE, 0x2945)
+	tft_draw_string("-10..10", 62, 181, 2)
+
+	// [AUTO Y] Fit Y to curve
+	tft_fill_round_rect(114, 164, 84, 34, 4, PURPLE)
+	tft_draw_round_rect(114, 164, 84, 34, 4, WHITE)
+	tft_set_text_color(WHITE, PURPLE)
+	tft_draw_string("AUTO Y", 156, 181, 2)
+
+	// [DONE]
+	tft_fill_round_rect(208, 164, 92, 34, 4, 0x03E0)
+	tft_draw_round_rect(208, 164, 92, 34, 4, GREEN)
+	tft_set_text_color(WHITE, 0x03E0)
+	tft_draw_string("DONE", 254, 181, 2)
+
+	tft_set_text_datum(TL_DATUM)
+}
+
+func promptFloatCoord(title string, curVal float32) (bool, float32) {
+	copyFloatToCStr(curVal, &kbBuf[0], 32)
+	if os_prompt_keyboard(title, &kbBuf[0], 31, false) == 1 {
+		ok, v := parseFloatFromCStr(&kbBuf[0])
+		if ok {
+			return true, v
+		}
+	}
+	return false, curVal
+}
+
+func runBoundsModal() {
+	drawBoundsModal()
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if IsExitWedge(tx, ty) {
+				os_exit(0)
+			}
+			if ty >= 58 && ty <= 100 {
+				if tx >= 20 && tx <= 154 {
+					ok, v := promptFloatCoord("X Min (Left):", xMin)
+					if ok && v < xMax {
+						xMin = v
+					}
+					drawBoundsModal()
+				} else if tx >= 166 && tx <= 300 {
+					ok, v := promptFloatCoord("X Max (Right):", xMax)
+					if ok && v > xMin {
+						xMax = v
+					}
+					drawBoundsModal()
+				}
+			} else if ty >= 108 && ty <= 150 {
+				if tx >= 20 && tx <= 154 {
+					ok, v := promptFloatCoord("Y Min (Bottom):", yMin)
+					if ok && v < yMax {
+						yMin = v
+					}
+					drawBoundsModal()
+				} else if tx >= 166 && tx <= 300 {
+					ok, v := promptFloatCoord("Y Max (Top):", yMax)
+					if ok && v > yMin {
+						yMax = v
+					}
+					drawBoundsModal()
+				}
+			} else if ty >= 164 && ty <= 198 {
+				if tx >= 20 && tx <= 104 {
+					xMin = -10.0
+					xMax = 10.0
+					yMin = -10.0
+					yMax = 10.0
+					drawBoundsModal()
+				} else if tx >= 114 && tx <= 198 {
+					autoFitY()
+					drawBoundsModal()
+				} else if tx >= 208 && tx <= 300 {
+					traceActive = 0
+					drawGraphScreen()
+					return
+				}
+			} else if tx < 12 || tx > 308 || ty < 26 || ty > 214 {
+				traceActive = 0
+				drawGraphScreen()
+				return
+			}
+		}
+		os_delay_ms(20)
+	}
+}
+
+func runGraphMenu() {
+	s := CornerSize()
+	menuY := s
+	if menuY < 24 {
+		menuY = 24
+	}
+	menuW := 148
+	menuX := 318 - menuW
+	menuH := 118
+
+	tft_fill_round_rect(menuX, menuY, menuW, menuH, 5, 0x10A2)
+	tft_draw_round_rect(menuX, menuY, menuW, menuH, 5, CYAN)
+
+	tft_set_text_datum(MC_DATUM)
+	for i := 0; i < 4; i++ {
+		iy := menuY + 4 + i*28
+		tft_fill_round_rect(menuX+4, iy, menuW-8, 24, 4, 0x18E3)
+		tft_draw_round_rect(menuX+4, iy, menuW-8, 24, 4, CYAN)
+		tft_set_text_color(WHITE, 0x18E3)
+		if i == 0 {
+			tft_draw_string("Enter f(x)", menuX+menuW/2, iy+12, 2)
+		} else if i == 1 {
+			tft_draw_string("Corner Bounds", menuX+menuW/2, iy+12, 2)
+		} else if i == 2 {
+			tft_draw_string("Auto-Fit Y", menuX+menuW/2, iy+12, 2)
+		} else {
+			tft_draw_string("Reset [-5..5]", menuX+menuW/2, iy+12, 2)
+		}
+	}
+	tft_set_text_datum(TL_DATUM)
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, cx, cy := os_read_click()
+		if clicked {
+			if cx >= menuX && cx <= menuX+menuW && cy >= menuY+4 && cy < menuY+menuH-2 {
+				item := (cy - (menuY + 4)) / 28
+				if item == 0 {
+					promptFunctionExpr()
+					return
+				} else if item == 1 {
+					runBoundsModal()
+					return
+				} else if item == 2 {
+					autoFitY()
+				} else if item == 3 {
+					xMin = -5.0
+					xMax = 5.0
+					yMin = -5.0
+					yMax = 5.0
+					traceActive = 0
+				}
+			}
+			drawGraphScreen()
+			return
+		}
+		os_delay_ms(20)
+	}
+}
+
+func main() {
+	setCStrLiteral(&exprBuf[0], "x^3 - 3*x", 64)
+	compileExpr()
+	drawGraphScreen()
+
+	for {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+
+		clicked, tx, ty := os_read_click()
+		if clicked {
+			if IsExitWedge(tx, ty) {
+				os_exit(0)
+			} else if IsMenuWedge(tx, ty) {
+				runGraphMenu()
+			} else if ty < 24 {
+				// Top formula bar tapped -> prompt for f(x)
+				promptFunctionExpr()
+			} else if ty >= BAR_Y0 {
+				// Bottom control bar buttons:
+				if tx <= 46 {
+					promptFunctionExpr()
+				} else if tx >= 48 && tx <= 83 {
+					zoomViewport(0.5)
+					drawGraphScreen()
+				} else if tx >= 85 && tx <= 120 {
+					zoomViewport(2.0)
+					drawGraphScreen()
+				} else if tx >= 122 && tx <= 155 {
+					panViewport(-0.25, 0.0)
+					drawGraphScreen()
+				} else if tx >= 157 && tx <= 190 {
+					panViewport(0.25, 0.0)
+					drawGraphScreen()
+				} else if tx >= 192 && tx <= 225 {
+					panViewport(0.0, 0.25)
+					drawGraphScreen()
+				} else if tx >= 227 && tx <= 260 {
+					panViewport(0.0, -0.25)
+					drawGraphScreen()
+				} else if tx >= 262 {
+					runBoundsModal()
+				}
+			} else if ty >= PLOT_Y0 && ty < PLOT_Y0+PLOT_H {
+				// Tapped inside graph viewport -> evaluate trace point at x
+				traceActive = 1
+				traceX = xMin + (float32(tx)*(xMax-xMin))/float32(PLOT_W-1)
+				ok, yv := evalF(traceX)
+				if ok {
+					traceValid = 1
+					traceY = yv
+				} else {
+					traceValid = 0
+				}
+				drawGraphViewport()
+			}
+		}
+		os_delay_ms(20)
+	}
+}
