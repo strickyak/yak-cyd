@@ -1,0 +1,153 @@
+package main
+
+// Red 7-Segment LED Clock Sub-App (led-clock.sapp)
+// Paints the screen black and displays the local time using vintage red
+// hexagonal 7-segment LED digits (with dim unlit ghost segments and a
+// pulsing colon) for 2 seconds (2000 ms) before returning.
+
+const COL_BLACK = 0x0000
+const COL_FRAME = 0x2800 // Dark ruby bezel border
+const COL_GHOST = 0x2000 // Dim unlit LED segment
+const COL_RED   = 0xF800 // Bright lit red LED segment
+
+var segMask [12]int
+var timeBuf [16]byte
+
+func initMasks() {
+	// Bits: 0=A(top), 1=B(top-right), 2=C(bot-right), 3=D(bot),
+	//       4=E(bot-left), 5=F(top-left), 6=G(mid)
+	segMask[0] = 0x3F // 0
+	segMask[1] = 0x06 // 1
+	segMask[2] = 0x5B // 2
+	segMask[3] = 0x4F // 3
+	segMask[4] = 0x66 // 4
+	segMask[5] = 0x6D // 5
+	segMask[6] = 0x7D // 6
+	segMask[7] = 0x07 // 7
+	segMask[8] = 0x7F // 8
+	segMask[9] = 0x6F // 9
+	segMask[10] = 0x40 // '-' dash
+	segMask[11] = 0x00 // blank
+}
+
+func parseDigit(b byte) int {
+	v := int(b) - '0'
+	if v < 0 || v > 9 {
+		return 0
+	}
+	return v
+}
+
+// Draws a horizontal beveled 7-segment bar of length `w` and thickness `t` (even)
+func drawHSeg(x int, y int, w int, t int, col int) {
+	h := t / 2
+	os_tft_fill_rect(x+h, y, w-t, t, col)
+	os_tft_fill_triangle(x, y+h, x+h, y, x+h, y+t-1, col)
+	os_tft_fill_triangle(x+w-1, y+h, x+w-h-1, y, x+w-h-1, y+t-1, col)
+}
+
+// Draws a vertical beveled 7-segment bar of height `hLen` and thickness `t` (even)
+func drawVSeg(x int, y int, hLen int, t int, col int) {
+	h := t / 2
+	os_tft_fill_rect(x, y+h, t, hLen-t, col)
+	os_tft_fill_triangle(x+h, y, x, y+h, x+t-1, y+h, col)
+	os_tft_fill_triangle(x+h, y+hLen-1, x, y+hLen-h-1, x+t-1, y+hLen-h-1, col)
+}
+
+func segColor(mask int, bit int) int {
+	if (mask & (1 << bit)) != 0 {
+		return COL_RED
+	}
+	return COL_GHOST
+}
+
+// Draws a 52x104 7-segment digit at (x, y)
+func drawDigit(x int, y int, val int) {
+	if val < 0 || val > 11 {
+		val = 11
+	}
+	m := segMask[val]
+	t := 10
+
+	// A: top horizontal
+	drawHSeg(x+6, y, 40, t, segColor(m, 0))
+	// F: top-left vertical
+	drawVSeg(x, y+6, 44, t, segColor(m, 5))
+	// B: top-right vertical
+	drawVSeg(x+42, y+6, 44, t, segColor(m, 1))
+	// G: middle horizontal
+	drawHSeg(x+6, y+47, 40, t, segColor(m, 6))
+	// E: bottom-left vertical
+	drawVSeg(x, y+54, 44, t, segColor(m, 4))
+	// C: bottom-right vertical
+	drawVSeg(x+42, y+54, 44, t, segColor(m, 2))
+	// D: bottom horizontal
+	drawHSeg(x+6, y+94, 40, t, segColor(m, 3))
+}
+
+func drawColon(lit int) {
+	col := COL_GHOST
+	if lit != 0 {
+		col = COL_RED
+	}
+	os_tft_fill_circle(160, 102, 5, col)
+	os_tft_fill_circle(160, 138, 5, col)
+}
+
+func drawClockDisplay(colonLit int) {
+	ok := os_format_local_time("%H:%M:%S", &timeBuf, 16)
+	d0 := 10
+	d1 := 10
+	d2 := 10
+	d3 := 10
+	if ok != 0 {
+		d0 = parseDigit(timeBuf[0])
+		d1 = parseDigit(timeBuf[1])
+		d2 = parseDigit(timeBuf[3])
+		d3 = parseDigit(timeBuf[4])
+	}
+
+	y0 := 68
+	drawDigit(22, y0, d0)
+	drawDigit(86, y0, d1)
+	drawColon(colonLit)
+	drawDigit(182, y0, d2)
+	drawDigit(246, y0, d3)
+}
+
+func main() {
+	initMasks()
+	os_tft_fill_screen(COL_BLACK)
+	os_tft_draw_round_rect(8, 44, 304, 152, 8, COL_FRAME)
+
+	drawClockDisplay(1)
+
+	elapsed := 0
+	lastHalfSec := 0
+	for elapsed < 2000 {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			os_exit(0)
+		}
+
+		halfSec := elapsed / 500
+		if halfSec != lastHalfSec {
+			lastHalfSec = halfSec
+			colonLit := 1
+			if (halfSec % 2) != 0 {
+				colonLit = 0
+			}
+			drawClockDisplay(colonLit)
+		}
+
+		os_delay_ms(40)
+		elapsed = elapsed + 40
+	}
+	os_exit(0)
+}

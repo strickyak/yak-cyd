@@ -1534,11 +1534,15 @@ func (vm *VM) execSyscall(sysId byte) error {
 		if err != nil {
 			return err
 		}
-		_, err = vm.popSliceString()
+		fmtStr, err := vm.popSliceString()
 		if err != nil {
 			return err
 		}
-		nowStr := time.Now().Format("15:04")
+		layout := "15:04"
+		if strings.Contains(fmtStr, "%S") {
+			layout = "15:04:05"
+		}
+		nowStr := time.Now().Format(layout)
 		if int(maxLen) > 0 {
 			if err := vm.checkAddr(bufAddr, int(maxLen)); err != nil {
 				return err

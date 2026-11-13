@@ -1531,5 +1531,166 @@ func TestGreenRainSubApp(t *testing.T) {
 	}
 }
 
+func TestClockSubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/clock/clock.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile clock.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("clock", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp clock.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	// Pre-fill screen with blue so we can verify the center black circle is drawn
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 320; x++ {
+			vm.Screen[y][x] = 0x001F
+		}
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("clock sub-app did not exit cleanly after 2s")
+	}
+
+	// Corner outside the black circle should remain untouched (0x001F)
+	if vm.Screen[5][5] != 0x001F {
+		t.Fatalf("expected outer corner pixel (5,5) to remain 0x001F, got 0x%04X", vm.Screen[5][5])
+	}
+	// Center pivot should have the red pin (0xF800)
+	if vm.Screen[120][160] != 0xF800 {
+		t.Fatalf("expected clock center pivot (160,120) to be 0xF800, got 0x%04X", vm.Screen[120][160])
+	}
+}
+
+func TestLedClockSubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/led-clock/led-clock.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile led-clock.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("led-clock", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp led-clock.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("led-clock sub-app did not exit cleanly after 2s")
+	}
+
+	// Verify bright red (0xF800) LED segments were drawn on the black screen
+	redPixels := 0
+	for y := 44; y < 196; y++ {
+		for x := 8; x < 312; x++ {
+			if vm.Screen[y][x] == 0xF800 {
+				redPixels++
+			}
+		}
+	}
+	if redPixels < 1500 {
+		t.Fatalf("expected >= 1500 lit red 7-segment pixels, got %d", redPixels)
+	}
+}
+
+func TestLife44SubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/life44/life44.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile life44.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("life44", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp life44.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	// Run a few generations and then tap screen to exit early in the unit test
+	vm.TouchQueue = []TouchEvent{
+		{Touched: false},
+		{Touched: false},
+		{Touched: false},
+		{Touched: true, X: 160, Y: 120},
+	}
+	vm.MaxInstructions = 20000000
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("life44 sub-app did not exit cleanly")
+	}
+
+	// Verify white 4x4 cells (0xFFFF) were drawn on the black screen
+	whitePixels := 0
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 320; x++ {
+			if vm.Screen[y][x] == 0xFFFF {
+				whitePixels++
+			}
+		}
+	}
+	if whitePixels < 500 {
+		t.Fatalf("expected >= 500 white pixels on screen in life44, got %d", whitePixels)
+	}
+}
+
+func TestAntsSubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/ants/ants.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile ants.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("ants", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp ants.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	// Pre-fill screen with white (0xFFFF) so we can verify the ants erase black trails
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 320; x++ {
+			vm.Screen[y][x] = 0xFFFF
+		}
+	}
+	vm.MaxInstructions = 8000000
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("ants sub-app did not exit cleanly after 3s")
+	}
+
+	// Verify ants chewed black (0x0000) trails across the pre-filled white screen
+	erasedPixels := 0
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 320; x++ {
+			if vm.Screen[y][x] == 0x0000 {
+				erasedPixels++
+			}
+		}
+	}
+	if erasedPixels < 5000 {
+		t.Fatalf("expected ants to erase >= 5000 pixels to black, got %d", erasedPixels)
+	}
+}
+
+
+
+
+
 
 

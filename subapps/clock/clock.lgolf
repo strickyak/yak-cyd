@@ -1,0 +1,184 @@
+package main
+
+// Clock Sub-App (clock.sapp)
+// Draws a large black filled circle in the center of the 320x240 screen over
+// the current slide. If the current time is unknown, waits 1 second and returns.
+// If the current time is known, draws an analog + digital clock face over the
+// black circle and displays it for 2 seconds before returning.
+
+const CX = 160
+const CY = 120
+const BLACK_R = 104
+const DIAL_R  = 96
+
+const COL_BLACK  = 0x0000
+const COL_WHITE  = 0xFFFF
+const COL_SILVER = 0xBDF7
+const COL_GREY   = 0x4A69
+const COL_SLATE  = 0x2945
+const COL_CYAN   = 0x07FF
+const COL_GOLD   = 0xFFE0
+const COL_RED    = 0xF800
+
+var timeBuf [16]byte
+var lastSec int
+
+func parseDigit(b byte) int {
+	v := int(b) - '0'
+	if v < 0 || v > 9 {
+		return 0
+	}
+	return v
+}
+
+func drawThickHand(angDeg float32, tipLen float32, tailLen float32, halfW float32, color int) {
+	rad := angDeg * DEG_TO_RAD
+	ca := cos(rad)
+	sa := sin(rad)
+
+	// Perpendicular unit vector (-sa, ca)
+	px := -sa * halfW
+	py := ca * halfW
+
+	tipX := CX + int(round(ca*tipLen))
+	tipY := CY + int(round(sa*tipLen))
+	tailX := CX - int(round(ca*tailLen))
+	tailY := CY - int(round(sa*tailLen))
+
+	lx := CX + int(round(px))
+	ly := CY + int(round(py))
+	rx := CX - int(round(px))
+	ry := CY - int(round(py))
+
+	os_tft_fill_triangle(lx, ly, rx, ry, tipX, tipY, color)
+	if tailLen > 0.0 {
+		os_tft_fill_triangle(lx, ly, rx, ry, tailX, tailY, color)
+	}
+}
+
+func drawClockFace(hour int, min int, sec int) {
+	// Clear inner dial area inside bezel so live second ticks redraw cleanly
+	os_tft_fill_circle(CX, CY, DIAL_R-1, COL_BLACK)
+
+	// Outer bezel rings
+	os_tft_draw_circle(CX, CY, DIAL_R+2, COL_CYAN)
+	os_tft_draw_circle(CX, CY, DIAL_R, COL_SLATE)
+
+	// 60 minute/second ticks and 12 hour ticks
+	for i := 0; i < 60; i = i + 1 {
+		ang := (float32(i)*6.0 - 90.0) * DEG_TO_RAD
+		ca := cos(ang)
+		sa := sin(ang)
+		xOuter := CX + int(round(ca*92.0))
+		yOuter := CY + int(round(sa*92.0))
+
+		if i%5 == 0 {
+			xInner := CX + int(round(ca*81.0))
+			yInner := CY + int(round(sa*81.0))
+			col := COL_WHITE
+			if i%15 == 0 {
+				col = COL_GOLD
+			}
+			os_tft_draw_line(xInner, yInner, xOuter, yOuter, col)
+		} else {
+			xInner := CX + int(round(ca*89.0))
+			yInner := CY + int(round(sa*89.0))
+			os_tft_draw_line(xInner, yInner, xOuter, yOuter, COL_GREY)
+		}
+	}
+
+	// Cardinal numerals
+	os_tft_set_text_datum(MC_DATUM)
+	os_tft_set_text_color(COL_SILVER, COL_BLACK)
+	os_tft_draw_string("12", CX, CY-69, 2)
+	os_tft_draw_string("3", CX+69, CY, 2)
+	os_tft_draw_string("6", CX, CY+69, 2)
+	os_tft_draw_string("9", CX-69, CY, 2)
+
+	// Airport code above center and digital HH:MM:SS below center
+	os_tft_set_text_color(COL_GREY, COL_BLACK)
+	os_tft_draw_string(os_get_airport(), CX, CY-32, 2)
+
+	os_tft_set_text_color(COL_CYAN, COL_BLACK)
+	os_tft_draw_cstr(&timeBuf, CX, CY+34, 2)
+
+	// Compute hand angles (0 deg = 3 o'clock, -90 deg = 12 o'clock)
+	h12 := hour % 12
+	hourAng := float32(h12)*30.0 + float32(min)*0.5 + float32(sec)*(0.5/60.0) - 90.0
+	minAng := float32(min)*6.0 + float32(sec)*0.1 - 90.0
+	secAng := float32(sec)*6.0 - 90.0
+
+	// Hour hand (gold) and Minute hand (white)
+	drawThickHand(hourAng, 50.0, 10.0, 3.5, COL_GOLD)
+	drawThickHand(minAng, 72.0, 12.0, 2.5, COL_WHITE)
+
+	// Second hand (vivid red)
+	sRad := secAng * DEG_TO_RAD
+	sTipX := CX + int(round(cos(sRad)*78.0))
+	sTipY := CY + int(round(sin(sRad)*78.0))
+	sTailX := CX - int(round(cos(sRad)*16.0))
+	sTailY := CY - int(round(sin(sRad)*16.0))
+	os_tft_draw_line(sTailX, sTailY, sTipX, sTipY, COL_RED)
+
+	// Center pivot cap
+	os_tft_fill_circle(CX, CY, 4, COL_GOLD)
+	os_tft_fill_circle(CX, CY, 2, COL_RED)
+	os_tft_set_text_datum(TL_DATUM)
+}
+
+func waitMsOrExit(durationMs int, updateClock bool) {
+	elapsed := 0
+	for elapsed < durationMs {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			os_exit(0)
+		}
+		if updateClock {
+			if os_format_local_time("%H:%M:%S", &timeBuf, 16) != 0 {
+				sec := 0
+				if timeBuf[5] == ':' {
+					sec = parseDigit(timeBuf[6])*10 + parseDigit(timeBuf[7])
+				}
+				if sec != lastSec {
+					lastSec = sec
+					hour := parseDigit(timeBuf[0])*10 + parseDigit(timeBuf[1])
+					min := parseDigit(timeBuf[3])*10 + parseDigit(timeBuf[4])
+					drawClockFace(hour, min, sec)
+				}
+			}
+		}
+		os_delay_ms(40)
+		elapsed = elapsed + 40
+	}
+}
+
+func main() {
+	// 1. Always draw the large black filled circle in the center of the screen
+	os_tft_fill_circle(CX, CY, BLACK_R, COL_BLACK)
+
+	// 2. Query local time; if unknown, return after 1 second (1000 ms)
+	ok := os_format_local_time("%H:%M:%S", &timeBuf, 16)
+	if ok == 0 {
+		waitMsOrExit(1000, false)
+		os_exit(0)
+	}
+
+	// 3. Time is known: draw clock over the black circle and display for 2 seconds (2000 ms)
+	hour := parseDigit(timeBuf[0])*10 + parseDigit(timeBuf[1])
+	min := parseDigit(timeBuf[3])*10 + parseDigit(timeBuf[4])
+	sec := 0
+	if timeBuf[5] == ':' {
+		sec = parseDigit(timeBuf[6])*10 + parseDigit(timeBuf[7])
+	}
+	lastSec = sec
+
+	drawClockFace(hour, min, sec)
+	waitMsOrExit(2000, true)
+	os_exit(0)
+}

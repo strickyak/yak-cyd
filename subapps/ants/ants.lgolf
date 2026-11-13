@@ -1,0 +1,159 @@
+package main
+
+// Crawling Ants Sub-App (ants.sapp)
+// A dozen ants scurry rapidly across the existing screen image, chewing black
+// trails behind them as they go. Runs for 3 seconds (3000 ms) or until tapped.
+
+const NUM_ANTS = 12
+
+const COL_BLACK = 0x0000
+const COL_BODY  = 0xC180 // Ruddy ant brown-red
+const COL_HEAD  = 0xFD20 // Bright amber-orange head/thorax
+const COL_LEGS  = 0xFEA0 // Warm tan-gold legs & antennae
+
+var ax [12]float32
+var ay [12]float32
+var ang [12]float32
+var turn [12]float32
+var phase [12]int
+
+func initAnts() {
+	for i := 0; i < NUM_ANTS; i = i + 1 {
+		// Start ants around the perimeter and interior with varied headings
+		ax[i] = float32(24 + int(os_rand(272)))
+		ay[i] = float32(24 + int(os_rand(192)))
+		ang[i] = float32(int(os_rand(360))) * DEG_TO_RAD
+		turn[i] = (float32(int(os_rand(21)) - 10)) * 0.025
+		phase[i] = i & 1
+	}
+}
+
+func drawAnt(x float32, y float32, a float32, legPhase int) {
+	fx := cos(a)
+	fy := sin(a)
+	// Perpendicular vector (-fy, fx)
+	px := -fy
+	py := fx
+
+	cx := int(round(x))
+	cy := int(round(y))
+
+	// Leg swing offset (+1.5 or -1.5 along forward axis)
+	s0 := float32(1.5)
+	s1 := float32(-1.5)
+	if legPhase != 0 {
+		s0 = -1.5
+		s1 = 1.5
+	}
+
+	// 3 pairs of legs (front, middle, rear) with alternating tripod gait
+	// Front legs
+	flx := cx + int(round(fx*(2.5+s0)+px*7.5))
+	fly := cy + int(round(fy*(2.5+s0)+py*7.5))
+	frx := cx + int(round(fx*(2.5+s1)-px*7.5))
+	fry := cy + int(round(fy*(2.5+s1)-py*7.5))
+	os_tft_draw_line(cx, cy, flx, fly, COL_LEGS)
+	os_tft_draw_line(cx, cy, frx, fry, COL_LEGS)
+
+	// Middle legs
+	mlx := cx + int(round(fx*(-0.5+s1)+px*8.0))
+	mly := cy + int(round(fy*(-0.5+s1)+py*8.0))
+	mrx := cx + int(round(fx*(-0.5+s0)-px*8.0))
+	mry := cy + int(round(fy*(-0.5+s0)-py*8.0))
+	os_tft_draw_line(cx, cy, mlx, mly, COL_LEGS)
+	os_tft_draw_line(cx, cy, mrx, mry, COL_LEGS)
+
+	// Rear legs
+	rlx := cx + int(round(fx*(-4.0+s0)+px*7.5))
+	rly := cy + int(round(fy*(-4.0+s0)+py*7.5))
+	rrx := cx + int(round(fx*(-4.0+s1)-px*7.5))
+	rry := cy + int(round(fy*(-4.0+s1)-py*7.5))
+	os_tft_draw_line(cx, cy, rlx, rly, COL_LEGS)
+	os_tft_draw_line(cx, cy, rrx, rry, COL_LEGS)
+
+	// Abdomen (rear), Thorax (center), Head (front)
+	abx := cx - int(round(fx*5.5))
+	aby := cy - int(round(fy*5.5))
+	hdx := cx + int(round(fx*4.5))
+	hdy := cy + int(round(fy*4.5))
+
+	os_tft_fill_circle(abx, aby, 3, COL_BODY)
+	os_tft_fill_circle(cx, cy, 2, COL_HEAD)
+	os_tft_fill_circle(hdx, hdy, 2, COL_HEAD)
+
+	// Antennae from head
+	alx := hdx + int(round(fx*4.5+px*3.5))
+	aly := hdy + int(round(fy*4.5+py*3.5))
+	arx := hdx + int(round(fx*4.5-px*3.5))
+	ary := hdy + int(round(fy*4.5-py*3.5))
+	os_tft_draw_line(hdx, hdy, alx, aly, COL_LEGS)
+	os_tft_draw_line(hdx, hdy, arx, ary, COL_LEGS)
+}
+
+func stepAnts() {
+	for i := 0; i < NUM_ANTS; i = i + 1 {
+		oldX := int(round(ax[i]))
+		oldY := int(round(ay[i]))
+
+		// Erase previous ant and chew a 22px-wide black trail through the screen image
+		os_tft_fill_circle(oldX, oldY, 11, COL_BLACK)
+
+		// Randomly adjust steering rate every few steps
+		if os_rand(5) == 0 {
+			turn[i] = (float32(int(os_rand(25)) - 12)) * 0.03
+		}
+		a := ang[i] + turn[i]
+
+		nx := ax[i] + cos(a)*6.5
+		ny := ay[i] + sin(a)*6.5
+
+		// Bounce inward if hitting screen borders
+		if nx < 12.0 {
+			nx = 12.0
+			a = (float32(int(os_rand(120)) - 60)) * DEG_TO_RAD
+		} else if nx > 307.0 {
+			nx = 307.0
+			a = (180.0 + float32(int(os_rand(120))-60)) * DEG_TO_RAD
+		}
+		if ny < 12.0 {
+			ny = 12.0
+			a = (90.0 + float32(int(os_rand(120))-60)) * DEG_TO_RAD
+		} else if ny > 227.0 {
+			ny = 227.0
+			a = (270.0 + float32(int(os_rand(120))-60)) * DEG_TO_RAD
+		}
+
+		ax[i] = nx
+		ay[i] = ny
+		ang[i] = a
+		phase[i] = 1 - phase[i]
+	}
+
+	// Draw all 12 ants at their new positions
+	for i := 0; i < NUM_ANTS; i = i + 1 {
+		drawAnt(ax[i], ay[i], ang[i], phase[i])
+	}
+}
+
+func main() {
+	initAnts()
+
+	elapsed := 0
+	for elapsed < 3000 {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			os_exit(0)
+		}
+
+		stepAnts()
+		os_delay_ms(25)
+		elapsed = elapsed + 25
+	}
+	os_exit(0)
+}

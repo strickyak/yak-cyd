@@ -1,0 +1,110 @@
+package main
+
+// Conway's Game of Life 4x4 Sub-App (life44.sapp)
+// Plays an 80x60 grid of 4x4 pixel cells in white on black, starting with
+// 25% of cells alive. Uses a toroidal padded grid with a sliding 3-column
+// sum and differential cell repainting for maximum speed, returning after
+// 5 seconds (5000 ms) or on screen tap.
+
+const COLS = 80
+const ROWS = 60
+
+const COL_BLACK = 0x0000
+const COL_WHITE = 0xFFFF
+
+// Padded by 1 cell on all 4 sides (rows 1..60, cols 1..80; 0 and 61/81 wrap)
+var gridA [62][82]byte
+var gridB [62][82]byte
+
+func initGrid() {
+	os_tft_fill_screen(COL_BLACK)
+	for r := 1; r <= ROWS; r = r + 1 {
+		y := (r - 1) * 4
+		for c := 1; c <= COLS; c = c + 1 {
+			if os_rand(4) == 0 {
+				gridA[r][c] = 1
+				os_tft_fill_rect((c-1)*4, y, 4, 4, COL_WHITE)
+			} else {
+				gridA[r][c] = 0
+			}
+		}
+	}
+}
+
+func wrapBorders() {
+	// Wrap top/bottom rows
+	for c := 1; c <= COLS; c = c + 1 {
+		gridA[0][c] = gridA[ROWS][c]
+		gridA[ROWS+1][c] = gridA[1][c]
+	}
+	// Wrap left/right columns (including corners)
+	for r := 0; r <= ROWS+1; r = r + 1 {
+		gridA[r][0] = gridA[r][COLS]
+		gridA[r][COLS+1] = gridA[r][1]
+	}
+}
+
+func stepGeneration() {
+	wrapBorders()
+
+	for r := 1; r <= ROWS; r = r + 1 {
+		rm1 := r - 1
+		rp1 := r + 1
+		y := rm1 * 4
+
+		// Sliding 3-row vertical column sums for (c-1) and (c)
+		sLeft := int(gridA[rm1][0]) + int(gridA[r][0]) + int(gridA[rp1][0])
+		sMid := int(gridA[rm1][1]) + int(gridA[r][1]) + int(gridA[rp1][1])
+
+		for c := 1; c <= COLS; c = c + 1 {
+			cp1 := c + 1
+			sRight := int(gridA[rm1][cp1]) + int(gridA[r][cp1]) + int(gridA[rp1][cp1])
+			total := sLeft + sMid + sRight
+
+			self := int(gridA[r][c])
+			next := 0
+			// total includes self:
+			//   - if total == 3: alive (either 3 neighbors & dead, or 2 neighbors & alive)
+			//   - if total == 4 and self == 1: alive (3 neighbors & alive)
+			if total == 3 || (total == 4 && self != 0) {
+				next = 1
+			}
+			gridB[r][c] = byte(next)
+
+			if next != self {
+				col := COL_BLACK
+				if next != 0 {
+					col = COL_WHITE
+				}
+				os_tft_fill_rect((c-1)*4, y, 4, 4, col)
+			}
+
+			sLeft = sMid
+			sMid = sRight
+		}
+	}
+
+	memcpy(&gridA, &gridB, 62*82)
+}
+
+func main() {
+	initGrid()
+
+	startMs := os_millis()
+	for (os_millis() - startMs) < 5000 {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			os_exit(0)
+		}
+
+		stepGeneration()
+		os_yield()
+	}
+	os_exit(0)
+}
