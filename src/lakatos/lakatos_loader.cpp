@@ -239,6 +239,41 @@ static LakatosTouchSample api_read_touch(void) {
   return ts;
 }
 
+static LakatosTouchSample api_read_click(void) {
+  LakatosTouchSample ts = lakatosReadClick();
+  if (gAppRunning && lakatosShouldExitApp()) {
+    api_exit(0);
+  }
+  return ts;
+}
+
+static uint32_t api_rand(uint32_t max_exclusive) {
+  if (max_exclusive <= 1u) return 0u;
+  return esp_random() % max_exclusive;
+}
+
+static bool api_tft_draw_jpg_file(const char* path, int x, int y, int scale) {
+  return lakatosDrawJpgFile(path, x, y, scale);
+}
+
+static bool api_tft_draw_jpg_mem(const void* data, size_t len, int x, int y, int scale) {
+  return lakatosDrawJpgMem((const uint8_t*)data, len, x, y, scale);
+}
+
+static bool api_prefetch_start(const char* path, void* dst_buf, size_t max_len) {
+  return lakatosPrefetchStart(path, (uint8_t*)dst_buf, max_len);
+}
+
+static int api_prefetch_status(uint32_t* out_bytes_got) {
+  return lakatosPrefetchStatus(out_bytes_got);
+}
+
+static void api_prefetch_cancel(void) {
+  lakatosPrefetchCancel();
+}
+
+static int api_run_subapp(const char* name_or_path, const char* arg);
+
 static int api_prompt_keyboard(const char* title, char* buf, size_t max_len, bool allow_ctrl_c) {
   return lakatosPromptKeyboard(title, buf, max_len, allow_ctrl_c);
 }
@@ -903,6 +938,14 @@ static const LakatosApi gLakatosApi = {
     .http_stream_close    = lakatosHttpStreamClose,
     .http_stream_write    = lakatosHttpStreamWrite,
     .get_corner_size      = lakatosGetCornerSize,
+    .read_click           = api_read_click,
+    .rand                 = api_rand,
+    .tft_draw_jpg_file    = api_tft_draw_jpg_file,
+    .tft_draw_jpg_mem     = api_tft_draw_jpg_mem,
+    .prefetch_start       = api_prefetch_start,
+    .prefetch_status      = api_prefetch_status,
+    .prefetch_cancel      = api_prefetch_cancel,
+    .run_subapp           = api_run_subapp,
 };
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1118,141 @@ static bool resolveNativeBinHeader(const char* binName, char* outPath, size_t ou
 
   outPath[0] = '\0';
   return false;
+}
+
+// Resolves a sub-app filename (e.g. "colorbars.sapp" or "colorbars") across
+// /{sd,net,flash}/subapps using the same priority order as Home Screen discovery.
+static bool resolveSubAppHeader(const char* nameOrPath, char* outPath, size_t outPathCap,
+                                LakatosAppHeader* outHdr) {
+  if (!nameOrPath || !nameOrPath[0]) return false;
+
+  if (nameOrPath[0] == '/') {
+    if (lakatosFsRead(nameOrPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      strncpy(outPath, nameOrPath, outPathCap - 1);
+      outPath[outPathCap - 1] = '\0';
+      return true;
+    }
+    return false;
+  }
+
+  char fileName[64];
+  if (strchr(nameOrPath, '.') != nullptr) {
+    strncpy(fileName, nameOrPath, sizeof(fileName) - 1);
+    fileName[sizeof(fileName) - 1] = '\0';
+  } else {
+    snprintf(fileName, sizeof(fileName), "%s.sapp", nameOrPath);
+  }
+
+  // Priority 1: /sd/subapps/<fileName>
+  if (lakatosSdIsMounted()) {
+    snprintf(outPath, outPathCap, "/sd/subapps/%s", fileName);
+    if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      return true;
+    }
+  }
+
+  // Priority 2: /net/subapps/<fileName>
+  if (lakatosWifiIsConnected() && strlen(lakatosGetSuperhighwayPassword()) > 0) {
+    snprintf(outPath, outPathCap, "/net/subapps/%s", fileName);
+    if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+        outHdr->magic == LAKATOS_APP_MAGIC) {
+      return true;
+    }
+  }
+
+  // Priority 3: /flash/subapps/<fileName>
+  snprintf(outPath, outPathCap, "/flash/subapps/%s", fileName);
+  if (lakatosFsRead(outPath, 0, outHdr, sizeof(*outHdr)) == (int32_t)sizeof(*outHdr) &&
+      outHdr->magic == LAKATOS_APP_MAGIC) {
+    return true;
+  }
+
+  outPath[0] = '\0';
+  return false;
+}
+
+static int api_run_subapp(const char* name_or_path, const char* arg) {
+  char subPath[128];
+  LakatosAppHeader hdr;
+  memset(&hdr, 0, sizeof(hdr));
+  if (!resolveSubAppHeader(name_or_path, subPath, sizeof(subPath), &hdr)) {
+    Serial.printf("[Lakatos] Sub-app not found: '%s'\r\n", name_or_path ? name_or_path : "");
+    return -1;
+  }
+
+  if (hdr.abi_version != LAKATOS_API_VERSION ||
+      hdr.total_file_size < sizeof(LakatosAppHeader) ||
+      ((hdr.flags & LAKATOS_APP_FLAG_LCODE) == 0 && hdr.entry_addr != 0)) {
+    Serial.printf("[Lakatos] Invalid sub-app header in '%s'\r\n", subPath);
+    return -1;
+  }
+
+  uint32_t payloadLen = hdr.total_file_size - sizeof(LakatosAppHeader);
+  if (payloadLen < 24 || payloadLen > 65536) {
+    Serial.printf("[Lakatos] Invalid sub-app payload size (%lu) in '%s'\r\n",
+                  (unsigned long)payloadLen, subPath);
+    return -1;
+  }
+
+  // Allocate payload on the heap (never gLakatosAppRamArena, which holds the
+  // parent native app's .data and .bss while the sub-app runs).
+  uint8_t* payloadBuf = (uint8_t*)malloc(payloadLen);
+  if (!payloadBuf) {
+    Serial.printf("[Lakatos] Out of RAM loading sub-app '%s' (%lu B)\r\n",
+                  subPath, (unsigned long)payloadLen);
+    return -1;
+  }
+
+  uint32_t readOff = 0;
+  while (readOff < payloadLen) {
+    uint32_t chunk = payloadLen - readOff;
+    if (chunk > 4096) chunk = 4096;
+    int32_t got = lakatosFsRead(subPath, sizeof(LakatosAppHeader) + readOff,
+                                payloadBuf + readOff, chunk);
+    if (got <= 0) {
+      free(payloadBuf);
+      Serial.printf("[Lakatos] Short read loading sub-app '%s'\r\n", subPath);
+      return -1;
+    }
+    readOff += (uint32_t)got;
+  }
+
+  if (!verifyPayloadSha256(payloadBuf, payloadLen, hdr.sha256)) {
+    free(payloadBuf);
+    Serial.printf("[Lakatos] SHA-256 mismatch in sub-app '%s'\r\n", subPath);
+    return -1;
+  }
+
+  char savedArg[64];
+  strncpy(savedArg, gLakatosAppArg, sizeof(savedArg) - 1);
+  savedArg[sizeof(savedArg) - 1] = '\0';
+  bool savedCorner = lakatosGetCornerExitEnabled();
+
+  lakatosSetAppArg(arg ? arg : "");
+  gLakatosJoinNativeTarget[0] = '\0';
+
+  int subExitCode = 0;
+  String errMsg;
+  bool ok = lakatosRunLCodeApp(hdr, payloadBuf, payloadLen, &subExitCode, &errMsg);
+
+  free(payloadBuf);
+  lakatosSetAppArg(savedArg);
+  lakatosSetCornerExitEnabled(savedCorner);
+  gLakatosJoinNativeTarget[0] = '\0';
+  {
+    LakatosTftGuard tftGuard;
+    tft.setTextDatum(TL_DATUM);
+  }
+
+  // If the user tapped the NW Exit X corner (or Demo timeout expired) during
+  // the sub-app, exit the parent native app immediately back to Home.
+  if (gAppRunning && lakatosShouldExitApp()) {
+    api_exit(0);
+  }
+
+  return ok ? subExitCode : -1;
 }
 
 bool lakatosRunAppFromFile(const char* vfsPath, int* outExitCode, String* outErrMsg) {

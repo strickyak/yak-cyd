@@ -45,8 +45,10 @@ void midiplay_main(const LakatosApi* os);
 void radio_main(const LakatosApi* os);
 void ham_main(const LakatosApi* os);
 void smallertalk_main(const LakatosApi* os);
+void ambient_main(const LakatosApi* os);
 
 int strcmp(const char* a, const char* b);
+int strncmp(const char* a, const char* b, size_t n);
 
 void app_main(const LakatosApi* os) {
   const char* arg = lakatos_app_arg();
@@ -62,6 +64,8 @@ void app_main(const LakatosApi* os) {
     ham_main(os);
   } else if (strcmp(arg, "smallertalk") == 0) {
     smallertalk_main(os);
+  } else if (strncmp(arg, "ambient", 7) == 0 && (arg[7] == '\0' || arg[7] == ' ')) {
+    ambient_main(os);
   }
 }
 
@@ -452,6 +456,7 @@ def main():
         ("radio", os.path.join(REPO_DIR, "apps", "radio", "radio.cpp"), [f"-I{helix_inc}"]),
         ("ham", os.path.join(REPO_DIR, "apps", "ham", "ham.cpp"), []),
         ("smallertalk", st_srcs, [f"-I{st_dir}"]),
+        ("ambient", os.path.join(REPO_DIR, "apps", "ambient", "ambient.cpp"), []),
     ]
     build_native_bin(heads, [helix_lib], req_kernel_sec=args.req)
 

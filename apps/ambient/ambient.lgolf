@@ -1,0 +1,29 @@
+package main
+
+var (
+	inArg  [24]byte
+	outArg [32]byte
+)
+
+func main() {
+	outArg[0] = 'a'
+	outArg[1] = 'm'
+	outArg[2] = 'b'
+	outArg[3] = 'i'
+	outArg[4] = 'e'
+	outArg[5] = 'n'
+	outArg[6] = 't'
+	pos := 7
+	n := os_get_app_arg(&inArg[0], 20)
+	if n > 0 {
+		outArg[pos] = ' '
+		pos++
+		for i := 0; i < n; i++ {
+			outArg[pos] = inArg[i]
+			pos++
+		}
+	}
+	outArg[pos] = 0
+	set_app_arg(make_slice(&outArg[0], 32, pos))
+	join_native("native.bin")
+}

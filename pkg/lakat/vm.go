@@ -482,6 +482,9 @@ func (vm *VM) Run() (int, error) {
 		if err := vm.stepOp(op); err != nil {
 			return -1, err
 		}
+		if len(vm.Stack) > 64 {
+			return -1, vm.errf("value stack overflow (%d > 64)", len(vm.Stack))
+		}
 	}
 	return vm.ExitCode, nil
 }

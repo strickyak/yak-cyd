@@ -1678,7 +1678,9 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
   }
 
-  lakatosBeginAppSession();
+  if (!lakatosIsNativeAppRunning()) {
+    lakatosBeginAppSession();
+  }
 
   uint32_t stepCounter = 0;
   while (vm->running) {
@@ -2436,7 +2438,9 @@ bool lakatosRunLCodeApp(const LakatosAppHeader& hdr, const uint8_t* payload,
   heap_caps_free(vm);
   if (lakatosGetJoinNativeTarget()[0] == '\0') {
     lakatosAudioStop();
-    lakatosEndAppSession();
+    if (!lakatosIsNativeAppRunning()) {
+      lakatosEndAppSession();
+    }
   }
   return !hadErr;
 }

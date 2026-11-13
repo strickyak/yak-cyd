@@ -94,6 +94,10 @@ SECTIONS
     {
       *smallertalk*.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
     }
+    .bss.ambient
+    {
+      *ambient.o(.bss .bss.* .sbss .sbss.* .scommon COMMON)
+    }
   }
 
   .bss (NOLOAD) : ALIGN(8)

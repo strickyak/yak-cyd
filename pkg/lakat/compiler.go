@@ -1860,6 +1860,13 @@ func (c *Compiler) compileSimpleStmt() error {
 				return err
 			}
 			if len(lhsNames) == 1 {
+				for i := len(rhsTypes) - 1; i >= 1; i-- {
+					if rhsTypes[i].Kind == "slice" {
+						c.emitOp("POP_SLICE")
+					} else {
+						c.emitOp("POP")
+					}
+				}
 				t0 := TypeDesc{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4}
 				if len(rhsTypes) > 0 {
 					t0 = rhsTypes[0]
@@ -2229,8 +2236,30 @@ func (c *Compiler) emitCompoundFloatAlu(op string) {
 // ---------------------------------------------------------------------------
 // Expression Compiler (Precedence Climbing)
 // ---------------------------------------------------------------------------
+func (c *Compiler) collapseSingleValue(t TypeDesc) TypeDesc {
+	switch t.StructName {
+	case "__multi_2":
+		c.emitOp("POP")
+		return TypeDesc{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4}
+	case "__multi_3":
+		c.emitOp("POP")
+		c.emitOp("POP")
+		return TypeDesc{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4}
+	case "__multi_4":
+		c.emitOp("POP")
+		c.emitOp("POP")
+		c.emitOp("POP")
+		return TypeDesc{Kind: "scalar", ScalarType: "int", ByteSize: 4, ElemSize: 4}
+	}
+	return t
+}
+
 func (c *Compiler) compileExpr() (TypeDesc, error) {
-	return c.compileLogicalOr()
+	t, err := c.compileLogicalOr()
+	if err != nil {
+		return TypeDesc{}, err
+	}
+	return c.collapseSingleValue(t), nil
 }
 
 func (c *Compiler) compileLogicalOr() (TypeDesc, error) {
@@ -2285,11 +2314,13 @@ func (c *Compiler) compileComparison() (TypeDesc, error) {
 		if op != "==" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=" {
 			break
 		}
+		lt = c.collapseSingleValue(lt)
 		c.next()
 		rt, err := c.compileBitOr()
 		if err != nil {
 			return TypeDesc{}, err
 		}
+		rt = c.collapseSingleValue(rt)
 		if c.emitBinaryFloatArgs(lt, rt) {
 			switch op {
 			case "==":
@@ -2566,7 +2597,7 @@ func (c *Compiler) compileUnary() (TypeDesc, error) {
 }
 
 func (c *Compiler) compileMultiReturnExpr() ([]TypeDesc, error) {
-	t, err := c.compileExpr()
+	t, err := c.compileLogicalOr()
 	if err != nil {
 		return nil, err
 	}

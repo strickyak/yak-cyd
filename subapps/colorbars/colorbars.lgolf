@@ -1,0 +1,75 @@
+package main
+
+// NTSC SMPTE Color Bars Sub-App (colorbars.sapp)
+// Drawn algorithmically using global state (zero malloc/free), displays for
+// 2 seconds (or until tapped), then returns to the calling native app.
+
+var topCols [7]int
+var midCols [7]int
+
+func initColors() {
+	// Top 2/3: 75% White, Yellow, Cyan, Green, Magenta, Red, Blue
+	topCols[0] = 0xBDF7
+	topCols[1] = 0xFFE0
+	topCols[2] = 0x07FF
+	topCols[3] = 0x07E0
+	topCols[4] = 0xF81F
+	topCols[5] = 0xF800
+	topCols[6] = 0x001F
+
+	// Middle castellations: Blue, Black, Magenta, Black, Cyan, Black, 75% White
+	midCols[0] = 0x001F
+	midCols[1] = 0x0000
+	midCols[2] = 0xF81F
+	midCols[3] = 0x0000
+	midCols[4] = 0x07FF
+	midCols[5] = 0x0000
+	midCols[6] = 0xBDF7
+}
+
+func drawColorBars() {
+	for i := 0; i < 7; i = i + 1 {
+		x0 := (i * 320) / 7
+		x1 := ((i + 1) * 320) / 7
+		w := x1 - x0
+		os_tft_fill_rect(x0, 0, w, 160, topCols[i])
+		os_tft_fill_rect(x0, 160, w, 20, midCols[i])
+	}
+
+	// Bottom 1/4 (y = 180..239): -I, 100% White, +Q, Black, PLUGE (-4/0/+4 IRE), Black
+	os_tft_fill_rect(0, 180, 57, 60, 0x0195)   // -I (deep indigo)
+	os_tft_fill_rect(57, 180, 57, 60, 0xFFFF)  // 100% White
+	os_tft_fill_rect(114, 180, 57, 60, 0x3815) // +Q (deep violet)
+	os_tft_fill_rect(171, 180, 58, 60, 0x0000) // Black
+
+	// PLUGE pulse bars under column 5 (x = 229..273)
+	os_tft_fill_rect(229, 180, 15, 60, 0x0000) // -4 IRE
+	os_tft_fill_rect(244, 180, 15, 60, 0x0841) //  0 IRE
+	os_tft_fill_rect(259, 180, 15, 60, 0x18C3) // +4 IRE
+
+	// Rightmost black reference under column 6 (x = 274..319)
+	os_tft_fill_rect(274, 180, 46, 60, 0x0000)
+}
+
+func main() {
+	initColors()
+	drawColorBars()
+
+	elapsed := 0
+	for elapsed < 2000 {
+		if os_serial_available() > 0 {
+			ch := os_serial_read()
+			if ch == 'q' || ch == 'Q' || ch == 3 {
+				os_exit(0)
+			}
+		}
+		clicked, _, _ := os_read_click()
+		if clicked != 0 {
+			// Tap advances to the next item in ambient
+			os_exit(0)
+		}
+		os_delay_ms(40)
+		elapsed = elapsed + 40
+	}
+	os_exit(0)
+}

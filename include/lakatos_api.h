@@ -255,6 +255,16 @@ typedef struct LakatosApi {
 
   // --- Corner UI Target Configuration (NW Exit X & NE Menu Wedge: 12..24 px) ---
   int      (*get_corner_size)(void);
+
+  // --- Latched Clicks, Hardware TRNG, JPEG Rendering, Core 0 Prefetcher & Sub-Apps ---
+  LakatosTouchSample (*read_click)(void);
+  uint32_t (*rand)(uint32_t max_exclusive);
+  bool     (*tft_draw_jpg_file)(const char* path, int x, int y, int scale);
+  bool     (*tft_draw_jpg_mem)(const void* data, size_t len, int x, int y, int scale);
+  bool     (*prefetch_start)(const char* path, void* dst_buf, size_t max_len);
+  int      (*prefetch_status)(uint32_t* out_bytes_got);
+  void     (*prefetch_cancel)(void);
+  int      (*run_subapp)(const char* name_or_path, const char* arg);
 } LakatosApi;
 
 typedef void (*lakatos_app_entry_t)(const LakatosApi* os);

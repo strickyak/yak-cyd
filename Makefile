@@ -28,6 +28,7 @@ all:
 
 push: lakatos
 	$(LAKAT) push build/apps/*.lapp build/apps/native.bin /sd/apps/
+	$(LAKAT) push build/subapps/*.sapp /sd/subapps/
 
 lakat:
 	mkdir -p build build/flash build/sd build/net
@@ -35,7 +36,7 @@ lakat:
 	GOWORK=off go build -o build/cyd-resize ./cmd/cyd-resize
 
 apps: lakat
-	mkdir -p build/apps
+	mkdir -p build/apps build/subapps
 	$(LAKAT) compile -req $(REQ) -title "Conway's Life" -seed-var kSeedApp_life -seed-header src/lakatos/seed_apps.h -o build/apps/life.lapp apps/life/life.lgolf
 	$(LAKAT) compile -req $(REQ) -title "Gallery Viewer" -seed-var kSeedApp_gallery -seed-header src/lakatos/seed_gallery.h -o build/apps/gallery.lapp apps/gallery/gallery.lgolf
 	$(LAKAT) compile -req $(REQ) -title "Breakout" -o build/apps/breakout.lapp apps/breakout/breakout.lgolf
@@ -65,6 +66,8 @@ apps: lakat
 	$(LAKAT) compile -req $(REQ) -title "chat" -o build/apps/chat.lapp apps/chat/chat.lgolf
 	$(LAKAT) compile -req $(REQ) -title "calc" -o build/apps/calc.lapp apps/calc/calc.lgolf
 	$(LAKAT) compile -req $(REQ) -title "graph" -o build/apps/graph.lapp apps/graph/graph.lgolf
+	$(LAKAT) compile -req $(REQ) -title "ambient" -o build/apps/ambient.lapp apps/ambient/ambient.lgolf
+	$(LAKAT) compile -req $(REQ) -title "Color Bars" -o build/subapps/colorbars.sapp subapps/colorbars/colorbars.lgolf
 	$(PYTHON) tools/build_lapp.py --req $(REQ)
 
 lakatos: apps
@@ -81,13 +84,15 @@ build-lakatos: apps
 
 web-installer: build-lakatos
 	rm -rf build/web-installer
-	mkdir -p build/web-installer build/web-installer/apps build/web-installer/fs_root/apps
+	mkdir -p build/web-installer build/web-installer/apps build/web-installer/subapps build/web-installer/fs_root/apps build/web-installer/fs_root/subapps
 	cp web-installer/index.html web-installer/manifest.json web-installer/manifest-os-only.json build/web-installer/
 	cp .pio/build/lakatos/bootloader.bin .pio/build/lakatos/partitions.bin .pio/build/lakatos/firmware.bin build/web-installer/
 	cp .pio/build/updater/firmware.bin build/web-installer/updater.bin
 	cp $(BOOT_APP0) build/web-installer/boot_app0.bin
 	cp build/apps/*.lapp build/apps/native.bin build/web-installer/apps/
 	cp build/apps/*.lapp build/apps/native.bin build/web-installer/fs_root/apps/
+	cp build/subapps/*.sapp build/web-installer/subapps/
+	cp build/subapps/*.sapp build/web-installer/fs_root/subapps/
 	$(MKLITTLEFS) -c build/web-installer/fs_root -b 4096 -p 256 -s 1769472 build/web-installer/littlefs.bin
 	rm -rf build/web-installer/fs_root
 	$(PYTHON) -c 'import json, os; apps = sorted(f for f in os.listdir("build/web-installer/apps") if f.endswith(".lapp")); open("build/web-installer/apps/apps.json", "w").write(json.dumps(apps, indent=2) + "\n")'
@@ -113,4 +118,4 @@ build/superhighway-server:
 
 clean:
 	$(PIO) run -t clean
-	rm -rf build/apps build/flash build/sd build/net build/lakat build/cyd-resize
+	rm -rf build/apps build/subapps build/flash build/sd build/net build/lakat build/cyd-resize

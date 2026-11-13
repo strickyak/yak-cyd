@@ -1459,3 +1459,40 @@ func TestGraphCalculatorApp(t *testing.T) {
 	}
 }
 
+func TestColorbarsSubApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../subapps/colorbars/colorbars.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile colorbars.lgolf: %v", err)
+	}
+	sapp, asmText, err := CompileToLapp("colorbars", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp colorbars.lgolf: %v\nASM:\n%s", err, asmText)
+	}
+	vm, err := NewVM(sapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("colorbars sub-app did not exit cleanly after 2s")
+	}
+
+	// Verify top SMPTE bars (y = 80), middle castellations (y = 170), and bottom row (y = 210)
+	if vm.Screen[80][20] != 0xBDF7 || vm.Screen[80][65] != 0xFFE0 || vm.Screen[80][295] != 0x001F {
+		t.Fatalf("unexpected top bar colors: col0=0x%04X col1=0x%04X col6=0x%04X",
+			vm.Screen[80][20], vm.Screen[80][65], vm.Screen[80][295])
+	}
+	if vm.Screen[170][20] != 0x001F || vm.Screen[170][110] != 0xF81F || vm.Screen[170][295] != 0xBDF7 {
+		t.Fatalf("unexpected mid castellation colors: col0=0x%04X col2=0x%04X col6=0x%04X",
+			vm.Screen[170][20], vm.Screen[170][110], vm.Screen[170][295])
+	}
+	if vm.Screen[210][80] != 0xFFFF || vm.Screen[210][265] != 0x18C3 {
+		t.Fatalf("unexpected bottom row colors: white=0x%04X pluge+4=0x%04X",
+			vm.Screen[210][80], vm.Screen[210][265])
+	}
+}
+
+
