@@ -1,0 +1,1480 @@
+// ============================================================================
+// World Sun Clock (Geochron Day/Night Terminator) for Lakatos OS
+// Target: ESP32-2432S028R (CYD) 320x240 RGB565 Display + XPT2046 Touch
+//
+// Architecture & Conventions ("Apps Hungarian"):
+//   - *Deg / *Rad : Geographic angles in degrees (-180..+180, -80..+80) or radians
+//   - *Q10        : Fixed-point integers scaled by 1024 (1 << 10) for fast inner loops
+//   - screenX/Y   : Physical 320x240 display pixel coordinates
+//   - mapRow/Col  : Map coordinates (160 rows x 160 double-pixel columns)
+//   - *Sec/*Min/*Ms: Time values in seconds, minutes, or milliseconds
+//   - *Swapped565 : Byte-swapped RGB565 words required by tft_push_rgb565 DMA
+// ============================================================================
+package main
+
+import "wedge"
+
+// ----------------------------------------------------------------------------
+// 1. Layout, Timing, Astronomy & Biome Constants
+// ----------------------------------------------------------------------------
+
+const (
+	// Screen regions (320x240 landscape)
+	HEADER_H = 24
+	MAP_Y    = 24
+	MAP_W    = 320
+	MAP_H    = 160
+	CITY_Y   = 185
+	CITY_H   = 26
+	CTRL_Y   = 213
+	CTRL_H   = 26
+
+	// Font metrics & shared UI spacing
+	FONT_SMALL             = 1
+	FONT_MEDIUM            = 2
+	FONT_SMALL_CHAR_W      = 6
+	FONT_MEDIUM_H          = 16
+	HEADER_TEXT_Y          = 4
+	HEADER_BTN_PAD         = 2
+	BTN_CORNER_RADIUS      = 3
+	PILL_CORNER_RADIUS     = 4
+	TOUCH_HIT_PAD          = 2
+	TOUCH_POLL_MS          = 20
+	NTP_POLL_MS            = 100
+	NTP_MSG_X              = 90
+	NTP_MSG_Y              = 96
+
+	// Map grid resolution (160x80 cells, 2x2 screen pixels per cell)
+	CELL_PX             = 2
+	MAP_CELL_COLS       = 160
+	MAP_CELL_ROWS       = 80
+	MAP_CELL_COUNT      = MAP_CELL_COLS * MAP_CELL_ROWS
+	PACKED_MAP_ROW_B    = 80
+	PACKED_MAP_BYTES    = 6400
+	QTR_FRAME_ROWS      = 40
+	QTR_CELL_ROWS       = QTR_FRAME_ROWS / 2
+	QTR_FRAME_COUNT     = 4
+	QTR_FRAME_PIXELS    = 12800
+	NIBBLE_MASK         = 0x0F
+	NIBBLE_SHIFT        = 4
+	BYTE_MASK           = 0xFF
+	BYTE_SHIFT          = 8
+	ASCII_TABLE_SIZE    = 128
+	PATCH_HALF_PX       = 8
+	CLICK_POLL_ROW_MASK = 7
+
+	// Geographic reference lines (in 160x80 cell-grid coordinates)
+	EQUATOR_CELL_ROW        = 40
+	TROPIC_NORTH_CELL_ROW   = 28
+	TROPIC_SOUTH_CELL_ROW   = 51
+	PRIME_MERIDIAN_CELL_COL = 80
+	EQUATOR_DASH_CELLS      = 2
+	TROPIC_DASH_CELLS       = 4
+	MERIDIAN_DASH_ROWS      = 2
+
+	// Native RGB565 UI theme colors (for tft_fill_* / tft_draw_* primitives)
+	COLOR_BAR_BG        = 0x0842
+	COLOR_PANEL_BG      = 0x0863
+	COLOR_BTN_BG        = 0x18E5
+	COLOR_BTN_PRESSED   = 0x0821
+	COLOR_BTN_LIVE      = 0x03A0
+	COLOR_BTN_SIM       = 0x1295
+	COLOR_BTN_STOP      = 0x7821
+	COLOR_BORDER        = 0x39E9
+	GRID_DAY_R          = 58
+	GRID_DAY_G          = 126
+	GRID_DAY_B          = 186
+	GRID_NIGHT_R        = 24
+	GRID_NIGHT_G        = 42
+	GRID_NIGHT_B        = 72
+
+	// Map overlay marker geometry
+	HOME_RING_RADIUS    = 4
+	HOME_CORE_RADIUS    = 2
+	MOON_RADIUS         = 4
+	MOON_OUTER_R2       = 18
+	MOON_BITE_OFFSET_X  = 2
+	MOON_BITE_OFFSET_Y  = -1
+	MOON_BITE_MIN_R2    = 7
+	MOON_BITE_SPAN_R2   = 8.0
+	MOON_RIM_BAND_R2    = 4
+	HELP_MOON_ILLUM     = 0.5
+	SUN_RAY_ORTHO_LEN   = 11
+	SUN_RAY_DIAG_LEN    = 8
+	SUN_CORONA_RADIUS   = 6
+	SUN_DISC_RADIUS     = 5
+	SUN_CORE_RADIUS     = 2
+	PROBE_ARM_LEN       = 6
+	PROBE_SPAN_LEN      = PROBE_ARM_LEN*2 + 1
+	PROBE_RING_RADIUS   = 3
+
+	// Fixed-point Q8 / Q10 / Q20 & 16-level twilight ramp
+	// Twilight spans sin(alt) in [-0.16 .. +0.06], or [-164 .. +61] in Q10.
+	Q8_ONE                  = 256
+	Q8_SHIFT                = 8
+	Q10_ONE                 = 1024
+	Q10_SHIFT               = 10
+	Q20_SHIFT               = Q10_SHIFT * 2
+	TWILIGHT_MIN_SIN_Q10    = -164
+	TWILIGHT_MAX_SIN_Q10    = 61
+	TWILIGHT_SPAN_Q10       = TWILIGHT_MAX_SIN_Q10 - TWILIGHT_MIN_SIN_Q10
+	LIGHT_LEVEL_COUNT       = 16
+	MAX_LIGHT_LEVEL         = 15
+	DAY_GRID_MIN_LEVEL      = 8
+	CITY_GLOW_END_LEVEL     = 12
+	NIGHT_AMBIENT_SCALE_256 = 48
+	DAY_DELTA_SCALE_256     = 207
+	CITY_DAY_R              = 82
+	CITY_DAY_G              = 136
+	CITY_DAY_B              = 62
+
+	// 4-bit terrain & city cell types (0..14, assigned sequentially by addBiome)
+	CELL_TYPE_COUNT  = 15
+	PALETTE_LUT_SIZE = LIGHT_LEVEL_COUNT * CELL_TYPE_COUNT
+
+	// Clocks, cities & interaction timings
+	MIN_VALID_UNIX_SEC  = 1700000000
+	FALLBACK_UNIX_SEC   = 1795325160
+	J2000_UNIX_SEC      = 946728000 // 2000-01-01 12:00:00 UTC
+	MS_PER_SEC          = 1000
+	SECS_PER_MINUTE     = 60
+	SECS_PER_HOUR       = 3600
+	SECS_PER_DAY        = 86400
+	HOURS_PER_DAY       = 24
+	MINS_PER_DAY        = 1440
+	SOLAR_NOON_MIN      = 720
+	SIM_STEP_4H_SEC     = 4 * SECS_PER_HOUR
+	MAP_REFRESH_SEC     = 300
+	TIMELAPSE_STEP_SEC  = SECS_PER_HOUR
+	PLAY_PERIOD_MS      = 2000
+	PROBE_DISPLAY_MS    = 6000
+	NTP_WAIT_TIMEOUT_MS = 6000
+	FRAME_DELAY_MS      = 45
+
+	// Low-precision solar ephemeris constants (USNO / Meeus, accurate to ~0.01 deg)
+	EARTH_TILT_DEG           = 23.439    // Axial obliquity of the ecliptic
+	SUN_MEAN_LON_J2000_DEG   = 280.460   // Sun mean ecliptic longitude at J2000.0
+	SUN_MEAN_LON_DEG_PER_DAY = 0.9856474 // 360 deg / tropical year (365.2422 d)
+	SUN_MEAN_ANOM_J2000_DEG  = 357.528   // Earth mean orbital anomaly at J2000.0
+	SUN_MEAN_ANOM_DEG_PER_DAY = 0.9856003 // 360 deg / anomalistic year (365.2596 d)
+	EQUATION_CENTER_C1_DEG   = 1.915     // 1st eccentricity harmonic (2*e in deg)
+	EQUATION_CENTER_C2_DEG   = 0.020     // 2nd eccentricity harmonic
+	EOT_OBLIQUITY_C1_DEG     = 2.466     // Ecliptic-to-equator projection (tan^2(eps/2))
+	EOT_OBLIQUITY_C2_DEG     = 0.053     // 2nd obliquity projection harmonic
+	EARTH_ROT_DEG_PER_MIN    = 0.25      // 360 deg / 1440 min
+	EARTH_ROT_MIN_PER_DEG    = 4.0       // 1440 min / 360 deg
+
+	// Low-precision lunar ephemeris constants (Meeus, accurate to ~1 deg)
+	MOON_MEAN_LON_J2000_DEG   = 218.316
+	MOON_MEAN_LON_DEG_PER_DAY = 13.176396
+	MOON_MEAN_ANOM_J2000_DEG  = 134.963
+	MOON_MEAN_ANOM_DEG_PER_DAY = 13.064993
+	MOON_ARG_LAT_J2000_DEG    = 93.272
+	MOON_ARG_LAT_DEG_PER_DAY  = 13.229350
+	MOON_ECLIPTIC_C1_DEG      = 6.289    // Equation of center for lunar orbit
+	MOON_LAT_AMP_DEG          = 5.128    // 5.1 deg orbital inclination to ecliptic
+	MOON_MAX_BOOST_LEVELS     = 8        // Max brightness lift (0..8, < CITY_GLOW_END_LEVEL) on moonlit night side
+
+	// Map projection & city indicator thresholds
+	MAP_LON_MIN_DEG         = -180.0
+	MAP_LON_MAX_DEG         = 180.0
+	MAP_LON_SPAN_DEG        = 360.0
+	MAP_LAT_MAX_DEG         = 80.0
+	AIRPORT_MAX_VALID_LAT   = 85.0
+	AIRPORT_MIN_VALID_DEG   = 0.01
+	AP_INFO_BUF_SIZE        = 72
+	AP_INFO_LAT_OFFSET      = 60
+	AP_INFO_LON_OFFSET      = 64
+	LOCAL_TIME_BUF_SIZE     = 32
+	LOCAL_TIME_FMT_MAX      = 24
+	HMS_HOUR_OFFSET         = 0
+	HMS_MIN_OFFSET          = 3
+	HMS_SEC_OFFSET          = 6
+	SOLAR_DAY_SIN_ALT       = 0.02       // Sun > ~1.1 deg above horizon
+	SOLAR_TWILIGHT_SIN_ALT  = -0.10      // Civil/nautical dusk boundary (~-6 deg)
+
+	// Header & control bar geometry (single source of truth for drawing & hit-testing)
+	HEADER_LEFT_PAD      = 6
+	HEADER_SOL_BOX_X     = 144
+	HEADER_SOL_BOX_W     = 42
+	HEADER_SOL_LABEL_X   = 150
+	HEADER_SOL_LABEL_Y   = 3
+	HEADER_SOL_TIME_X    = 146
+	HEADER_SOL_TIME_Y    = 13
+	HEADER_UTC_LABEL_X   = 192
+	HEADER_UTC_CLOCK_X   = 224
+	HEADER_CLOCK_BOX_W   = 72
+	HEADER_CLOCK_DIGIT_W = 9
+	HEADER_COLON_OFFSET  = 1
+	HEADER_COLON_STEP    = 5
+	HEADER_HELP_X        = 298
+	HEADER_HELP_W        = 20
+	CTRL_BTN_Y           = CTRL_Y + 2
+	CTRL_BTN_H           = 22
+	CTRL_BTN_W           = 48
+	CTRL_LIVE_W          = 54
+	CTRL_PLAY_W          = 53
+	CTRL_M4H_X           = 3
+	CTRL_M1H_X           = 54
+	CTRL_LIVE_X          = 105
+	CTRL_P1H_X           = 162
+	CTRL_P4H_X           = 213
+	CTRL_PLAY_X          = 264
+
+	CITY_COUNT          = 12
+	CITY_CODE_STRIDE    = 4
+	CITY_CODE_LEN       = 3
+	CITIES_PER_PAGE     = 4
+	CITY_PAGE_COUNT     = 3
+	CITY_ARROW_W        = 20
+	CITY_CARD_W         = 70
+	CITY_DOT_OFFSET_X   = 7
+	CITY_DOT_OFFSET_Y   = 13
+	CITY_DOT_RADIUS     = 3
+	CITY_TEXT_OFFSET_X  = 14
+	CITY_CODE_OFFSET_Y  = 3
+	CITY_TIME_OFFSET_Y  = 13
+	PROBE_BANNER_PAD_X  = 6
+	PROBE_BANNER_TEXT_Y = CITY_Y + 5
+	PROBE_CLOSE_PAD_X   = 4
+	PROBE_CLOSE_W       = CITY_ARROW_W + 2
+
+	// Help modal geometry
+	HELP_MARGIN_X       = 12
+	HELP_MARGIN_Y       = 6
+	HELP_TEXT_X         = 24
+	HELP_TITLE_Y        = MAP_Y + 12
+	HELP_LINE_START_Y   = MAP_Y + 36
+	HELP_LINE_STEP_Y    = 14
+	HELP_LEGEND_DOT_Y   = MAP_Y + 114
+	HELP_LEGEND_TEXT_Y  = MAP_Y + 110
+	HELP_LEGEND_GAP_X   = 7
+	HELP_LEGEND_PAD_X   = 12
+	HELP_BTN_X          = 120
+	HELP_BTN_Y          = MAP_Y + 126
+	HELP_BTN_W          = 80
+	HELP_BTN_H          = 20
+)
+
+// ----------------------------------------------------------------------------
+// 2. Domain Structs & Application State
+// ----------------------------------------------------------------------------
+
+type CelestialBody struct {
+	subLatDeg       float32
+	subLonDeg       float32
+	sinDec          float32
+	cosDec          float32
+	sinDecQ10       int
+	cosDecCosLonQ10 int
+	cosDecSinLonQ10 int
+	illum           float32 // Illuminated fraction 0.0 (new) .. 1.0 (full)
+	waxSign         int     // +1 waxing (east of sun, right side lit), -1 waning (left side lit)
+}
+
+type CityClock struct {
+	latDeg       float32
+	lonDeg       float32
+	utcOffsetMin int
+}
+
+type MapProbe struct {
+	active  bool
+	untilMs int
+	latDeg  float32
+	lonDeg  float32
+	hour    int
+	min     int
+}
+
+type HomeAirport struct {
+	valid  bool
+	latDeg float32
+	lonDeg float32
+}
+
+type AppState struct {
+	simOffsetSec  int
+	playing       bool
+	cityPage      int
+	lastMapSec    int
+	lastHeaderSec int
+	lastSolMinute int
+	lastPlayMs    int
+	pendingClick  bool
+	pendingX      int
+	pendingY      int
+}
+
+var (
+	sun    CelestialBody
+	moon   CelestialBody
+	probe  MapProbe
+	home   HomeAirport
+	state  AppState
+	cities        [CITY_COUNT]CityClock
+	cityCodeChars [CITY_COUNT * CITY_CODE_STRIDE]byte
+
+	// Precomputed Q10 trig tables and offscreen rendering buffers (160x80 cell grid)
+	sinLonQ10        [MAP_CELL_COLS]int
+	cosLonQ10        [MAP_CELL_COLS]int
+	sinLatQ10        [MAP_CELL_ROWS]int
+	cosLatQ10        [MAP_CELL_ROWS]int
+	lightBuf         [MAP_CELL_COUNT]byte
+	qtrBufSwapped565 [QTR_FRAME_PIXELS]uint16
+	mapData          [PACKED_MAP_BYTES]byte
+	palLutSwapped565 [PALETTE_LUT_SIZE]uint16
+
+	baseRed      [CELL_TYPE_COUNT]int
+	baseGreen    [CELL_TYPE_COUNT]int
+	baseBlue     [CELL_TYPE_COUNT]int
+	glowRed      [CELL_TYPE_COUNT]int
+	glowGreen    [CELL_TYPE_COUNT]int
+	glowBlue     [CELL_TYPE_COUNT]int
+	asciiToCell  [ASCII_TABLE_SIZE]byte
+	nextBiomeIdx int
+	apInfoBuf    [AP_INFO_BUF_SIZE]byte
+	localBuf     [LOCAL_TIME_BUF_SIZE]byte
+)
+
+// ----------------------------------------------------------------------------
+// 3. Entry Point & Event Loop (Newspaper Order: High-Level Flow First)
+// ----------------------------------------------------------------------------
+
+func waitForNtpSync() {
+	if os_get_unix_time() >= MIN_VALID_UNIX_SEC {
+		return
+	}
+	tft_set_text_color(CYAN, BLACK)
+	tft_draw_string("Syncing NTP time...", NTP_MSG_X, NTP_MSG_Y, FONT_MEDIUM)
+	for waitMs := 0; waitMs < NTP_WAIT_TIMEOUT_MS && os_get_unix_time() < MIN_VALID_UNIX_SEC; waitMs += NTP_POLL_MS {
+		os_delay_ms(NTP_POLL_MS)
+	}
+}
+
+// Lakatos OS expires unpolled touch latches after 250ms (lakatosReadClick).
+// Sampling os_read_click() every ~80ms during map renders preserves taps and
+// lets the STOP button respond in <100ms even mid-render.
+func latchPendingClick() {
+	os_yield()
+	if !state.pendingClick {
+		clicked, sx, sy := os_read_click()
+		if clicked {
+			if state.playing && sy >= CTRL_Y && sx >= CTRL_PLAY_X-TOUCH_HIT_PAD {
+				state.playing = false
+				drawControlBar()
+				return
+			}
+			state.pendingClick = true
+			state.pendingX = sx
+			state.pendingY = sy
+		}
+	}
+}
+
+func refreshAllViews(unixSec int) {
+	updateSunAndMoonPosition(unixSec)
+	renderWorldMap()
+	state.lastSolMinute = -1
+	drawHeaderClocks(unixSec)
+	drawCityStrip(unixSec)
+	state.lastMapSec = unixSec
+	state.lastHeaderSec = unixSec
+}
+
+func clearProbeOverlay() {
+	oldX := lonDegToScreenX(probe.lonDeg)
+	oldY := latDegToScreenY(probe.latDeg)
+	probe.active = false
+	restoreMapPatch(oldX, oldY)
+	drawMapOverlays()
+}
+
+func main() {
+	tft_fill_screen(BLACK)
+	initTables()
+	drawHeaderFrame()
+	drawControlBar()
+	waitForNtpSync()
+
+	unixSec := effectiveUnixSec()
+	state.lastSolMinute = -1
+	refreshAllViews(unixSec)
+
+	for {
+		nowMs := os_millis()
+		needMap, needCtrl, needCity := pollTouchEvents(nowMs)
+
+		if state.playing && (nowMs-state.lastPlayMs >= PLAY_PERIOD_MS) {
+			state.lastPlayMs = nowMs
+			state.simOffsetSec += TIMELAPSE_STEP_SEC
+			needMap = true
+		}
+
+		unixSec = effectiveUnixSec()
+		if !needMap && (unixSec-state.lastMapSec >= MAP_REFRESH_SEC || state.lastMapSec-unixSec >= MAP_REFRESH_SEC) {
+			needMap = true
+		}
+
+		if needMap {
+			refreshAllViews(unixSec)
+			if needCtrl {
+				drawControlBar()
+			}
+			if state.pendingClick {
+				continue
+			}
+			os_delay_ms(FRAME_DELAY_MS)
+			continue
+		}
+
+		if unixSec != state.lastHeaderSec {
+			drawHeaderClocks(unixSec)
+			state.lastHeaderSec = unixSec
+			if (unixSec % SECS_PER_MINUTE) == 0 {
+				needCity = true
+			}
+		}
+		if probe.active && nowMs >= probe.untilMs {
+			clearProbeOverlay()
+			needCity = true
+		}
+		if needCity {
+			drawCityStrip(unixSec)
+		}
+		if needCtrl {
+			drawControlBar()
+		}
+		os_delay_ms(FRAME_DELAY_MS)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// 4. Color, Coordinate & Time Conversion Helpers
+// ----------------------------------------------------------------------------
+
+// tft_push_rgb565 streams raw uint16 words with swapBytes=false, requiring byte-swapped RGB565.
+func toSwapped565(native565 int) uint16 {
+	return uint16(((native565 & BYTE_MASK) << BYTE_SHIFT) | ((native565 >> BYTE_SHIFT) & BYTE_MASK))
+}
+
+func clampInt(val int, minVal int, maxVal int) int {
+	if val < minVal {
+		return minVal
+	}
+	if val > maxVal {
+		return maxVal
+	}
+	return val
+}
+
+func lonDegToScreenX(lonDeg float32) int {
+	screenX := int((lonDeg - MAP_LON_MIN_DEG) * (float32(MAP_W) / MAP_LON_SPAN_DEG))
+	return clampInt(screenX, 0, MAP_W-1)
+}
+
+func latDegToScreenY(latDeg float32) int {
+	screenY := MAP_Y + int(MAP_LAT_MAX_DEG-latDeg)
+	return clampInt(screenY, MAP_Y, MAP_Y+MAP_H-1)
+}
+
+func screenXToLonDeg(screenX int) float32 {
+	return MAP_LON_MIN_DEG + (float32(screenX)+0.5)*(MAP_LON_SPAN_DEG/float32(MAP_W))
+}
+
+func screenYToLatDeg(screenY int) float32 {
+	return MAP_LAT_MAX_DEG - (float32(screenY-MAP_Y) + 0.5)
+}
+
+func wrapDeg360(deg float32) float32 {
+	return deg - MAP_LON_SPAN_DEG*floor(deg/MAP_LON_SPAN_DEG)
+}
+
+func wrapDegSigned180(deg float32) float32 {
+	for deg > MAP_LON_MAX_DEG {
+		deg -= MAP_LON_SPAN_DEG
+	}
+	for deg < MAP_LON_MIN_DEG {
+		deg += MAP_LON_SPAN_DEG
+	}
+	return deg
+}
+
+func wrapSecondsOfDay(unixSec int) int {
+	secOfDay := unixSec % SECS_PER_DAY
+	if secOfDay < 0 {
+		secOfDay += SECS_PER_DAY
+	}
+	return secOfDay
+}
+
+func computeLocalSolarHM(lonDeg float32) (int, int) {
+	solarMin := int(float32(SOLAR_NOON_MIN) + (lonDeg-sun.subLonDeg)*EARTH_ROT_MIN_PER_DEG)
+	for solarMin < 0 {
+		solarMin += MINS_PER_DAY
+	}
+	solarMin %= MINS_PER_DAY
+	return solarMin / SECS_PER_MINUTE, solarMin % SECS_PER_MINUTE
+}
+
+func effectiveUnixSec() int {
+	nowSec := os_get_unix_time()
+	if nowSec < MIN_VALID_UNIX_SEC {
+		nowSec = FALLBACK_UNIX_SEC + os_millis()/MS_PER_SEC
+	}
+	return nowSec + state.simOffsetSec
+}
+
+// ----------------------------------------------------------------------------
+// 5. Lookup Table & World Data Initialization
+// ----------------------------------------------------------------------------
+
+func addBiome(sym int, r int, g int, b int) int {
+	idx := nextBiomeIdx
+	asciiToCell[sym] = byte(idx)
+	baseRed[idx] = r
+	baseGreen[idx] = g
+	baseBlue[idx] = b
+	glowRed[idx] = 0
+	glowGreen[idx] = 0
+	glowBlue[idx] = 0
+	nextBiomeIdx++
+	return idx
+}
+
+func addCityTier(sym int, nightR int, nightG int, nightB int) {
+	idx := addBiome(sym, CITY_DAY_R, CITY_DAY_G, CITY_DAY_B)
+	glowRed[idx] = nightR
+	glowGreen[idx] = nightG
+	glowBlue[idx] = nightB
+}
+
+func setCityClock(idx int, code string, latDeg float32, lonDeg float32, utcOffsetMin int) {
+	base := idx * CITY_CODE_STRIDE
+	cityCodeChars[base] = code[0]
+	cityCodeChars[base+1] = code[1]
+	cityCodeChars[base+2] = code[2]
+	cityCodeChars[base+3] = 0
+	cities[idx].latDeg = latDeg
+	cities[idx].lonDeg = lonDeg
+	cities[idx].utcOffsetMin = utcOffsetMin
+}
+
+func initPaletteLut() {
+	nextBiomeIdx = 0
+	addBiome(' ', 12, 58, 128)      // Deep ocean
+	addBiome('~', 22, 92, 168)      // Mid ocean
+	addBiome('.', 46, 138, 198)     // Shallow ocean
+	addBiome('F', 34, 110, 48)      // Dense forest
+	addBiome('W', 64, 128, 58)      // Woodland
+	addBiome('g', 102, 144, 68)     // Grassland
+	addBiome('s', 146, 152, 86)     // Scrub / steppe
+	addBiome('D', 196, 166, 110)    // Arid desert
+	addBiome('h', 144, 126, 98)     // Foothills
+	addBiome('M', 118, 114, 108)    // High mountain
+	addBiome('t', 152, 158, 156)    // Tundra
+	addBiome('*', 224, 236, 246)    // Ice cap
+	addCityTier('1', 96, 100, 110)  // City halo
+	addCityTier('2', 172, 170, 160) // City mid
+	addCityTier('3', 246, 242, 228) // City core
+
+	for level := 0; level < LIGHT_LEVEL_COUNT; level++ {
+		sunScale256 := NIGHT_AMBIENT_SCALE_256 + (level*DAY_DELTA_SCALE_256)/MAX_LIGHT_LEVEL
+		for cellType := 0; cellType < CELL_TYPE_COUNT; cellType++ {
+			r := (baseRed[cellType] * sunScale256) >> Q8_SHIFT
+			g := (baseGreen[cellType] * sunScale256) >> Q8_SHIFT
+			b := (baseBlue[cellType] * sunScale256) >> Q8_SHIFT
+
+			// City lights stay at 100% through night & moonlight (0..MOON_MAX_BOOST_LEVELS),
+			// then fade out during sunrise/daylight twilight (..CITY_GLOW_END_LEVEL).
+			if glowRed[cellType] > 0 && level < CITY_GLOW_END_LEVEL {
+				cityAlpha256 := Q8_ONE
+				if level > MOON_MAX_BOOST_LEVELS {
+					twilightSpan := CITY_GLOW_END_LEVEL - MOON_MAX_BOOST_LEVELS
+					cityAlpha256 = ((CITY_GLOW_END_LEVEL - level) * Q8_ONE) / twilightSpan
+				}
+				r += ((glowRed[cellType] - r) * cityAlpha256) >> Q8_SHIFT
+				g += ((glowGreen[cellType] - g) * cityAlpha256) >> Q8_SHIFT
+				b += ((glowBlue[cellType] - b) * cityAlpha256) >> Q8_SHIFT
+			}
+
+			palLutSwapped565[level*CELL_TYPE_COUNT+cellType] = toSwapped565(rgb565(r, g, b))
+		}
+	}
+}
+
+func initCitiesAndHomeAirport() {
+	// Ordered west-to-east by timezone / longitude (UTC-10 .. UTC+11)
+	// Page 0: Americas & Pacific
+	setCityClock(0, "HNL", 21.3, -157.8, -600)
+	setCityClock(1, "LAX", 34.0, -118.2, -480)
+	setCityClock(2, "NYC", 40.7, -74.0, -300)
+	setCityClock(3, "RIO", -22.9, -43.2, -180)
+	// Page 1: Europe, Africa & Middle East
+	setCityClock(4, "LON", 51.5, -0.1, 0)
+	setCityClock(5, "PAR", 48.9, 2.3, 60)
+	setCityClock(6, "CAI", 30.0, 31.2, 120)
+	setCityClock(7, "DXB", 25.2, 55.3, 240)
+	// Page 2: Asia & Oceania
+	setCityClock(8, "BOM", 19.1, 72.9, 330)
+	setCityClock(9, "BJS", 39.9, 116.4, 480)
+	setCityClock(10, "TYO", 35.7, 139.7, 540)
+	setCityClock(11, "SYD", -33.9, 151.2, 660)
+
+	home.valid = false
+	if os_get_airport_info(int(&apInfoBuf[0])) != 0 {
+		home.latDeg = float32_from_bits(peek4(int(&apInfoBuf[0]) + AP_INFO_LAT_OFFSET))
+		home.lonDeg = float32_from_bits(peek4(int(&apInfoBuf[0]) + AP_INFO_LON_OFFSET))
+		if fabs(home.latDeg) <= AIRPORT_MAX_VALID_LAT && fabs(home.lonDeg) <= MAP_LON_MAX_DEG {
+			home.valid = (fabs(home.latDeg) > AIRPORT_MIN_VALID_DEG) || (fabs(home.lonDeg) > AIRPORT_MIN_VALID_DEG)
+		}
+	}
+}
+
+func initTables() {
+	for mapCol := 0; mapCol < MAP_CELL_COLS; mapCol++ {
+		lonRad := screenXToLonDeg(mapCol*CELL_PX) * DEG_TO_RAD
+		sinLonQ10[mapCol] = int(sin(lonRad) * float32(Q10_ONE))
+		cosLonQ10[mapCol] = int(cos(lonRad) * float32(Q10_ONE))
+	}
+	for cellRow := 0; cellRow < MAP_CELL_ROWS; cellRow++ {
+		latRad := screenYToLatDeg(MAP_Y+cellRow*CELL_PX) * DEG_TO_RAD
+		sinLatQ10[cellRow] = int(sin(latRad) * float32(Q10_ONE))
+		cosLatQ10[cellRow] = int(cos(latRad) * float32(Q10_ONE))
+	}
+
+	// Must run before WORLD_MAP parsing because addBiome() populates asciiToCell[].
+	initPaletteLut()
+
+	worldStr := WORLD_MAP
+	worldLen := len(worldStr)
+	cellIdx := 0
+	for i := 0; i < worldLen && cellIdx < MAP_CELL_COUNT; i++ {
+		ch := int(worldStr[i])
+		if ch == '\n' || ch == '\r' {
+			continue
+		}
+		cell := 0
+		if ch >= 0 && ch < ASCII_TABLE_SIZE {
+			cell = int(asciiToCell[ch])
+		}
+		byteIdx := cellIdx >> 1
+		if (cellIdx & 1) == 0 {
+			mapData[byteIdx] = byte(cell << NIBBLE_SHIFT)
+		} else {
+			mapData[byteIdx] = byte(int(mapData[byteIdx]) | cell)
+		}
+		cellIdx++
+	}
+
+	initCitiesAndHomeAirport()
+}
+
+// ----------------------------------------------------------------------------
+// 6. Solar & Lunar Astronomy (Declination, Equation of Time & Subpoints)
+// ----------------------------------------------------------------------------
+
+// Populate subpoint coordinates (deg), trig terms, and pre-scaled Q10 lighting vectors
+// shared by both the Sun and the Moon.
+func setCelestialSubpoint(body *CelestialBody, sinDec float32, subLonDeg float32, illum float32) {
+	cosDec := sqrt(1.0 - sinDec*sinDec)
+	lonRad := subLonDeg * DEG_TO_RAD
+	cosDecQ10 := cosDec * float32(Q10_ONE)
+
+	body.sinDec = sinDec
+	body.cosDec = cosDec
+	body.subLatDeg = atan2(sinDec, cosDec) * RAD_TO_DEG
+	body.subLonDeg = subLonDeg
+	body.sinDecQ10 = int(sinDec * float32(Q10_ONE))
+	body.cosDecCosLonQ10 = int(cosDecQ10 * cos(lonRad))
+	body.cosDecSinLonQ10 = int(cosDecQ10 * sin(lonRad))
+	body.illum = illum
+}
+
+// Compute subsolar latitude (solar declination) and subsolar longitude using the
+// low-precision USNO solar ephemeris, returning the sun's true ecliptic longitude (rad).
+func updateSolarPosition(daysSinceJ2000 float32, unixSec int, sinObliq float32) float32 {
+	meanLonDeg := wrapDeg360(SUN_MEAN_LON_J2000_DEG + SUN_MEAN_LON_DEG_PER_DAY*daysSinceJ2000)
+	meanAnomDeg := wrapDeg360(SUN_MEAN_ANOM_J2000_DEG + SUN_MEAN_ANOM_DEG_PER_DAY*daysSinceJ2000)
+	anomRad := meanAnomDeg * DEG_TO_RAD
+
+	eclipticLonDeg := meanLonDeg + EQUATION_CENTER_C1_DEG*sin(anomRad) + EQUATION_CENTER_C2_DEG*sin(2.0*anomRad)
+	eclipticLonRad := eclipticLonDeg * DEG_TO_RAD
+
+	eotDeg := -EQUATION_CENTER_C1_DEG*sin(anomRad) - EQUATION_CENTER_C2_DEG*sin(2.0*anomRad) + EOT_OBLIQUITY_C1_DEG*sin(2.0*eclipticLonRad) - EOT_OBLIQUITY_C2_DEG*sin(4.0*eclipticLonRad)
+	eotMin := eotDeg * EARTH_ROT_MIN_PER_DEG
+
+	utcMin := float32(wrapSecondsOfDay(unixSec)) / float32(SECS_PER_MINUTE)
+	subLonDeg := wrapDegSigned180((float32(SOLAR_NOON_MIN) - utcMin - eotMin) * EARTH_ROT_DEG_PER_MIN)
+
+	setCelestialSubpoint(&sun, sinObliq*sin(eclipticLonRad), subLonDeg, 1.0)
+	return eclipticLonRad
+}
+
+func updateLunarPosition(daysSinceJ2000 float32, sunEclLonRad float32, sinObliq float32, cosObliq float32) {
+	moonMeanLonDeg := wrapDeg360(MOON_MEAN_LON_J2000_DEG + MOON_MEAN_LON_DEG_PER_DAY*daysSinceJ2000)
+	moonAnomRad := wrapDeg360(MOON_MEAN_ANOM_J2000_DEG+MOON_MEAN_ANOM_DEG_PER_DAY*daysSinceJ2000) * DEG_TO_RAD
+	moonArgLatRad := wrapDeg360(MOON_ARG_LAT_J2000_DEG+MOON_ARG_LAT_DEG_PER_DAY*daysSinceJ2000) * DEG_TO_RAD
+
+	moonLamRad := (moonMeanLonDeg + MOON_ECLIPTIC_C1_DEG*sin(moonAnomRad)) * DEG_TO_RAD
+	moonBetaRad := (MOON_LAT_AMP_DEG * sin(moonArgLatRad)) * DEG_TO_RAD
+	sinMoonBeta := sin(moonBetaRad)
+	cosMoonBeta := cos(moonBetaRad)
+
+	sinDec := sinObliq*sin(moonLamRad)*cosMoonBeta + cosObliq*sinMoonBeta
+	sunRaRad := atan2(sin(sunEclLonRad)*cosObliq, cos(sunEclLonRad))
+	moonRaY := sin(moonLamRad)*cosObliq - (sinMoonBeta/cosMoonBeta)*sinObliq
+	moonRaRad := atan2(moonRaY, cos(moonLamRad))
+
+	subLonDeg := wrapDegSigned180(sun.subLonDeg + (moonRaRad-sunRaRad)*RAD_TO_DEG)
+	elongRad := moonLamRad - sunEclLonRad
+	elongCos := cos(elongRad) * cosMoonBeta
+	moon.waxSign = 1
+	if sin(elongRad) < 0.0 {
+		moon.waxSign = -1
+	}
+	setCelestialSubpoint(&moon, sinDec, subLonDeg, (1.0-elongCos)*0.5)
+}
+
+func updateSunAndMoonPosition(unixSec int) {
+	daysSinceJ2000 := float32(unixSec-J2000_UNIX_SEC) / float32(SECS_PER_DAY)
+	obliquityRad := EARTH_TILT_DEG * DEG_TO_RAD
+	sinObliq := sin(obliquityRad)
+	cosObliq := cos(obliquityRad)
+
+	sunEclLonRad := updateSolarPosition(daysSinceJ2000, unixSec, sinObliq)
+	updateLunarPosition(daysSinceJ2000, sunEclLonRad, sinObliq, cosObliq)
+}
+
+func solarSinAltitude(latDeg float32, lonDeg float32) float32 {
+	latRad := latDeg * DEG_TO_RAD
+	deltaLonRad := (lonDeg - sun.subLonDeg) * DEG_TO_RAD
+	return sin(latRad)*sun.sinDec + cos(latRad)*sun.cosDec*cos(deltaLonRad)
+}
+
+// ----------------------------------------------------------------------------
+// 7. Two-Stage Offscreen Map Renderer
+// ----------------------------------------------------------------------------
+
+func rowDotTermsQ10(body *CelestialBody, cellRow int) (int, int, int) {
+	aTermQ20 := sinLatQ10[cellRow] * body.sinDecQ10
+	bCosQ10 := (cosLatQ10[cellRow] * body.cosDecCosLonQ10) >> Q10_SHIFT
+	bSinQ10 := (cosLatQ10[cellRow] * body.cosDecSinLonQ10) >> Q10_SHIFT
+	return aTermQ20, bCosQ10, bSinQ10
+}
+
+// Stage 1: Compute 4-bit sunlight levels for all 160x80 cells offscreen so the
+// visible map stays undisturbed during the calculation.
+func computeLightBuffer() {
+	moonScaleQ10 := int(moon.illum * float32(MOON_MAX_BOOST_LEVELS) * float32(Q10_ONE))
+
+	for cellRow := 0; cellRow < MAP_CELL_ROWS; cellRow++ {
+		if (cellRow & CLICK_POLL_ROW_MASK) == 0 {
+			latchPendingClick()
+		}
+		aSunQ20, bSunCosQ10, bSunSinQ10 := rowDotTermsQ10(&sun, cellRow)
+		aMoonQ20, bMoonCosQ10, bMoonSinQ10 := rowDotTermsQ10(&moon, cellRow)
+		rowOffset := cellRow * MAP_CELL_COLS
+
+		for mapCol := 0; mapCol < MAP_CELL_COLS; mapCol++ {
+			sinAltQ10 := (aSunQ20 + bSunCosQ10*cosLonQ10[mapCol] + bSunSinQ10*sinLonQ10[mapCol]) >> Q10_SHIFT
+			level := MAX_LIGHT_LEVEL
+			if sinAltQ10 <= TWILIGHT_MIN_SIN_Q10 {
+				level = 0
+				if moonScaleQ10 > 0 {
+					sinMoonQ10 := (aMoonQ20 + bMoonCosQ10*cosLonQ10[mapCol] + bMoonSinQ10*sinLonQ10[mapCol]) >> Q10_SHIFT
+					if sinMoonQ10 > 0 {
+						level = (sinMoonQ10 * moonScaleQ10) >> Q20_SHIFT
+						if level > MOON_MAX_BOOST_LEVELS {
+							level = MOON_MAX_BOOST_LEVELS
+						}
+					}
+				}
+			} else if sinAltQ10 < TWILIGHT_MAX_SIN_Q10 {
+				level = ((sinAltQ10 - TWILIGHT_MIN_SIN_Q10) * MAX_LIGHT_LEVEL) / TWILIGHT_SPAN_Q10
+			}
+
+			lightBuf[rowOffset+mapCol] = byte(level)
+		}
+	}
+}
+
+func unpackCellType(mapRowOffset int, mapCol int) int {
+	packedByte := int(mapData[mapRowOffset+(mapCol/2)])
+	if (mapCol & 1) == 0 {
+		return (packedByte >> NIBBLE_SHIFT) & NIBBLE_MASK
+	}
+	return packedByte & NIBBLE_MASK
+}
+
+func gridDotColor(cellRow int, mapCol int, dayColor uint16, nightColor uint16) uint16 {
+	if int(lightBuf[cellRow*MAP_CELL_COLS+mapCol]) >= DAY_GRID_MIN_LEVEL {
+		return dayColor
+	}
+	return nightColor
+}
+
+// Stage 2: Expand 160x80 lightBuf + mapData into 2x2 pixel cells through palLutSwapped565
+// and push one 320x40 quarter-frame strip to the display in a single SPI DMA call.
+// Unpacks 2 adjacent cells per mapData byte (80 iterations/row) to avoid per-cell VM calls.
+func blitQuarterStrip(startRow int) {
+	gridDaySwapped565 := toSwapped565(rgb565(GRID_DAY_R, GRID_DAY_G, GRID_DAY_B))
+	gridNightSwapped565 := toSwapped565(rgb565(GRID_NIGHT_R, GRID_NIGHT_G, GRID_NIGHT_B))
+	startCellRow := startRow / CELL_PX
+
+	for localCellRow := 0; localCellRow < QTR_CELL_ROWS; localCellRow++ {
+		cellRow := startCellRow + localCellRow
+		row0Px := localCellRow * CELL_PX * MAP_W
+		row1Px := row0Px + MAP_W
+		lightRowOffset := cellRow * MAP_CELL_COLS
+		mapRowOffset := cellRow * PACKED_MAP_ROW_B
+
+		for byteCol := 0; byteCol < PACKED_MAP_ROW_B; byteCol++ {
+			packedMapByte := int(mapData[mapRowOffset+byteCol])
+			cellLeft := (packedMapByte >> NIBBLE_SHIFT) & NIBBLE_MASK
+			cellRight := packedMapByte & NIBBLE_MASK
+
+			lightCol := byteCol * 2
+			levelLeft := int(lightBuf[lightRowOffset+lightCol])
+			levelRight := int(lightBuf[lightRowOffset+lightCol+1])
+
+			pxLeft := palLutSwapped565[levelLeft*CELL_TYPE_COUNT+cellLeft]
+			pxRight := palLutSwapped565[levelRight*CELL_TYPE_COUNT+cellRight]
+
+			qtrBufSwapped565[row0Px] = pxLeft
+			qtrBufSwapped565[row0Px+1] = pxLeft
+			qtrBufSwapped565[row1Px] = pxLeft
+			qtrBufSwapped565[row1Px+1] = pxLeft
+
+			qtrBufSwapped565[row0Px+2] = pxRight
+			qtrBufSwapped565[row0Px+3] = pxRight
+			qtrBufSwapped565[row1Px+2] = pxRight
+			qtrBufSwapped565[row1Px+3] = pxRight
+
+			row0Px += CELL_PX * 2
+			row1Px += CELL_PX * 2
+		}
+
+		// Overlay dashed geographic reference lines (Equator, Tropics, Prime Meridian)
+		stripRowBase := localCellRow * CELL_PX * MAP_W
+		if cellRow == EQUATOR_CELL_ROW {
+			for mapCol := 0; mapCol < MAP_CELL_COLS; mapCol += EQUATOR_DASH_CELLS {
+				qtrBufSwapped565[stripRowBase+mapCol*CELL_PX] = gridDotColor(cellRow, mapCol, gridDaySwapped565, gridNightSwapped565)
+			}
+		} else if (cellRow == TROPIC_NORTH_CELL_ROW) || (cellRow == TROPIC_SOUTH_CELL_ROW) {
+			for mapCol := 0; mapCol < MAP_CELL_COLS; mapCol += TROPIC_DASH_CELLS {
+				qtrBufSwapped565[stripRowBase+mapCol*CELL_PX] = gridDotColor(cellRow, mapCol, gridDaySwapped565, gridNightSwapped565)
+			}
+		}
+		if (cellRow % MERIDIAN_DASH_ROWS) == 0 {
+			qtrBufSwapped565[stripRowBase+PRIME_MERIDIAN_CELL_COL*CELL_PX] = gridDotColor(cellRow, PRIME_MERIDIAN_CELL_COL, gridDaySwapped565, gridNightSwapped565)
+		}
+	}
+
+	tft_push_rgb565(0, MAP_Y+startRow, MAP_W, QTR_FRAME_ROWS, int(&qtrBufSwapped565[0]))
+}
+
+// Draw a compact (R=4) crescent moon oriented by waxSign (+1 waxing, -1 waning)
+// whose crescent thickness scales with illum while keeping a clear crescent bite.
+func drawMoonIcon(centerX int, centerY int, illum float32, waxSign int) {
+	biteCenterX := -waxSign * MOON_BITE_OFFSET_X
+	biteR2 := MOON_BITE_MIN_R2 + int((1.0-illum)*MOON_BITE_SPAN_R2)
+	for dy := -MOON_RADIUS; dy <= MOON_RADIUS; dy++ {
+		for dx := -MOON_RADIUS; dx <= MOON_RADIUS; dx++ {
+			outerR2 := dx*dx + dy*dy
+			biteDx := dx - biteCenterX
+			biteDy := dy - MOON_BITE_OFFSET_Y
+			biteDist2 := biteDx*biteDx + biteDy*biteDy
+			if outerR2 <= MOON_OUTER_R2 && biteDist2 > biteR2 {
+				color := WHITE
+				if outerR2 >= MOON_OUTER_R2-MOON_RIM_BAND_R2 || biteDist2 <= biteR2+MOON_RIM_BAND_R2 {
+					color = LIGHTGREY
+				}
+				tft_draw_fast_hline(centerX+dx, centerY+dy, 1, color)
+			}
+		}
+	}
+}
+
+func drawMapOverlays() {
+	if home.valid {
+		homeX := lonDegToScreenX(home.lonDeg)
+		homeY := latDegToScreenY(home.latDeg)
+		tft_draw_circle(homeX, homeY, HOME_RING_RADIUS, MAGENTA)
+		tft_fill_circle(homeX, homeY, HOME_CORE_RADIUS, RED)
+	}
+
+	drawMoonIcon(lonDegToScreenX(moon.subLonDeg), latDegToScreenY(moon.subLatDeg), moon.illum, moon.waxSign)
+
+	sunX := lonDegToScreenX(sun.subLonDeg)
+	sunY := latDegToScreenY(sun.subLatDeg)
+	tft_draw_line(sunX-SUN_RAY_ORTHO_LEN, sunY, sunX+SUN_RAY_ORTHO_LEN, sunY, ORANGE)
+	tft_draw_line(sunX, sunY-SUN_RAY_ORTHO_LEN, sunX, sunY+SUN_RAY_ORTHO_LEN, ORANGE)
+	tft_draw_line(sunX-SUN_RAY_DIAG_LEN, sunY-SUN_RAY_DIAG_LEN, sunX+SUN_RAY_DIAG_LEN, sunY+SUN_RAY_DIAG_LEN, YELLOW)
+	tft_draw_line(sunX-SUN_RAY_DIAG_LEN, sunY+SUN_RAY_DIAG_LEN, sunX+SUN_RAY_DIAG_LEN, sunY-SUN_RAY_DIAG_LEN, YELLOW)
+	tft_fill_circle(sunX, sunY, SUN_CORONA_RADIUS, ORANGE)
+	tft_fill_circle(sunX, sunY, SUN_DISC_RADIUS, YELLOW)
+	tft_fill_circle(sunX, sunY, SUN_CORE_RADIUS, WHITE)
+
+	if probe.active {
+		px := lonDegToScreenX(probe.lonDeg)
+		py := latDegToScreenY(probe.latDeg)
+		tft_draw_fast_hline(px-PROBE_ARM_LEN, py, PROBE_SPAN_LEN, CYAN)
+		tft_draw_fast_vline(px, py-PROBE_ARM_LEN, PROBE_SPAN_LEN, CYAN)
+		tft_draw_circle(px, py, PROBE_RING_RADIUS, WHITE)
+	}
+}
+
+// Restore a 17x17 pixel patch from lightBuf + mapData so moving/clearing the probe crosshair takes <1ms.
+func restoreMapPatch(centerX int, centerY int) {
+	x0 := clampInt(centerX-PATCH_HALF_PX, 0, MAP_W-1)
+	y0 := clampInt(centerY-PATCH_HALF_PX, MAP_Y, MAP_Y+MAP_H-1)
+	x1 := clampInt(centerX+PATCH_HALF_PX, 0, MAP_W-1)
+	y1 := clampInt(centerY+PATCH_HALF_PX, MAP_Y, MAP_Y+MAP_H-1)
+	w := x1 - x0 + 1
+	h := y1 - y0 + 1
+	idx := 0
+	for sy := y0; sy <= y1; sy++ {
+		cellRow := (sy - MAP_Y) / CELL_PX
+		lightRowOffset := cellRow * MAP_CELL_COLS
+		mapRowOffset := cellRow * PACKED_MAP_ROW_B
+		for sx := x0; sx <= x1; sx++ {
+			mapCol := sx / CELL_PX
+			cellType := unpackCellType(mapRowOffset, mapCol)
+			level := int(lightBuf[lightRowOffset+mapCol])
+			qtrBufSwapped565[idx] = palLutSwapped565[level*CELL_TYPE_COUNT+cellType]
+			idx++
+		}
+	}
+	tft_push_rgb565(x0, y0, w, h, int(&qtrBufSwapped565[0]))
+}
+
+func redrawMapFromCache() {
+	for qtrIdx := 0; qtrIdx < QTR_FRAME_COUNT; qtrIdx++ {
+		blitQuarterStrip(qtrIdx * QTR_FRAME_ROWS)
+		latchPendingClick()
+	}
+	drawMapOverlays()
+}
+
+func renderWorldMap() {
+	computeLightBuffer()
+	redrawMapFromCache()
+}
+
+// ----------------------------------------------------------------------------
+// 8. UI Chrome (Top Header, World City Strip & Bottom Control Bar)
+// ----------------------------------------------------------------------------
+
+func drawZeroPaddedPair(val int, screenX int, screenY int, font int) int {
+	if val < 10 {
+		screenX += tft_draw_string("0", screenX, screenY, font)
+	}
+	return screenX + tft_draw_int(val, screenX, screenY, font)
+}
+
+func drawFixedDigitPair(val int, screenX int, screenY int) {
+	tft_draw_int(val/10, screenX, screenY, FONT_MEDIUM)
+	tft_draw_int(val%10, screenX+HEADER_CLOCK_DIGIT_W, screenY, FONT_MEDIUM)
+}
+
+// Renders HH:MM:SS on a fixed 9px-per-digit grid so proportional '1' glyphs never cause jitter.
+func drawFixedClockHMS(hour int, min int, sec int, screenX int, screenY int) {
+	pairW := HEADER_CLOCK_DIGIT_W * 2
+	colonStep := pairW + HEADER_COLON_STEP + HEADER_COLON_OFFSET
+	tft_fill_rect(screenX, screenY, HEADER_CLOCK_BOX_W, FONT_MEDIUM_H, COLOR_BAR_BG)
+	drawFixedDigitPair(hour, screenX, screenY)
+	tft_draw_string(":", screenX+pairW+HEADER_COLON_OFFSET, screenY, FONT_MEDIUM)
+	drawFixedDigitPair(min, screenX+colonStep, screenY)
+	tft_draw_string(":", screenX+colonStep+pairW+HEADER_COLON_OFFSET, screenY, FONT_MEDIUM)
+	drawFixedDigitPair(sec, screenX+colonStep*2, screenY)
+}
+
+func parseTwoAsciiDigits(bufOffset int) int {
+	return (int(localBuf[bufOffset])-'0')*10 + (int(localBuf[bufOffset+1]) - '0')
+}
+
+func drawHeaderFrame() {
+	tft_fill_rect(0, 0, SCREEN_W, HEADER_H, COLOR_BAR_BG)
+	tft_draw_fast_hline(0, HEADER_H-1, SCREEN_W, COLOR_BORDER)
+	DrawExitWedge()
+
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(LIGHTGREY, COLOR_BAR_BG)
+	tft_draw_string("UTC", HEADER_UTC_LABEL_X, HEADER_TEXT_Y, FONT_MEDIUM)
+
+	// NE Help button (?)
+	btnH := HEADER_H - HEADER_BTN_PAD*2
+	tft_fill_round_rect(HEADER_HELP_X, HEADER_BTN_PAD, HEADER_HELP_W, btnH, BTN_CORNER_RADIUS, COLOR_BTN_BG)
+	tft_draw_round_rect(HEADER_HELP_X, HEADER_BTN_PAD, HEADER_HELP_W, btnH, BTN_CORNER_RADIUS, COLOR_BORDER)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(CYAN, COLOR_BTN_BG)
+	tft_draw_string("?", HEADER_HELP_X+HEADER_HELP_W/2, HEADER_H/2, FONT_MEDIUM)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawSimBadge(leftX int) {
+	tft_set_text_color(ORANGE, COLOR_BAR_BG)
+	leftX += tft_draw_string("SIM ", leftX, HEADER_TEXT_Y, FONT_MEDIUM)
+	offsetVal := state.simOffsetSec / SECS_PER_HOUR
+	unitStr := "h"
+	if offsetVal >= HOURS_PER_DAY || offsetVal <= -HOURS_PER_DAY {
+		offsetVal /= HOURS_PER_DAY
+		unitStr = "d"
+	}
+	if offsetVal > 0 {
+		leftX += tft_draw_string("+", leftX, HEADER_TEXT_Y, FONT_MEDIUM)
+	}
+	leftX += tft_draw_int(offsetVal, leftX, HEADER_TEXT_Y, FONT_MEDIUM)
+	tft_draw_string(unitStr, leftX, HEADER_TEXT_Y, FONT_MEDIUM)
+}
+
+func drawClockHM(hour int, min int, screenX int, screenY int, font int) {
+	sx := drawZeroPaddedPair(hour, screenX, screenY, font)
+	sx += tft_draw_string(":", sx, screenY, font)
+	drawZeroPaddedPair(min, sx, screenY, font)
+}
+
+func drawHeaderClocks(unixSec int) {
+	tft_set_text_datum(TL_DATUM)
+	leftX := CornerSize() + HEADER_LEFT_PAD
+	tft_fill_rect(leftX, HEADER_BTN_PAD, HEADER_SOL_BOX_X-leftX, HEADER_H-HEADER_BTN_PAD*2, COLOR_BAR_BG)
+
+	if state.simOffsetSec == 0 {
+		tft_set_text_color(CYAN, COLOR_BAR_BG)
+		leftX += tft_draw_string(os_get_airport(), leftX, HEADER_TEXT_Y, FONT_MEDIUM) + HEADER_LEFT_PAD
+		if os_format_local_time("%H:%M:%S", int(&localBuf[0]), LOCAL_TIME_FMT_MAX) != 0 {
+			tft_set_text_color(YELLOW, COLOR_BAR_BG)
+			drawFixedClockHMS(parseTwoAsciiDigits(HMS_HOUR_OFFSET), parseTwoAsciiDigits(HMS_MIN_OFFSET), parseTwoAsciiDigits(HMS_SEC_OFFSET), leftX, HEADER_TEXT_Y)
+		}
+	} else {
+		drawSimBadge(leftX)
+	}
+
+	utcSecOfDay := wrapSecondsOfDay(unixSec)
+	tft_set_text_color(WHITE, COLOR_BAR_BG)
+	drawFixedClockHMS(utcSecOfDay/SECS_PER_HOUR, (utcSecOfDay%SECS_PER_HOUR)/SECS_PER_MINUTE, utcSecOfDay%SECS_PER_MINUTE, HEADER_UTC_CLOCK_X, HEADER_TEXT_Y)
+
+	// Compact local solar time (SOL HH:MM) in the center gap; only redraws when the minute changes.
+	if home.valid {
+		solH, solM := computeLocalSolarHM(home.lonDeg)
+		solMinute := solH*SECS_PER_MINUTE + solM
+		if solMinute != state.lastSolMinute {
+			state.lastSolMinute = solMinute
+			tft_fill_rect(HEADER_SOL_BOX_X, HEADER_BTN_PAD, HEADER_SOL_BOX_W, HEADER_H-HEADER_BTN_PAD*2, COLOR_BAR_BG)
+			tft_set_text_color(ORANGE, COLOR_BAR_BG)
+			tft_draw_string("SOL", HEADER_SOL_LABEL_X, HEADER_SOL_LABEL_Y, FONT_SMALL)
+			tft_set_text_color(YELLOW, COLOR_BAR_BG)
+			drawClockHM(solH, solM, HEADER_SOL_TIME_X, HEADER_SOL_TIME_Y, FONT_SMALL)
+		}
+	}
+}
+
+func drawProbeBanner() {
+	screenX := PROBE_BANNER_PAD_X
+	tft_set_text_color(CYAN, COLOR_PANEL_BG)
+	screenX += tft_draw_string("LAT ", screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+	tft_set_text_color(WHITE, COLOR_PANEL_BG)
+	screenX += tft_draw_int(int(probe.latDeg), screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+	tft_set_text_color(CYAN, COLOR_PANEL_BG)
+	screenX += tft_draw_string("  LON ", screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+	tft_set_text_color(WHITE, COLOR_PANEL_BG)
+	screenX += tft_draw_int(int(probe.lonDeg), screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+	tft_set_text_color(YELLOW, COLOR_PANEL_BG)
+	screenX += tft_draw_string("  SOL ", screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+	drawClockHM(probe.hour, probe.min, screenX, PROBE_BANNER_TEXT_Y, FONT_MEDIUM)
+
+	// Clear [X] dismiss button on the right edge of the probe banner
+	closeX := SCREEN_W - CITY_ARROW_W - PROBE_CLOSE_PAD_X
+	closeH := CITY_H - 3
+	tft_fill_rect(closeX, CITY_Y+HEADER_BTN_PAD, PROBE_CLOSE_W, closeH, COLOR_BTN_BG)
+	tft_draw_rect(closeX, CITY_Y+HEADER_BTN_PAD, PROBE_CLOSE_W, closeH, COLOR_BORDER)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(WHITE, COLOR_BTN_BG)
+	tft_draw_string("X", closeX+PROBE_CLOSE_W/2, CITY_Y+CITY_H/2, FONT_MEDIUM)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawCityArrow(screenX int, label string, enabled bool) {
+	bg := COLOR_PANEL_BG
+	fg := DARKGREY
+	if enabled {
+		bg = COLOR_BTN_BG
+		fg = CYAN
+	}
+	tft_fill_rect(screenX, CITY_Y+1, CITY_ARROW_W, CITY_H-1, bg)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(fg, bg)
+	tft_draw_string(label, screenX+CITY_ARROW_W/2, CITY_Y+CITY_H/2, FONT_MEDIUM)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawCityStrip(unixSec int) {
+	tft_fill_rect(0, CITY_Y, SCREEN_W, CITY_H, COLOR_PANEL_BG)
+	tft_draw_fast_hline(0, CITY_Y, SCREEN_W, COLOR_BORDER)
+	tft_set_text_datum(TL_DATUM)
+
+	if probe.active && os_millis() < probe.untilMs {
+		drawProbeBanner()
+		return
+	}
+	probe.active = false
+
+	drawCityArrow(0, "<", state.cityPage > 0)
+	drawCityArrow(SCREEN_W-CITY_ARROW_W, ">", state.cityPage < CITY_PAGE_COUNT-1)
+
+	pageBaseIdx := state.cityPage * CITIES_PER_PAGE
+	for slot := 0; slot < CITIES_PER_PAGE; slot++ {
+		cityIdx := pageBaseIdx + slot
+		cardX := CITY_ARROW_W + slot*CITY_CARD_W
+		tft_draw_fast_vline(cardX, CITY_Y+1, CITY_H-1, COLOR_BORDER)
+
+		sinAlt := solarSinAltitude(cities[cityIdx].latDeg, cities[cityIdx].lonDeg)
+		dotColor := BLUE
+		if sinAlt > SOLAR_DAY_SIN_ALT {
+			dotColor = YELLOW
+		} else if sinAlt > SOLAR_TWILIGHT_SIN_ALT {
+			dotColor = ORANGE
+		}
+		tft_fill_circle(cardX+CITY_DOT_OFFSET_X, CITY_Y+CITY_DOT_OFFSET_Y, CITY_DOT_RADIUS, dotColor)
+
+		citySecOfDay := wrapSecondsOfDay(unixSec + cities[cityIdx].utcOffsetMin*SECS_PER_MINUTE)
+		for c := 0; c < CITY_CODE_LEN; c++ {
+			tft_draw_char(cardX+CITY_TEXT_OFFSET_X+c*FONT_SMALL_CHAR_W, CITY_Y+CITY_CODE_OFFSET_Y, int(cityCodeChars[cityIdx*CITY_CODE_STRIDE+c]), LIGHTGREY, COLOR_PANEL_BG, FONT_SMALL)
+		}
+		tft_set_text_color(WHITE, COLOR_PANEL_BG)
+		drawClockHM(citySecOfDay/SECS_PER_HOUR, (citySecOfDay%SECS_PER_HOUR)/SECS_PER_MINUTE, cardX+CITY_TEXT_OFFSET_X, CITY_Y+CITY_TIME_OFFSET_Y, FONT_SMALL)
+	}
+	tft_draw_fast_vline(SCREEN_W-CITY_ARROW_W, CITY_Y+1, CITY_H-1, COLOR_BORDER)
+}
+
+func drawPillButtonStyled(screenX int, screenY int, w int, h int, bgColor int, borderColor int, textColor int, textOffset int, label string) {
+	tft_fill_round_rect(screenX, screenY, w, h, PILL_CORNER_RADIUS, bgColor)
+	tft_draw_round_rect(screenX, screenY, w, h, PILL_CORNER_RADIUS, borderColor)
+	tft_set_text_datum(MC_DATUM)
+	tft_set_text_color(textColor, bgColor)
+	tft_draw_string(label, screenX+w/2+textOffset, screenY+h/2+textOffset, FONT_MEDIUM)
+	tft_set_text_datum(TL_DATUM)
+}
+
+func drawPillButton(screenX int, screenY int, w int, h int, bgColor int, label string) {
+	drawPillButtonStyled(screenX, screenY, w, h, bgColor, COLOR_BORDER, WHITE, 0, label)
+}
+
+func drawPillButtonPressed(screenX int, screenY int, w int, h int, label string) {
+	drawPillButtonStyled(screenX, screenY, w, h, COLOR_BTN_PRESSED, DARKGREY, LIGHTGREY, 1, label)
+}
+
+func isSimActive() bool {
+	return state.simOffsetSec != 0 || state.playing
+}
+
+func liveButtonLabel() string {
+	if isSimActive() {
+		return "NOW"
+	}
+	return "LIVE"
+}
+
+func drawControlBar() {
+	tft_fill_rect(0, CTRL_Y, SCREEN_W, CTRL_H+1, COLOR_BAR_BG)
+	tft_draw_fast_hline(0, CTRL_Y, SCREEN_W, COLOR_BORDER)
+
+	drawPillButton(CTRL_M4H_X, CTRL_BTN_Y, CTRL_BTN_W, CTRL_BTN_H, COLOR_BTN_BG, "-4H")
+	drawPillButton(CTRL_M1H_X, CTRL_BTN_Y, CTRL_BTN_W, CTRL_BTN_H, COLOR_BTN_BG, "-1H")
+
+	liveBg := COLOR_BTN_LIVE
+	if isSimActive() {
+		liveBg = COLOR_BTN_SIM
+	}
+	drawPillButton(CTRL_LIVE_X, CTRL_BTN_Y, CTRL_LIVE_W, CTRL_BTN_H, liveBg, liveButtonLabel())
+
+	drawPillButton(CTRL_P1H_X, CTRL_BTN_Y, CTRL_BTN_W, CTRL_BTN_H, COLOR_BTN_BG, "+1H")
+	drawPillButton(CTRL_P4H_X, CTRL_BTN_Y, CTRL_BTN_W, CTRL_BTN_H, COLOR_BTN_BG, "+4H")
+
+	playBg := COLOR_BTN_BG
+	playLabel := "PLAY"
+	if state.playing {
+		playBg = COLOR_BTN_STOP
+		playLabel = "STOP"
+	}
+	drawPillButton(CTRL_PLAY_X, CTRL_BTN_Y, CTRL_PLAY_W, CTRL_BTN_H, playBg, playLabel)
+}
+
+// ----------------------------------------------------------------------------
+// 9. Touch Input Dispatch
+// ----------------------------------------------------------------------------
+
+func handleControlBarTap(screenX int) (bool, bool) {
+	if screenX >= CTRL_PLAY_X-TOUCH_HIT_PAD {
+		state.playing = !state.playing
+		if state.playing {
+			state.lastPlayMs = os_millis() - PLAY_PERIOD_MS
+			// Show PLAY pushed-in while the first frame renders; drawControlBar() then raises STOP.
+			drawPillButtonPressed(CTRL_PLAY_X, CTRL_BTN_Y, CTRL_PLAY_W, CTRL_BTN_H, "PLAY")
+			return false, true
+		}
+		drawControlBar()
+		return false, false
+	}
+
+	wasPlaying := state.playing
+	state.playing = false
+	if wasPlaying {
+		drawPillButton(CTRL_PLAY_X, CTRL_BTN_Y, CTRL_PLAY_W, CTRL_BTN_H, COLOR_BTN_BG, "PLAY")
+	}
+
+	btnX := CTRL_P4H_X
+	btnW := CTRL_BTN_W
+	btnLabel := "+4H"
+	if screenX < CTRL_M1H_X-TOUCH_HIT_PAD {
+		state.simOffsetSec -= SIM_STEP_4H_SEC
+		btnX = CTRL_M4H_X
+		btnLabel = "-4H"
+	} else if screenX < CTRL_LIVE_X-TOUCH_HIT_PAD {
+		state.simOffsetSec -= SECS_PER_HOUR
+		btnX = CTRL_M1H_X
+		btnLabel = "-1H"
+	} else if screenX < CTRL_P1H_X-TOUCH_HIT_PAD {
+		if state.simOffsetSec == 0 {
+			if wasPlaying {
+				drawControlBar()
+			}
+			return false, false
+		}
+		state.simOffsetSec = 0
+		btnX = CTRL_LIVE_X
+		btnW = CTRL_LIVE_W
+		btnLabel = "NOW"
+	} else if screenX < CTRL_P4H_X-TOUCH_HIT_PAD {
+		state.simOffsetSec += SECS_PER_HOUR
+		btnX = CTRL_P1H_X
+		btnLabel = "+1H"
+	} else {
+		state.simOffsetSec += SIM_STEP_4H_SEC
+	}
+	// Show immediate sunken/pressed state while the map re-renders; drawControlBar() releases it afterward.
+	drawPillButtonPressed(btnX, CTRL_BTN_Y, btnW, CTRL_BTN_H, btnLabel)
+	return true, true
+}
+
+func showSolarProbeAt(latDeg float32, lonDeg float32, nowMs int) {
+	probe.lonDeg = lonDeg
+	probe.latDeg = latDeg
+	solH, solM := computeLocalSolarHM(lonDeg)
+	probe.hour = solH
+	probe.min = solM
+	probe.active = true
+	probe.untilMs = nowMs + PROBE_DISPLAY_MS
+}
+
+func handleCityStripTap(screenX int, nowMs int) bool {
+	// Tapping anywhere on the active probe banner (including [X]) dismisses it and clears its crosshair instantly.
+	if probe.active {
+		clearProbeOverlay()
+		return true
+	}
+	if screenX < CITY_ARROW_W {
+		if state.cityPage > 0 {
+			state.cityPage--
+		}
+		return true
+	}
+	if screenX >= SCREEN_W-CITY_ARROW_W {
+		if state.cityPage < CITY_PAGE_COUNT-1 {
+			state.cityPage++
+		}
+		return true
+	}
+	slot := clampInt((screenX-CITY_ARROW_W)/CITY_CARD_W, 0, CITIES_PER_PAGE-1)
+	cityIdx := state.cityPage*CITIES_PER_PAGE + slot
+	showSolarProbeAt(cities[cityIdx].latDeg, cities[cityIdx].lonDeg, nowMs)
+	drawMapOverlays()
+	return true
+}
+
+func waitForTouchState(wantPressed bool) {
+	for {
+		touched, _, _ := os_read_touch()
+		if touched == wantPressed {
+			return
+		}
+		os_delay_ms(TOUCH_POLL_MS)
+	}
+}
+
+func drawHelpLegendDot(screenX int, radius int, color int, ringColor int, label string) int {
+	tft_fill_circle(screenX, HELP_LEGEND_DOT_Y, radius, color)
+	if ringColor >= 0 {
+		tft_draw_circle(screenX, HELP_LEGEND_DOT_Y, radius+1, ringColor)
+	}
+	labelW := tft_draw_string(label, screenX+HELP_LEGEND_GAP_X, HELP_LEGEND_TEXT_Y, FONT_SMALL)
+	return screenX + HELP_LEGEND_GAP_X + labelW + HELP_LEGEND_PAD_X
+}
+
+func showHelpModal() {
+	modalW := SCREEN_W - HELP_MARGIN_X*2
+	modalH := MAP_H - HELP_MARGIN_Y*2
+	tft_fill_rect(HELP_MARGIN_X, MAP_Y+HELP_MARGIN_Y, modalW, modalH, COLOR_PANEL_BG)
+	tft_draw_round_rect(HELP_MARGIN_X, MAP_Y+HELP_MARGIN_Y, modalW, modalH, PILL_CORNER_RADIUS+2, CYAN)
+
+	tft_set_text_datum(TL_DATUM)
+	tft_set_text_color(YELLOW, COLOR_PANEL_BG)
+	tft_draw_string("WORLD SUN CLOCK - GUIDE", HELP_TEXT_X, HELP_TITLE_Y, FONT_MEDIUM)
+
+	tft_set_text_color(WHITE, COLOR_PANEL_BG)
+	tft_draw_string("Tap Map or City: Lat/Lon & Solar Time", HELP_TEXT_X, HELP_LINE_START_Y, FONT_SMALL)
+	tft_draw_string("Tap < / >: Page 12 World Cities (W to E)", HELP_TEXT_X, HELP_LINE_START_Y+HELP_LINE_STEP_Y, FONT_SMALL)
+	tft_draw_string("-4H/-1H/+1H/+4H: Step Time", HELP_TEXT_X, HELP_LINE_START_Y+HELP_LINE_STEP_Y*2, FONT_SMALL)
+	tft_draw_string("LIVE / NOW: Snap Back to Real UTC Time", HELP_TEXT_X, HELP_LINE_START_Y+HELP_LINE_STEP_Y*3, FONT_SMALL)
+	tft_draw_string("PLAY / STOP: Animate Solar Terminator", HELP_TEXT_X, HELP_LINE_START_Y+HELP_LINE_STEP_Y*4, FONT_SMALL)
+
+	tft_set_text_color(CYAN, COLOR_PANEL_BG)
+	lx := HELP_TEXT_X + tft_draw_string("Map:", HELP_TEXT_X, HELP_LEGEND_TEXT_Y, FONT_SMALL) + HELP_LEGEND_GAP_X
+	tft_set_text_color(LIGHTGREY, COLOR_PANEL_BG)
+	drawMoonIcon(lx, HELP_LEGEND_DOT_Y, HELP_MOON_ILLUM, -1)
+	lx += HELP_LEGEND_GAP_X + tft_draw_string("Moon", lx+HELP_LEGEND_GAP_X, HELP_LEGEND_TEXT_Y, FONT_SMALL) + HELP_LEGEND_PAD_X
+	lx = drawHelpLegendDot(lx, HOME_CORE_RADIUS, RED, MAGENTA, "Home")
+	tft_set_text_color(CYAN, COLOR_PANEL_BG)
+	lx += tft_draw_string("Cities:", lx, HELP_LEGEND_TEXT_Y, FONT_SMALL) + HELP_LEGEND_GAP_X
+	tft_set_text_color(LIGHTGREY, COLOR_PANEL_BG)
+	lx = drawHelpLegendDot(lx, CITY_DOT_RADIUS, YELLOW, -1, "Day")
+	lx = drawHelpLegendDot(lx, CITY_DOT_RADIUS, ORANGE, -1, "Dusk")
+	drawHelpLegendDot(lx, CITY_DOT_RADIUS, BLUE, -1, "Night")
+
+	drawPillButton(HELP_BTN_X, HELP_BTN_Y, HELP_BTN_W, HELP_BTN_H, COLOR_BTN_SIM, "GOT IT")
+
+	// Wait for the '?' tap to release, then dismiss immediately on the next tap.
+	waitForTouchState(false)
+	waitForTouchState(true)
+	waitForTouchState(false)
+	// Drain any click latched by the modal dismissal tap before returning.
+	os_read_click()
+	state.pendingClick = false
+
+	// Redraw the map instantaneously from the already-computed lightBuf (no recompute).
+	redrawMapFromCache()
+}
+
+func pollTouchEvents(nowMs int) (bool, bool, bool) {
+	latchPendingClick()
+	if !state.pendingClick {
+		return false, false, false
+	}
+	state.pendingClick = false
+	screenX := state.pendingX
+	screenY := state.pendingY
+
+	if screenY < HEADER_H && screenX >= HEADER_HELP_X {
+		showHelpModal()
+		return false, false, false
+	}
+	if screenY >= CTRL_Y {
+		needMap, needCtrl := handleControlBarTap(screenX)
+		return needMap, needCtrl, false
+	}
+	if screenY >= CITY_Y {
+		needCity := handleCityStripTap(screenX, nowMs)
+		return false, false, needCity
+	}
+	if screenY >= MAP_Y && screenY < MAP_Y+MAP_H {
+		if probe.active {
+			restoreMapPatch(lonDegToScreenX(probe.lonDeg), latDegToScreenY(probe.latDeg))
+		}
+		showSolarProbeAt(screenYToLatDeg(screenY), screenXToLonDeg(screenX), nowMs)
+		drawMapOverlays()
+		return false, false, true
+	}
+	return false, false, false
+}
+
+// ----------------------------------------------------------------------------
+// 10. Visual 160x80 ASCII World Map Asset (80 latitude rows x 160 columns)
+//    ' ' / '~' / '.' = Deep / Mid / Shallow Ocean
+//    'F' / 'W' / 'g' / 's' / 'D' / 'h' / 'M' / 't' / '*' =
+//        Forest, Woodland, Grassland, Scrub, Desert, Foothills, Mountain, Tundra, Ice
+//    '1' / '2' / '3' = City-Light Halo / Mid / Core rings
+// ----------------------------------------------------------------------------
+
+const WORLD_MAP = "
+                           ~~~~~~~~~~~           ~~..*****************t..~~                                     ~~~~~~~~~~........~~~~~~~~                      
+                          ~~.........~~  ~~~~~~~~~..*******************t..~                                  ~~~~........................~~~~~~~~               
+      ~~~~~~~~~~~~~~~~~~~~~...........~~~~........~..******************..~~            ~~~~~~~~~          ~~~~............ttsshtsg..............~~~~~~~~~~      
+     ~~.....................**ttt****..~~..........~..***************...~~            ~~.......~~~~~~~~~~~~......htttttttttttttttsggstttt................~~~~~  
+    ~~......................tttsttttt.....****tttt..~..*************...~~~~          ~~.......................sstttttttttttttttttttttttttttttttt.............~~~
+~  ~~..ttttssttttttttttttttt...............tttttttt..~..**********........~~       ~~~..ggggggg............gshhtttttttttttttttttttttttttttttttttttttttttt......~
+~~~~..tttthsgstttssttttttttthhtthshhsssstt..ttttttt*....*********..........~~     ~~...WWggggggggggggggWWWggsttthtttttttttttttttttttttttttttttttttttttttttsst...
+.~~..tttthhsggshsgggshttttttsshhhsgggggght....tttt...~..********..~..**tsg..~    ~~...WWWWgggggggggggggWWWggghtthhhtsggsttttttttttttthggssshtttttttttttttsggstt.
+~~~~..tsgghMMMMggggggMMMMMMMgggMMggggggg...~........~~..t******..~~~.......~~~~~~~..FFFWW.WWgWWWWggggWWWFWWggMMtMMgggggggtttMMttMMttMgggggggMMttsstttttssgggg...
+~  ~..sggggMMggggggggMMMMMggWWWWWWWgggW...~..WWWM....~~..tttt...~~ ~~.....~~~..~~..WFFFFF.FF121WWWggWWWFFFWWWgMMMgWWWWWWWgMgWWgMMMMMgWWggWWWWWggggstttsggggg...~
+   ~~..ggggg......ggMMMMMMgWWWWFFFWWWW.......FFFWttg..~~.......~~   ~~~~~~~~....~..FFFFF..FF1231WWWWWFFFFFFFWWWggWWWWWWWWWFFFWFWMMWWWFWWWWFFWggggggsssggggg..~~~
+    ~~..gg..........gMMMMMMMMgWFFFFFFFFF.....FFFFFWFF..~~....~~~          ~..gg..~..FFF...FFF12321FWFFFFFFFFFWFWWFFFFFFFFFFFFFFFWWWFFFFFFFFFWgggggggggggg...~~  
+     ~~.....~~~~~~...ggMMMMMMMWWWWFFFFFFFFWW.FFFFFFFFW..~~~~~~           ~~...21....FFFFFFFFFFF121FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFWggggggggggg...~~   
+      ~~..~~~    ~~~..gggMMMMMgWWWWFFFFFFFFFFFFFFFFFFWW..~               ~..g.331..2F21F12FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFWWFFFFFFFFFFFFFFFWWWg..gggggg..~~~    
+       ~~~~        ~~...g1MMMMMggWWFFFFFFFFFFFFFFFFFFWW..~               ~~...122233113F22FFF2FFFFFFFFWWWWFFFFFFFFFWWWFFFWWWWFFFFFFFFFFFFFWWWW..........~~      
+                    ~~...3MMMMMgggWWWFFFFFFFFFFFFFWWFW..~~                ~~...123222W2211FFF1FFFFFFFWWWWWWWWWFFWFWgsgWWWWWWWWWWWWWWFFFFFFWWWW..~......~~       
+                     ~~..3gMMMMMMggWWWFFFFFFFF11FWWWWW..~                  ~..FF11W111g23WFWWWWFWWWWWW.ggWWWWWWWWWWsssgggggggggggggWWWWWWWWWW...~~~~~~~~        
+                      ~..2ggMMMMMMggWW3FFF1121321WWW...~~                 ~~...FWW13331ggWWWW....MM..gggggWWgggggggsDDsssssssggggggggWWWggWW.....~~             
+                      ~..ggggMMMMMgggWWF1233311231....~~                 ~~....111...31ggggg1......MMMggggggggggggssDDDDsDDDDssgsggggggggggW..gg..~             
+                      ~..ggggMMMM1ggggWF22211123....~~~                  ~..21333.....3ggggg2321gMMMgMMhgggggggggssssDDDDDDDDDsssgg21gggggg...g..~~             
+                      ~..1gggMMMM3ggggWFFFFF133...~~~                    ~..1g11.......g.g1.1121gggggshssssgsssggsssssshhhhhhsssggg2...g1gg...g..~              
+                      ~~..1sghMMMgggggWFFFF1111..~~                      ~..ggs.............gggggggsss11DDssssshghhhhhhMMMMMhhssgg112...32...22..~              
+                       ~..121h1hhgggggWWFF232W..~~                       ~~..23311ssD...........1ggsDD22DDDssDshMMMMMMMMMMMMMMhss1333......233..~~              
+                       ~~..3212sssgg22WWWW21W..~~                       ~~..211ssssDD...........1gssDD22DDDDDDDh11gMMMMMMMMMMM1ssg1122....g1...~~               
+                        ~~...DDDssgg22WWgggg..~~                        ~..ssgsssDDDDDDssssss22.ssssDD11DDDDDDD1321ggMMMMMMMM131gg2123..~.....~~                
+                         ~~...DDDssg121g...2..~                        ~~..sssssDDDDDDDDDDDDD21.ssDDD..DDDDDDD1322321gggggMMMM22g131g1..~~..~~~                 
+                          ~~..Dssss1gg.....3..~~                       ~..ssssDDDDDDDDDDDDDDD13ssDDDD12..DDDD132s123321gggggMMgWW11ggg..~~~~~                   
+                           ~~..sss12g...~~.....~~                      ~..sDDDDDDDDDDDDDDDDDDD2D.DDD2323......2sgg1233211gggWWWWW11gg2..~                       
+                            ~~..ss31g....~~.....~~                    ~~..DDDDDDDDDDDDDDDDDDDDDDDDDD1Ds11D.....ggggg123331gWWWWWW131W3..~                       
+                             ~..s1211.....~..gg..~                    ~..DDDDDDDDDDDDDDDDDDDDDDDD.DDDsssss..~~..1ggggg1..1WWWFFWWW.....~~                       
+                             ~~..ss23gggg..~....~~                    ~..DDDDDDDDsssDDDDDDDDDDDDD.sDDssss..~~~..31gggg....WFWWFF.......~~                       
+                              ~~....1gggg...~..~~~~                  ~~..DDDDDDDDssssDDsssDDDDDDDs.sssss..~~ ~~..1ggg..~~..FFFFF..~~~...~~                      
+                               ~~.....ggggg..~~...~~~~               ~..sssDDDssssssssssssssDDDDDs.ssss..~~   ~..g11..~~~..F21FF..~~..1..~                      
+                                ~~~~....ggg..........~~              ~~..sssDssssssssssggggssssssss.....~~    ~..13..~~ ~..F21FF..~~..W..~                      
+                                   ~~~...gg....gg1....~~              ~..gggssggggs1ggggggggssssggsssss..~    ~~..1..~~ ~..FF.F..~~~..W..~~                     
+                                     ~~~...g.ggggg1gg..~~~            ~~..WWWWWWW123gggggggggggggggsss..~~     ~~..g..~ ~~..F...~~~...FF..~                     
+                                       ~~....M2Mgggggg...~~            ~~..WWWFW1321WWgggWgggggggggss..~~       ~..g..~  ~..FF..~~....FF..~                     
+                                        ~~~..M22gggggWW...~~~           ~~........FFFFWWWWWWWggggggg..~~        ~~...~~ ~~..F1.....FF....~~                     
+                                         ~~..MM1WWWWWWWWW...~~~          ~~.........FFFFFFFWWggggggg..~          ~~.~~  ~..F.3....FFF...~~~~~~~~                
+                                         ~..MMMMWWWWWWWWWg....~~          ~~~~~~~~..FFFFFFFFWg21ggg..~~           ~~~   ~..FF...FFFF....~~~....~~               
+                                         ~..MMMMWWFFFFFFWggg...~~                ~~..FFFFFFFWg133gg..~                  ~~..F....FFF.FF..~......~~              
+                                         ~..MMMMMWWFFFFFWggggg..~~                ~..FFFFFFFWWgg1g..~~                   ~~..F...FFF.F..~..FFFW..~~             
+                                         ~..gMMMMWWFFFFFWWggggg..~~               ~..FFFFFFFWWgggg..~                     ~~..F......F..~~..FFFW..~~            
+                                         ~~..gMMMMWFFFFWWWWggggg..~               ~..FFFFFFWWWWggg..~~~                    ~~..23......~~~~...WWW..~~           
+                                          ~~..MMMMWFFFWWWWWggggg..~               ~~..WWWWWWWWWggg..~.~~                    ~~....~~~.~~~~......gW..~           
+                                           ~..gMMMgWFFFWWWWggggg..~                ~..gggWWWWWWggg.....~~                    ~~..~~ ~~~~...........~~           
+                                           ~~..MMMgWWWWWWWWgggg..~~                ~..gggggggWggg....g..~                     ~~~~  ~~~...ggg.gg..~~            
+                                            ~~..MMhggWWWWWggggg..~                 ~..gggggssgggg...gg..~                          ~~...gggggggg..~~            
+                                             ~~..hsgggWWWgggggg..~                 ~..gggssssgggg...gg..~                         ~~...sssssggggg..~            
+                                              ~..hgggggggggggg..~~                 ~..gssssssggg....gg..~                        ~~..sDDDssssssgg..~~           
+                                              ~..gggggggggg111..~                  ~..gssDssgggg....g..~~                       ~~..ssDDDDsssDDsgg..~~          
+                                              ~..ggggggggg133..~~                  ~..ssDDsggggg....g..~                       ~~..gsDDDDDDDDDDsggg..~~         
+                                             ~~..hgggggggg1...~~                   ~~..ssssg2gg..~..g..~                       ~..ggsDDDDDDDDDDsgggg..~         
+                                             ~..hhsggggggg...~~                     ~..ssssg2gg..~~...~~                       ~..gssDsssDDDDDDDsgg1..~         
+                                             ~..MMhggggggg..~~                      ~..ssggggg..~~~~.~~                        ~~..sssssssDDDDDssgg2..~         
+                                             ~..MMhgggggg..~~                       ~~..ggggg..~~  ~~~                          ~..sggggggssDssssgg..~~     ~~~~
+~                                            ~..3MMgg111g..~                         ~..1ggg..~~                                ~..ggg......sssggg1..~     ~~..~
+~~                                           ~..1Mhsg232..~~                         ~~......~~                                 ~~...........321gg1..~    ~~....
+.~                                           ~..MMsssg...~~                           ~~....~~                                   ~~...~~~~~~..232g..~~    ~..gg.
+~~                                          ~~..Mhsss...~~                             ~~~~~~                                     ~~~~~    ~~......~~    ~~..g..
+~                                           ~..MMhss..~~~                                                                                   ~~....~~    ~~..g..~
+                                            ~..MMhs..~~                                                                                      ~..g..~   ~~..g..~~
+                                            ~..gMhs..~                                                                                       ~~...~~   ~..g..~~ 
+                                            ~..ghs..~~                                                                                        ~~.~~    ~~...~~  
+                                            ~..ggs..~                                                                                          ~~~      ~~.~~   
+                                            ~~..gg..~                                                                                                    ~~~    
+                                             ~..gg..~                                                                                                           
+                                             ~~....~~                                                                                                           
+                                              ~~..~~                                                                                                            
+                                               ~~~~~~~~~~                                                                                                       
+                                             ~~~~~......~~                                                                                                      
+                                         ~~~~~...........~~~                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~             
+~~~~~                                ~~~~~........tttttt...~~              ~~~~~~~~~~~~~~~........................................................~~~~~~~      ~
+....~~~~~~~~~~            ~~~~~~~~~~~~........***********...~~    ~~~~~~~~~~............................................................................~~~~~~~~
+.............~~~~~~~~~~~~~~...............*****************..~~~~~~.......................********************************************************..............
+t***..................................**********************................****************************************************************************........
+s************..............**********************************......********************************************************************************************t
+st*************************************************************************************************************************************************************t
+st*************************************************************************************************************************************************************t
+stt***tt*********ttt**tttttt**************tttt**************tttttt*************ttttt**************ttttt***tt*********tt***tttttt*************ttttt*************t
+"
