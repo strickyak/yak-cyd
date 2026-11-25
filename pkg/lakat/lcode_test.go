@@ -1773,6 +1773,93 @@ func TestClearSubApps(t *testing.T) {
 	}
 }
 
+func TestSunClockApp(t *testing.T) {
+	srcBytes, err := os.ReadFile("../../apps/sunclock/sunclock.lgolf")
+	if err != nil {
+		t.Fatalf("ReadFile(sunclock.lgolf): %v", err)
+	}
+	lapp, asmText, err := CompileToLapp("World Sun Clock", string(srcBytes))
+	if err != nil {
+		t.Fatalf("CompileToLapp: %v\nASM:\n%s", err, asmText)
+	}
+
+	vm, err := NewVM(lapp)
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	vm.MaxInstructions = 25000000
+
+	// Helper to append a click followed by 4 idle frames (4 * 45ms = 180ms >= CLICK_DEBOUNCE_MS).
+	addClick := func(x, y int) {
+		vm.TouchQueue = append(vm.TouchQueue,
+			TouchEvent{Touched: true, X: x, Y: y},
+			TouchEvent{Touched: false},
+			TouchEvent{Touched: false},
+			TouchEvent{Touched: false},
+			TouchEvent{Touched: false},
+		)
+	}
+
+	// 1. Tap map at (160, 104) -> show solar probe crosshair & banner
+	addClick(160, 104)
+	// 2. Tap map at (200, 80) -> move crosshair instantaneously via restoreMapPatch()
+	addClick(200, 80)
+	// 3. Tap [X] on probe banner (310, 198) -> dismiss probe & restore city strip
+	addClick(310, 198)
+	// 4. Tap '>' city page arrow (310, 198) -> advance city page 0 -> 1
+	addClick(310, 198)
+	// 5. Tap '+1H' (186, 226) -> step simulation +1h
+	addClick(186, 226)
+	// 6. Tap 'PLAY' (290, 226) -> start animation, then tap 'STOP' (290, 226) mid-render
+	addClick(290, 226)
+	vm.TouchQueue = append(vm.TouchQueue, TouchEvent{Touched: true, X: 290, Y: 226})
+	// 7. Tap 'NOW' (132, 226) -> snap back to live UTC
+	addClick(132, 226)
+	// 8. Tap '?' help button (308, 12) -> waitForTouchState(false -> true -> false) -> dismiss
+	vm.TouchQueue = append(vm.TouchQueue,
+		TouchEvent{Touched: true, X: 308, Y: 12},
+		TouchEvent{Touched: false},
+		TouchEvent{Touched: true, X: 160, Y: 160},
+		TouchEvent{Touched: false},
+		TouchEvent{Touched: false},
+		TouchEvent{Touched: false},
+		TouchEvent{Touched: false},
+		TouchEvent{Touched: false},
+		// 9. Tap NW Exit Wedge (2, 2) -> exit app cleanly
+		TouchEvent{Touched: true, X: 2, Y: 2},
+	)
+
+	if _, err := vm.Run(); err != nil {
+		t.Fatalf("VM Run: %v", err)
+	}
+	if vm.Running {
+		t.Fatalf("sunclock app did not exit cleanly")
+	}
+
+	// Verify map region (y = 24..183) rendered rich day/twilight/night/biome colors
+	distinctMapColors := make(map[uint16]bool)
+	for y := 24; y < 184; y++ {
+		for x := 0; x < 320; x++ {
+			distinctMapColors[vm.Screen[y][x]] = true
+		}
+	}
+	if len(distinctMapColors) < 25 {
+		t.Fatalf("expected >= 25 distinct RGB565 colors in rendered world map, got %d", len(distinctMapColors))
+	}
+
+	// Verify '>' page tap advanced to page 1 (enabling the '<' arrow background to COLOR_BTN_BG = 0x18E5)
+	if got := vm.Screen[190][2]; got != 0x18E5 {
+		t.Fatalf("expected enabled '<' arrow bg 0x18E5 on city page 1, got 0x%04X", got)
+	}
+	// Verify 'NOW' tap snapped back to LIVE (COLOR_BTN_LIVE = 0x03A0) and stopped PLAY (COLOR_BTN_BG = 0x18E5)
+	if got := vm.Screen[220][110]; got != 0x03A0 {
+		t.Fatalf("expected LIVE button bg 0x03A0 after NOW tap, got 0x%04X", got)
+	}
+	if got := vm.Screen[220][270]; got != 0x18E5 {
+		t.Fatalf("expected PLAY button bg 0x18E5 after NOW stopped PLAY, got 0x%04X", got)
+	}
+}
+
 
 
 
